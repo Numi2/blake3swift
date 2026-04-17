@@ -455,26 +455,12 @@ public enum BLAKE3Metal {
                     throw BLAKE3Error.metalCommandFailed("Staging buffer belongs to a different Metal device.")
                 }
 
-                try input.withUnsafeBytes { raw in
-                    inputLength = raw.count
-                    guard raw.count <= privateBuffer.capacity else {
-                        throw BLAKE3Error.metalCommandFailed(
-                            "Input length \(raw.count) exceeds private buffer capacity \(privateBuffer.capacity)."
-                        )
-                    }
-                    guard raw.count <= stagingBuffer.capacity else {
-                        throw BLAKE3Error.metalCommandFailed(
-                            "Input length \(raw.count) exceeds staging buffer capacity \(stagingBuffer.capacity)."
-                        )
-                    }
-                    guard raw.count > 0 else {
-                        return
-                    }
-                    guard let baseAddress = raw.baseAddress else {
-                        throw BLAKE3Error.metalCommandFailed("Input bytes are unavailable.")
-                    }
-                    stagingBuffer.buffer.contents().copyMemory(from: baseAddress, byteCount: raw.count)
-                }
+                inputLength = try copyInputToStaging(
+                    input,
+                    stagingBuffer: stagingBuffer,
+                    maximumByteCount: privateBuffer.capacity,
+                    maximumLabel: "private buffer"
+                )
 
                 guard inputLength > 0 else {
                     privateBuffer.length = 0
@@ -968,18 +954,40 @@ public enum BLAKE3Metal {
             workspace asyncWorkspace: AsyncWorkspace
         ) async throws -> BLAKE3.Digest {
             stagingBuffer.lockForAsyncUse()
-            defer {
+            do {
+                guard stagingBuffer.buffer.device.registryID == device.registryID else {
+                    throw BLAKE3Error.metalCommandFailed("Staging buffer belongs to a different Metal device.")
+                }
+                guard asyncWorkspace.deviceRegistryID == device.registryID else {
+                    throw BLAKE3Error.metalCommandFailed("Async workspace belongs to a different Metal device.")
+                }
+                let inputLength = try copyInputToStaging(input, stagingBuffer: stagingBuffer)
+                let digest = try await hashAsync(
+                    buffer: stagingBuffer.buffer,
+                    length: inputLength,
+                    policy: policy,
+                    workspace: asyncWorkspace
+                )
                 stagingBuffer.unlockForAsyncUse()
+                return digest
+            } catch {
+                stagingBuffer.unlockForAsyncUse()
+                throw error
             }
-            guard stagingBuffer.buffer.device.registryID == device.registryID else {
-                throw BLAKE3Error.metalCommandFailed("Staging buffer belongs to a different Metal device.")
-            }
-            guard asyncWorkspace.deviceRegistryID == device.registryID else {
-                throw BLAKE3Error.metalCommandFailed("Async workspace belongs to a different Metal device.")
-            }
-            var inputLength = 0
+        }
+
+        private func copyInputToStaging(
+            _ input: some ContiguousBytes,
+            stagingBuffer: StagingBuffer,
+            maximumByteCount: Int? = nil,
+            maximumLabel: String = "input"
+        ) throws -> Int {
             try input.withUnsafeBytes { raw in
-                inputLength = raw.count
+                if let maximumByteCount, raw.count > maximumByteCount {
+                    throw BLAKE3Error.metalCommandFailed(
+                        "Input length \(raw.count) exceeds \(maximumLabel) capacity \(maximumByteCount)."
+                    )
+                }
                 guard raw.count <= stagingBuffer.capacity else {
                     throw BLAKE3Error.metalCommandFailed(
                         "Input length \(raw.count) exceeds staging buffer capacity \(stagingBuffer.capacity)."
@@ -994,13 +1002,8 @@ public enum BLAKE3Metal {
                         byteCount: raw.count
                     )
                 }
+                return raw.count
             }
-            return try await hashAsync(
-                buffer: stagingBuffer.buffer,
-                length: inputLength,
-                policy: policy,
-                workspace: asyncWorkspace
-            )
         }
 
         fileprivate func withWorkspace<R>(

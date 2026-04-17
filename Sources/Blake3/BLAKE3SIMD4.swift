@@ -2,6 +2,10 @@ import Foundation
 
 enum BLAKE3SIMD4 {
     private typealias Vector = SIMD4<UInt32>
+    private static let iv0 = Vector(repeating: 0x6A09E667)
+    private static let iv1 = Vector(repeating: 0xBB67AE85)
+    private static let iv2 = Vector(repeating: 0x3C6EF372)
+    private static let iv3 = Vector(repeating: 0xA54FF53A)
 
     private struct CV4 {
         var v0: Vector
@@ -166,13 +170,17 @@ enum BLAKE3SIMD4 {
     }
 
     @inline(__always)
-    static func hashFourFullChunks(
+    static func hashFourFullChunkValues(
         input: BLAKE3Core.SendableRawBuffer,
         firstChunkIndex: Int,
         firstChunkCounter: Int,
         key: BLAKE3Core.ChainingValue,
-        flags: UInt32,
-        output: BLAKE3Core.SendableCVStorage
+        flags: UInt32
+    ) -> (
+        BLAKE3Core.ChainingValue,
+        BLAKE3Core.ChainingValue,
+        BLAKE3Core.ChainingValue,
+        BLAKE3Core.ChainingValue
     ) {
         var cv = CV4(
             Vector(repeating: key[0]),
@@ -203,41 +211,78 @@ enum BLAKE3SIMD4 {
             UInt32(truncatingIfNeeded: counters.2 >> 32),
             UInt32(truncatingIfNeeded: counters.3 >> 32)
         )
+        let fullBlockLength = Vector(repeating: UInt32(BLAKE3Core.blockLen))
+        let startFlags = Vector(repeating: flags | BLAKE3Core.chunkStart)
+        let middleFlags = Vector(repeating: flags)
+        let endFlags = Vector(repeating: flags | BLAKE3Core.chunkEnd)
 
-        for blockIndex in 0..<16 {
-            var blockFlags = flags
-            if blockIndex == 0 {
-                blockFlags |= BLAKE3Core.chunkStart
-            }
-            if blockIndex == 15 {
-                blockFlags |= BLAKE3Core.chunkEnd
-            }
-
+        compressInPlace(
+            cv: &cv,
+            blockWords: loadBlockWords(input: input, firstChunkIndex: firstChunkIndex, blockIndex: 0),
+            blockLength: fullBlockLength,
+            counterLow: counterLow,
+            counterHigh: counterHigh,
+            flags: startFlags
+        )
+        for blockIndex in 1..<15 {
             compressInPlace(
                 cv: &cv,
                 blockWords: loadBlockWords(input: input, firstChunkIndex: firstChunkIndex, blockIndex: blockIndex),
-                blockLength: Vector(repeating: UInt32(BLAKE3Core.blockLen)),
+                blockLength: fullBlockLength,
                 counterLow: counterLow,
                 counterHigh: counterHigh,
-                flags: Vector(repeating: blockFlags)
+                flags: middleFlags
             )
         }
+        compressInPlace(
+            cv: &cv,
+            blockWords: loadBlockWords(input: input, firstChunkIndex: firstChunkIndex, blockIndex: 15),
+            blockLength: fullBlockLength,
+            counterLow: counterLow,
+            counterHigh: counterHigh,
+            flags: endFlags
+        )
 
-        for lane in 0..<4 {
-            output.store(
-                BLAKE3Core.ChainingValue(
-                    cv.v0[lane],
-                    cv.v1[lane],
-                    cv.v2[lane],
-                    cv.v3[lane],
-                    cv.v4[lane],
-                    cv.v5[lane],
-                    cv.v6[lane],
-                    cv.v7[lane]
-                ),
-                at: firstChunkIndex + lane
+        return (
+            BLAKE3Core.ChainingValue(
+                cv.v0[0], cv.v1[0], cv.v2[0], cv.v3[0],
+                cv.v4[0], cv.v5[0], cv.v6[0], cv.v7[0]
+            ),
+            BLAKE3Core.ChainingValue(
+                cv.v0[1], cv.v1[1], cv.v2[1], cv.v3[1],
+                cv.v4[1], cv.v5[1], cv.v6[1], cv.v7[1]
+            ),
+            BLAKE3Core.ChainingValue(
+                cv.v0[2], cv.v1[2], cv.v2[2], cv.v3[2],
+                cv.v4[2], cv.v5[2], cv.v6[2], cv.v7[2]
+            ),
+            BLAKE3Core.ChainingValue(
+                cv.v0[3], cv.v1[3], cv.v2[3], cv.v3[3],
+                cv.v4[3], cv.v5[3], cv.v6[3], cv.v7[3]
             )
-        }
+        )
+    }
+
+    @inline(__always)
+    static func hashFourFullChunks(
+        input: BLAKE3Core.SendableRawBuffer,
+        firstChunkIndex: Int,
+        firstChunkCounter: Int,
+        key: BLAKE3Core.ChainingValue,
+        flags: UInt32,
+        output: BLAKE3Core.SendableCVStorage
+    ) {
+        let values = hashFourFullChunkValues(
+            input: input,
+            firstChunkIndex: firstChunkIndex,
+            firstChunkCounter: firstChunkCounter,
+            key: key,
+            flags: flags
+        )
+        output.store(values.0, at: firstChunkIndex)
+        output.store(values.1, at: firstChunkIndex + 1)
+        output.store(values.2, at: firstChunkIndex + 2)
+        output.store(values.3, at: firstChunkIndex + 3)
     }
 
     @inline(__always)
@@ -267,21 +312,34 @@ enum BLAKE3SIMD4 {
             flags: Vector(repeating: flags | BLAKE3Core.parent)
         )
 
-        for lane in 0..<4 {
-            output.store(
-                BLAKE3Core.ChainingValue(
-                    cv.v0[lane],
-                    cv.v1[lane],
-                    cv.v2[lane],
-                    cv.v3[lane],
-                    cv.v4[lane],
-                    cv.v5[lane],
-                    cv.v6[lane],
-                    cv.v7[lane]
-                ),
-                at: firstParentIndex + lane
-            )
-        }
+        output.store(
+            BLAKE3Core.ChainingValue(
+                cv.v0[0], cv.v1[0], cv.v2[0], cv.v3[0],
+                cv.v4[0], cv.v5[0], cv.v6[0], cv.v7[0]
+            ),
+            at: firstParentIndex
+        )
+        output.store(
+            BLAKE3Core.ChainingValue(
+                cv.v0[1], cv.v1[1], cv.v2[1], cv.v3[1],
+                cv.v4[1], cv.v5[1], cv.v6[1], cv.v7[1]
+            ),
+            at: firstParentIndex + 1
+        )
+        output.store(
+            BLAKE3Core.ChainingValue(
+                cv.v0[2], cv.v1[2], cv.v2[2], cv.v3[2],
+                cv.v4[2], cv.v5[2], cv.v6[2], cv.v7[2]
+            ),
+            at: firstParentIndex + 2
+        )
+        output.store(
+            BLAKE3Core.ChainingValue(
+                cv.v0[3], cv.v1[3], cv.v2[3], cv.v3[3],
+                cv.v4[3], cv.v5[3], cv.v6[3], cv.v7[3]
+            ),
+            at: firstParentIndex + 3
+        )
     }
 
     @inline(__always)
@@ -290,45 +348,63 @@ enum BLAKE3SIMD4 {
         firstChunkIndex: Int,
         blockIndex: Int
     ) -> BlockWords4 {
-        let block0 = loadFullBlockWords(input, chunkIndex: firstChunkIndex, blockIndex: blockIndex)
-        let block1 = loadFullBlockWords(input, chunkIndex: firstChunkIndex + 1, blockIndex: blockIndex)
-        let block2 = loadFullBlockWords(input, chunkIndex: firstChunkIndex + 2, blockIndex: blockIndex)
-        let block3 = loadFullBlockWords(input, chunkIndex: firstChunkIndex + 3, blockIndex: blockIndex)
+        let blockByteOffset = blockIndex * BLAKE3Core.blockLen
+        let chunk0 = firstChunkIndex * BLAKE3Core.chunkLen + blockByteOffset
+        let chunk1 = chunk0 + BLAKE3Core.chunkLen
+        let chunk2 = chunk1 + BLAKE3Core.chunkLen
+        let chunk3 = chunk2 + BLAKE3Core.chunkLen
 
         return BlockWords4(
-            Vector(block0[0], block1[0], block2[0], block3[0]),
-            Vector(block0[1], block1[1], block2[1], block3[1]),
-            Vector(block0[2], block1[2], block2[2], block3[2]),
-            Vector(block0[3], block1[3], block2[3], block3[3]),
-            Vector(block0[4], block1[4], block2[4], block3[4]),
-            Vector(block0[5], block1[5], block2[5], block3[5]),
-            Vector(block0[6], block1[6], block2[6], block3[6]),
-            Vector(block0[7], block1[7], block2[7], block3[7]),
-            Vector(block0[8], block1[8], block2[8], block3[8]),
-            Vector(block0[9], block1[9], block2[9], block3[9]),
-            Vector(block0[10], block1[10], block2[10], block3[10]),
-            Vector(block0[11], block1[11], block2[11], block3[11]),
-            Vector(block0[12], block1[12], block2[12], block3[12]),
-            Vector(block0[13], block1[13], block2[13], block3[13]),
-            Vector(block0[14], block1[14], block2[14], block3[14]),
-            Vector(block0[15], block1[15], block2[15], block3[15])
+            loadWord4(input, chunk0, chunk1, chunk2, chunk3, 0),
+            loadWord4(input, chunk0, chunk1, chunk2, chunk3, 4),
+            loadWord4(input, chunk0, chunk1, chunk2, chunk3, 8),
+            loadWord4(input, chunk0, chunk1, chunk2, chunk3, 12),
+            loadWord4(input, chunk0, chunk1, chunk2, chunk3, 16),
+            loadWord4(input, chunk0, chunk1, chunk2, chunk3, 20),
+            loadWord4(input, chunk0, chunk1, chunk2, chunk3, 24),
+            loadWord4(input, chunk0, chunk1, chunk2, chunk3, 28),
+            loadWord4(input, chunk0, chunk1, chunk2, chunk3, 32),
+            loadWord4(input, chunk0, chunk1, chunk2, chunk3, 36),
+            loadWord4(input, chunk0, chunk1, chunk2, chunk3, 40),
+            loadWord4(input, chunk0, chunk1, chunk2, chunk3, 44),
+            loadWord4(input, chunk0, chunk1, chunk2, chunk3, 48),
+            loadWord4(input, chunk0, chunk1, chunk2, chunk3, 52),
+            loadWord4(input, chunk0, chunk1, chunk2, chunk3, 56),
+            loadWord4(input, chunk0, chunk1, chunk2, chunk3, 60)
         )
     }
 
     @inline(__always)
-    private static func loadFullBlockWords(
+    private static func loadWord4(
         _ input: BLAKE3Core.SendableRawBuffer,
-        chunkIndex: Int,
-        blockIndex: Int
-    ) -> BLAKE3Core.BlockWords {
-        let offset = chunkIndex * BLAKE3Core.chunkLen + blockIndex * BLAKE3Core.blockLen
-        var words = input.baseAddress.advanced(by: offset).loadUnaligned(as: BLAKE3Core.BlockWords.self)
+        _ chunk0: Int,
+        _ chunk1: Int,
+        _ chunk2: Int,
+        _ chunk3: Int,
+        _ wordByteOffset: Int
+    ) -> Vector {
+        let word0 = input.baseAddress
+            .advanced(by: chunk0 + wordByteOffset)
+            .loadUnaligned(as: UInt32.self)
+        let word1 = input.baseAddress
+            .advanced(by: chunk1 + wordByteOffset)
+            .loadUnaligned(as: UInt32.self)
+        let word2 = input.baseAddress
+            .advanced(by: chunk2 + wordByteOffset)
+            .loadUnaligned(as: UInt32.self)
+        let word3 = input.baseAddress
+            .advanced(by: chunk3 + wordByteOffset)
+            .loadUnaligned(as: UInt32.self)
         #if _endian(big)
-        for index in 0..<16 {
-            words[index] = UInt32(littleEndian: words[index])
-        }
+        return Vector(
+            UInt32(littleEndian: word0),
+            UInt32(littleEndian: word1),
+            UInt32(littleEndian: word2),
+            UInt32(littleEndian: word3)
+        )
+        #else
+        return Vector(word0, word1, word2, word3)
         #endif
-        return words
     }
 
     @inline(__always)
@@ -406,10 +482,10 @@ enum BLAKE3SIMD4 {
         var state = BlockWords4(
             cv.v0, cv.v1, cv.v2, cv.v3,
             cv.v4, cv.v5, cv.v6, cv.v7,
-            Vector(repeating: BLAKE3Core.iv[0]),
-            Vector(repeating: BLAKE3Core.iv[1]),
-            Vector(repeating: BLAKE3Core.iv[2]),
-            Vector(repeating: BLAKE3Core.iv[3]),
+            iv0,
+            iv1,
+            iv2,
+            iv3,
             counterLow,
             counterHigh,
             blockLength,

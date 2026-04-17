@@ -93,33 +93,27 @@ public extension BLAKE3 {
 
             switch mode {
             case .scalar:
-                return Digest(BLAKE3Core.hashScalar(input, key: key, flags: flags))
+                return Digest(output: BLAKE3Core.rootOutputScalar(input, key: key, flags: flags))
             case .serial:
-                return Digest(BLAKE3Core.hash(input, key: key, flags: flags))
+                return Digest(output: BLAKE3Core.rootOutputSerial(input, key: key, flags: flags, workspace: &workspace))
             case .automatic:
-                if input.count < BLAKE3Core.parallelMinBytes || input.count <= BLAKE3Core.chunkLen {
-                    return Digest(BLAKE3Core.hash(input, key: key, flags: flags))
-                }
-                return Digest(BLAKE3Core.rootOutput(
+                return Digest(output: BLAKE3Core.rootOutputParallel(
                     input,
                     key: key,
                     flags: flags,
                     maxWorkers: nil,
                     scheduler: scheduler,
                     workspace: &workspace
-                ).rootBytes(byteCount: BLAKE3.digestByteCount))
+                ))
             case let .parallel(maxWorkers):
-                if maxWorkers == 1 {
-                    return Digest(BLAKE3Core.hash(input, key: key, flags: flags))
-                }
-                return Digest(BLAKE3Core.rootOutput(
+                return Digest(output: BLAKE3Core.rootOutputParallel(
                     input,
                     key: key,
                     flags: flags,
                     maxWorkers: maxWorkers,
                     scheduler: scheduler,
                     workspace: &workspace
-                ).rootBytes(byteCount: BLAKE3.digestByteCount))
+                ))
             }
         }
 

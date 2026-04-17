@@ -22,11 +22,15 @@ This project uses semantic versioning for public releases. Until `1.0.0`, source
 
 ### Changed
 
-- Automatic CPU parallel hashing now prefers Darwin performance-core counts when available, falling back to active processor count elsewhere.
+- Automatic CPU parallel hashing now defaults to active processor count so large hashes can use all available cores.
+- One-shot SIMD hashing now switches to an array-backed chunk/parent reducer at 16 KiB.
+- In-memory CPU parallel hashing now starts at 96 KiB after local Apple Silicon threshold measurements.
 - Reusable CPU contexts no longer submit per-worker GCD async jobs on each parallel hash.
+- Standard 32-byte digest APIs now finalize directly into `Digest` storage instead of materializing an intermediate `[UInt8]`.
+- Metal async staging and private-upload paths now copy generic contiguous input through synchronous helpers before suspension, fixing release-only async test crashes.
 - Scalar chunk and parent hot loops avoid a few redundant block-load and parent-word setup checks, and full block loads now use direct unaligned SIMD loads.
 - Scalar compression now keeps the 16-word state in direct local words instead of rebinding through an unsafe pointer for indexed round updates.
-- SIMD4 full-chunk block loading now uses contiguous block loads before transposing lanes, reducing per-word address arithmetic in the hot loop.
+- SIMD4 full-chunk hashing now specializes start/middle/end block flags, uses static IV vectors, and loads lane words directly without temporary `SIMD16` block materialization.
 
 ## Release Notes Template
 

@@ -17,22 +17,35 @@ public extension BLAKE3 {
 
         init(_ bytes: [UInt8]) {
             precondition(bytes.count == Self.byteCount)
-            self.storage = (
-                bytes[0], bytes[1], bytes[2], bytes[3],
-                bytes[4], bytes[5], bytes[6], bytes[7],
-                bytes[8], bytes[9], bytes[10], bytes[11],
-                bytes[12], bytes[13], bytes[14], bytes[15],
-                bytes[16], bytes[17], bytes[18], bytes[19],
-                bytes[20], bytes[21], bytes[22], bytes[23],
-                bytes[24], bytes[25], bytes[26], bytes[27],
-                bytes[28], bytes[29], bytes[30], bytes[31]
-            )
+            self.storage = bytes.withUnsafeBytes { raw in
+                Self.storage(from: raw)
+            }
         }
 
         init(_ bytes: UnsafeRawBufferPointer) {
             precondition(bytes.count == Self.byteCount)
+            self.storage = Self.storage(from: bytes)
+        }
+
+        init(words: BLAKE3Core.ChainingValue) {
+            var littleEndianWords = words
+            #if _endian(big)
+            for index in 0..<8 {
+                littleEndianWords[index] = littleEndianWords[index].littleEndian
+            }
+            #endif
+            self.storage = Swift.withUnsafeBytes(of: &littleEndianWords) { raw in
+                Self.storage(from: raw)
+            }
+        }
+
+        init(output: BLAKE3Core.Output) {
+            self.init(words: output.rootDigestWords())
+        }
+
+        private static func storage(from bytes: UnsafeRawBufferPointer) -> Storage {
             let bound = bytes.bindMemory(to: UInt8.self)
-            self.storage = (
+            return (
                 bound[0], bound[1], bound[2], bound[3],
                 bound[4], bound[5], bound[6], bound[7],
                 bound[8], bound[9], bound[10], bound[11],

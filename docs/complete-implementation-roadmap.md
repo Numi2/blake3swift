@@ -439,11 +439,12 @@ Parallel design:
 
 Threshold decisions:
 
-- `hash(_:)` remains single-threaded by default.
+- `hash(_:)` remains single-threaded by default below the measured parallel gate.
 - Add `BLAKE3.hashParallel(_:parallelism:)` for in-memory data.
 - `BLAKE3File.Strategy.automatic` may select mmap parallel for large regular
   files.
-- Initial in-memory parallel threshold: 1 MiB.
+- Current in-memory serial SIMD array threshold: 16 KiB after Apple Silicon measurements.
+- Current in-memory parallel threshold: 96 KiB after Apple Silicon measurements.
 - Initial mmap-parallel file threshold: 8 MiB.
 - Revisit both thresholds after benchmarks on Apple Silicon, Intel AVX2,
   Intel AVX-512, and Linux arm64.

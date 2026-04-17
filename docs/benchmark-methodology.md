@@ -189,7 +189,9 @@ CPU worker tuning sweep:
 swift run -c release blake3-bench --sizes 1m,16m,64m --iterations 8 --metal-modes none --cpu-workers 8
 ```
 
-When `--cpu-workers` is omitted, automatic CPU parallelism uses the library default. On Darwin hosts that report performance-core topology, that default is the performance-core count; otherwise it falls back to active processor count. Publication runs should record the emitted `defaultParallelWorkers` value and pin `--cpu-workers` when comparing CPU scheduler changes.
+When `--cpu-workers` is omitted, automatic CPU parallelism uses the library default: `ProcessInfo.processInfo.activeProcessorCount`. Publication runs should record the emitted `defaultParallelWorkers` value and pin `--cpu-workers` when comparing CPU scheduler changes.
+
+The one-shot CPU row switches from the bounded streaming stack to the SIMD chunk/parent reducer at 16 KiB. Automatic CPU parallelism starts at 96 KiB on the current Apple Silicon tuning pass.
 
 The `context-auto` row uses `BLAKE3.Context`, which reuses chaining-value workspace and a persistent CPU worker pool across iterations. Compare `parallel` against `context-auto` to see the cost of one-shot scheduling/allocation versus repeated-hash reuse.
 

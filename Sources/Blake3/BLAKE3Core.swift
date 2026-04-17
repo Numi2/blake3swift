@@ -1,7 +1,4 @@
 import Dispatch
-#if canImport(Darwin)
-import Darwin
-#endif
 import Foundation
 
 enum BLAKE3Core {
@@ -13,7 +10,9 @@ enum BLAKE3Core {
     static let blockLen = 64
     static let chunkLen = 1_024
     static let simdMinBytes = 16 * 1_024
-    static let parallelMinBytes = 256 * 1_024
+    static let serialArrayMinBytes = 16 * 1_024
+    static let parallelMinBytes = 96 * 1_024
+    static let parallelParentMinCount = 4_096
     static let defaultParallelWorkerCount = detectedDefaultParallelWorkerCount()
 
     static let chunkStart: UInt32 = 1 << 0
@@ -281,6 +280,16 @@ enum BLAKE3Core {
             return output
         }
 
+        func rootDigestWords() -> ChainingValue {
+            BLAKE3Core.compressChainingValue(
+                cv: inputCV,
+                blockWords: blockWords,
+                blockLength: blockLength,
+                counter: 0,
+                flags: flags | BLAKE3Core.root
+            )
+        }
+
         func writeRootBytes(into output: UnsafeMutableRawBufferPointer, seek: UInt64 = 0) {
             guard output.count > 0 else {
                 return
@@ -324,16 +333,8 @@ enum BLAKE3Core {
         flags: UInt32 = 0,
         outputByteCount: Int = outLen
     ) -> [UInt8] {
-        guard input.count >= simdMinBytes else {
-            return hashScalar(input, key: key, flags: flags, outputByteCount: outputByteCount)
-        }
-        return rootOutputStacked(
-            input,
-            key: key,
-            flags: flags,
-            useSIMD4: true
-        )
-        .rootBytes(byteCount: outputByteCount)
+        rootOutputDefault(input, key: key, flags: flags)
+            .rootBytes(byteCount: outputByteCount)
     }
 
     static func hashScalar(
@@ -342,7 +343,7 @@ enum BLAKE3Core {
         flags: UInt32 = 0,
         outputByteCount: Int = outLen
     ) -> [UInt8] {
-        rootOutputStacked(input, key: key, flags: flags, useSIMD4: false)
+        rootOutputScalar(input, key: key, flags: flags)
             .rootBytes(byteCount: outputByteCount)
     }
 
@@ -353,18 +354,77 @@ enum BLAKE3Core {
         outputByteCount: Int = outLen,
         maxWorkers: Int? = nil
     ) -> [UInt8] {
-        if input.count < parallelMinBytes || input.count <= chunkLen || maxWorkers == 1 {
-            return hash(input, key: key, flags: flags, outputByteCount: outputByteCount)
-        }
         var workspace = Workspace()
+        return rootOutputParallel(
+            input,
+            key: key,
+            flags: flags,
+            maxWorkers: maxWorkers,
+            scheduler: nil,
+            workspace: &workspace
+        )
+            .rootBytes(byteCount: outputByteCount)
+    }
+
+    static func rootOutputDefault(
+        _ input: UnsafeRawBufferPointer,
+        key: ChainingValue = iv,
+        flags: UInt32 = 0
+    ) -> Output {
+        var workspace = Workspace()
+        return rootOutputSerial(input, key: key, flags: flags, workspace: &workspace)
+    }
+
+    static func rootOutputSerial(
+        _ input: UnsafeRawBufferPointer,
+        key: ChainingValue,
+        flags: UInt32,
+        workspace: inout Workspace
+    ) -> Output {
+        if input.count >= serialArrayMinBytes {
+            return rootOutput(
+                input,
+                key: key,
+                flags: flags,
+                maxWorkers: 1,
+                workspace: &workspace
+            )
+        }
+        return rootOutputStacked(
+            input,
+            key: key,
+            flags: flags,
+            useSIMD4: input.count >= simdMinBytes
+        )
+    }
+
+    static func rootOutputScalar(
+        _ input: UnsafeRawBufferPointer,
+        key: ChainingValue = iv,
+        flags: UInt32 = 0
+    ) -> Output {
+        rootOutputStacked(input, key: key, flags: flags, useSIMD4: false)
+    }
+
+    static func rootOutputParallel(
+        _ input: UnsafeRawBufferPointer,
+        key: ChainingValue,
+        flags: UInt32,
+        maxWorkers: Int?,
+        scheduler: ParallelScheduler? = nil,
+        workspace: inout Workspace
+    ) -> Output {
+        if input.count < parallelMinBytes || input.count <= chunkLen || maxWorkers == 1 {
+            return rootOutputSerial(input, key: key, flags: flags, workspace: &workspace)
+        }
         return rootOutput(
             input,
             key: key,
             flags: flags,
             maxWorkers: maxWorkers,
+            scheduler: scheduler,
             workspace: &workspace
         )
-            .rootBytes(byteCount: outputByteCount)
     }
 
     static func keyedWords(_ key: UnsafeRawBufferPointer) -> ChainingValue {
@@ -566,23 +626,19 @@ enum BLAKE3Core {
         var stack = CVStack()
         var chunkIndex = 0
         let inputBytes = SendableRawBuffer(baseAddress: baseAddress, count: input.count)
-        var simdCVs = [ChainingValue](repeating: ChainingValue(repeating: 0), count: 4)
 
         while useSIMD4, chunkIndex + 4 <= chunksToFinalize {
-            simdCVs.withUnsafeMutableBufferPointer { outputBuffer in
-                BLAKE3SIMD4.hashFourFullChunks(
-                    input: inputBytes,
-                    firstChunkIndex: chunkIndex,
-                    firstChunkCounter: chunkIndex,
-                    key: key,
-                    flags: flags,
-                    output: SendableCVStorage(baseAddress: outputBuffer.baseAddress!, indexOffset: chunkIndex)
-                )
-            }
-            stack.pushChunkCV(simdCVs[0], key: key, flags: flags)
-            stack.pushChunkCV(simdCVs[1], key: key, flags: flags)
-            stack.pushChunkCV(simdCVs[2], key: key, flags: flags)
-            stack.pushChunkCV(simdCVs[3], key: key, flags: flags)
+            let values = BLAKE3SIMD4.hashFourFullChunkValues(
+                input: inputBytes,
+                firstChunkIndex: chunkIndex,
+                firstChunkCounter: chunkIndex,
+                key: key,
+                flags: flags
+            )
+            stack.pushChunkCV(values.0, key: key, flags: flags)
+            stack.pushChunkCV(values.1, key: key, flags: flags)
+            stack.pushChunkCV(values.2, key: key, flags: flags)
+            stack.pushChunkCV(values.3, key: key, flags: flags)
             chunkIndex += 4
         }
 
@@ -671,26 +727,35 @@ enum BLAKE3Core {
         schedule: SendableMessageSchedule
     ) -> ChainingValue {
         var cv = key
-        var blockIndex = 0
-        while blockIndex < 16 {
-            var blockFlags = flags
-            if blockIndex == 0 {
-                blockFlags |= chunkStart
-            }
-            if blockIndex == 15 {
-                blockFlags |= chunkEnd
-            }
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: chunkByteOffset),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags | chunkStart,
+            schedule: schedule
+        )
 
+        var blockIndex = 1
+        while blockIndex < 15 {
             cv = blake3CompressWithPerm(
                 cv: cv,
                 blockBaseAddress: baseAddress.advanced(by: chunkByteOffset + blockIndex * blockLen),
                 blockLength: UInt32(blockLen),
                 counter: chunkCounter,
-                flags: blockFlags,
+                flags: flags,
                 schedule: schedule
             )
             blockIndex += 1
         }
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: chunkByteOffset + 15 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags | chunkEnd,
+            schedule: schedule
+        )
         return cv
     }
 
@@ -882,7 +947,7 @@ enum BLAKE3Core {
         next.reserveCapacity(nextCount)
         next.append(contentsOf: repeatElement(ChainingValue(repeating: 0), count: nextCount))
 
-        if parentCount < 4_096 || maxWorkers == 1 {
+        if parentCount < parallelParentMinCount || maxWorkers == 1 {
             current.withUnsafeBufferPointer { currentBuffer in
                 next.withUnsafeMutableBufferPointer { nextBuffer in
                     reduceParentRange(
@@ -989,27 +1054,8 @@ enum BLAKE3Core {
     }
 
     private static func detectedDefaultParallelWorkerCount() -> Int {
-        #if canImport(Darwin)
-        if let performanceCores = sysctlInteger(named: "hw.perflevel0.physicalcpu"), performanceCores > 0 {
-            return performanceCores
-        }
-        if let performanceThreads = sysctlInteger(named: "hw.perflevel0.logicalcpu"), performanceThreads > 0 {
-            return performanceThreads
-        }
-        #endif
         return max(1, ProcessInfo.processInfo.activeProcessorCount)
     }
-
-    #if canImport(Darwin)
-    private static func sysctlInteger(named name: String) -> Int? {
-        var value: Int32 = 0
-        var size = MemoryLayout<Int32>.size
-        guard sysctlbyname(name, &value, &size, nil, 0) == 0 else {
-            return nil
-        }
-        return Int(value)
-    }
-    #endif
 
     @inline(__always)
     private static func loadBlockWords(_ input: UnsafeRawBufferPointer, offset: Int) -> BlockWords {

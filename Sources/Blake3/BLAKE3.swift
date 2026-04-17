@@ -34,8 +34,8 @@ public enum BLAKE3 {
 
     /// Default worker count used by CPU parallel hashing when callers do not pass an override.
     ///
-    /// On Darwin hosts that expose performance-core topology, this prefers performance cores to reduce
-    /// repeated-hash variance. Other hosts fall back to `ProcessInfo.processInfo.activeProcessorCount`.
+    /// Defaults to `ProcessInfo.processInfo.activeProcessorCount` so large hashes can use all available
+    /// CPU cores. Pass `maxWorkers` to public parallel APIs when reproducible benchmark pinning matters.
     public static var defaultParallelWorkerCount: Int {
         BLAKE3Core.defaultParallelWorkerCount
     }
@@ -56,7 +56,7 @@ public enum BLAKE3 {
     ///
     /// The buffer only needs to remain valid for the duration of this call.
     public static func hash(_ input: UnsafeRawBufferPointer) -> Digest {
-        Digest(BLAKE3Core.hash(input))
+        Digest(output: BLAKE3Core.rootOutputDefault(input))
     }
 
     /// Hashes contiguous input with the scalar CPU implementation.
@@ -68,7 +68,7 @@ public enum BLAKE3 {
 
     /// Hashes raw input with the scalar CPU implementation.
     public static func hashScalar(_ input: UnsafeRawBufferPointer) -> Digest {
-        Digest(BLAKE3Core.hashScalar(input))
+        Digest(output: BLAKE3Core.rootOutputScalar(input))
     }
 
     /// Hashes contiguous input with CPU parallelism.
@@ -90,10 +90,14 @@ public enum BLAKE3 {
         _ input: UnsafeRawBufferPointer,
         maxWorkers: Int? = nil
     ) -> Digest {
-        if let maxWorkers, maxWorkers <= 1 {
-            return hash(input)
-        }
-        return Digest(BLAKE3Core.hashParallel(input, maxWorkers: maxWorkers))
+        var workspace = BLAKE3Core.Workspace()
+        return Digest(output: BLAKE3Core.rootOutputParallel(
+            input,
+            key: BLAKE3Core.iv,
+            flags: 0,
+            maxWorkers: maxWorkers,
+            workspace: &workspace
+        ))
     }
 
     /// Computes a 32-byte BLAKE3 keyed hash.
@@ -112,7 +116,7 @@ public enum BLAKE3 {
             }
             let keyWords = BLAKE3Core.keyedWords(keyBytes)
             return input.withUnsafeBytes { inputBytes in
-                Digest(BLAKE3Core.hash(
+                Digest(output: BLAKE3Core.rootOutputDefault(
                     inputBytes,
                     key: keyWords,
                     flags: BLAKE3Core.keyedHash
@@ -137,10 +141,13 @@ public enum BLAKE3 {
             }
             let keyWords = BLAKE3Core.keyedWords(keyBytes)
             return input.withUnsafeBytes { inputBytes in
-                Digest(BLAKE3Core.hashParallel(
+                var workspace = BLAKE3Core.Workspace()
+                return Digest(output: BLAKE3Core.rootOutputParallel(
                     inputBytes,
                     key: keyWords,
-                    flags: BLAKE3Core.keyedHash
+                    flags: BLAKE3Core.keyedHash,
+                    maxWorkers: nil,
+                    workspace: &workspace
                 ))
             }
         }

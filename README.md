@@ -14,7 +14,8 @@ This repository is **not open source**. It is proprietary source-available softw
 - One-shot, keyed, derived-key, streaming, XOF, and reusable context APIs.
 - Reusable CPU contexts with persistent parallel worker pools for repeated hashes.
 - SIMD4 chunk and parent reduction paths for CPU throughput.
-- CPU parallel hashing defaults to detected performance-core count on Darwin when available, with explicit worker overrides for reproducible benchmarks.
+- CPU parallel hashing defaults to the active processor count, with explicit worker overrides for reproducible benchmarks.
+- One-shot CPU hashing uses the SIMD chunk/parent reducer from 16 KiB and parallel hashing from 96 KiB.
 - Bounded-memory CV stack for streaming and multi-GB file hashing.
 - CPU file strategies for buffered reads and memory-mapped hashing.
 - Metal resident-buffer, staged-buffer, private-buffer, async pipeline, and tiled file hashing APIs.
