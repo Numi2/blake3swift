@@ -17,7 +17,7 @@ This is a repository-grounded review checklist for cryptographic integration ris
 - Key material is not actively zeroized after use; Swift value semantics and optimizer behavior make reliable zeroization non-trivial.
 - Custom Metal kernels need continued differential testing against CPU for unaligned ranges, tails, exact chunk boundaries, and large trees.
 - Unsafe pointer use is performance-critical and should be reviewed after each scalar, SIMD, or Metal hot-loop change.
-- Parallel CPU scheduling is tuned for Apple silicon performance cores where detectable; cross-machine validation is still required.
+- Parallel CPU scheduling is tuned for Apple silicon performance cores where detectable, and reusable contexts serialize access to their persistent worker pool; cross-machine validation is still required.
 - This package does not provide password hashing, authenticated encryption, message authentication protocol design, or misuse-resistant key management.
 
 ## Release Gate

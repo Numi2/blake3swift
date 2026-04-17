@@ -318,6 +318,89 @@ final class BLAKE3Tests: XCTestCase {
         }
     }
 
+    func testKeyedAndDerivedStreamingXOFAcrossWeirdSplits() throws {
+        let key = Array("whats the Elvish word for friend".utf8)
+        let contextString = "BLAKE3 2019-12-27 16:29:52 test vectors context"
+        let sizes = [
+            0,
+            1,
+            63,
+            64,
+            65,
+            1_023,
+            1_024,
+            1_025,
+            16_383,
+            16_384,
+            16_385,
+            65_537,
+            256 * 1_024 + 1
+        ]
+        let splitPatterns = [
+            [1],
+            [63, 1, 64, 65],
+            [1_023, 1, 1_024, 1_025, 7],
+            [4_097, 257, 65_537]
+        ]
+
+        for size in sizes {
+            let input = deterministicInput(byteCount: size)
+            var keyedReference = try BLAKE3.Hasher(key: key)
+            keyedReference.update(input)
+            var derivedReference = BLAKE3.Hasher(deriveKeyContext: contextString)
+            derivedReference.update(input)
+
+            let keyedDigest = keyedReference.finalize()
+            let keyedXOF = xofBytes(from: keyedReference, count: 160)
+            let keyedSeek = xofBytes(from: keyedReference, count: 73, seek: 31)
+            let derivedBytes = try BLAKE3.deriveKey(
+                context: contextString,
+                material: input,
+                outputByteCount: 160
+            )
+            let derivedSeek = Array(derivedBytes[47..<120])
+
+            XCTAssertEqual(
+                derivedReference.finalize().bytes,
+                Array(derivedBytes.prefix(BLAKE3.digestByteCount)),
+                "derived digest prefix mismatch for byteCount=\(size)"
+            )
+
+            for splitPattern in splitPatterns {
+                var keyedStream = try BLAKE3.Hasher(key: key)
+                update(&keyedStream, with: input, splitPattern: splitPattern)
+                XCTAssertEqual(
+                    keyedStream.finalize(),
+                    keyedDigest,
+                    "keyed streaming digest mismatch for byteCount=\(size), splitPattern=\(splitPattern)"
+                )
+                XCTAssertEqual(
+                    xofBytes(from: keyedStream, count: 160),
+                    keyedXOF,
+                    "keyed streaming XOF mismatch for byteCount=\(size), splitPattern=\(splitPattern)"
+                )
+                XCTAssertEqual(
+                    xofBytes(from: keyedStream, count: 73, seek: 31),
+                    keyedSeek,
+                    "keyed streaming XOF seek mismatch for byteCount=\(size), splitPattern=\(splitPattern)"
+                )
+
+                var derivedStream = BLAKE3.Hasher(deriveKeyContext: contextString)
+                update(&derivedStream, with: input, splitPattern: splitPattern)
+                XCTAssertEqual(
+                    xofBytes(from: derivedStream, count: 160),
+                    derivedBytes,
+                    "derived streaming XOF mismatch for byteCount=\(size), splitPattern=\(splitPattern)"
+                )
+                XCTAssertEqual(
+                    xofBytes(from: derivedStream, count: 73, seek: 47),
+                    derivedSeek,
+                    "derived streaming XOF seek mismatch for byteCount=\(size), splitPattern=\(splitPattern)"
+                )
+            }
+        }
+    }
+
     func testCPUContextMatchesOneShotAcrossModes() throws {
         let context = BLAKE3.Context()
         let tunedContext = BLAKE3.Context(maxWorkers: 2)
@@ -347,6 +430,35 @@ final class BLAKE3Tests: XCTestCase {
                 expected,
                 "tuned reusable context mismatch for byteCount=\(size)"
             )
+        }
+    }
+
+    func testCPUContextPersistentSchedulerHandlesRepeatedAndConcurrentHashes() async throws {
+        let context = BLAKE3.Context(maxWorkers: 2)
+        let inputs = [
+            deterministicInput(byteCount: 256 * 1_024 + 1),
+            deterministicInput(byteCount: 512 * 1_024 + 17),
+            deterministicInput(byteCount: 1_024 * 1_024 + 333),
+            deterministicInput(byteCount: 300 * 1_024 + 11)
+        ]
+        let expected = inputs.map { BLAKE3.hash($0) }
+
+        for _ in 0..<3 {
+            for (index, input) in inputs.enumerated() {
+                XCTAssertEqual(context.hash(input, mode: .automatic), expected[index])
+                XCTAssertEqual(context.hash(input, mode: .parallel(maxWorkers: 2)), expected[index])
+            }
+        }
+
+        try await withThrowingTaskGroup(of: (Int, BLAKE3.Digest).self) { group in
+            for (index, input) in inputs.enumerated() {
+                group.addTask {
+                    (index, context.hash(input, mode: .automatic))
+                }
+            }
+            for try await (index, digest) in group {
+                XCTAssertEqual(digest, expected[index])
+            }
         }
     }
 
@@ -541,6 +653,21 @@ final class BLAKE3Tests: XCTestCase {
     }
 
     #if canImport(Metal)
+    func testMetalKernelSourceIsExportable() {
+        XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_chunk_cvs"))
+        XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_root_digest"))
+    }
+
+    func testMetalContextRecordsLibrarySource() throws {
+        guard BLAKE3Metal.isAvailable else {
+            throw XCTSkip("Metal is not available on this host.")
+        }
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let context = try BLAKE3Metal.makeContext(device: device, librarySource: .runtimeSource)
+
+        XCTAssertEqual(context.librarySource, .runtimeSource)
+    }
+
     func testMetalBufferHashSurfaceWhenDeviceExists() throws {
         guard BLAKE3Metal.isAvailable else {
             throw XCTSkip("Metal is not available on this host.")
@@ -1042,6 +1169,35 @@ private func update(
     let clampedSplitIndex = min(max(0, splitIndex), input.count)
     hasher.update(input[..<clampedSplitIndex])
     hasher.update(input[clampedSplitIndex...])
+}
+
+private func update(
+    _ hasher: inout BLAKE3.Hasher,
+    with input: [UInt8],
+    splitPattern: [Int]
+) {
+    guard !splitPattern.isEmpty else {
+        hasher.update(input)
+        return
+    }
+
+    var offset = 0
+    var splitIndex = 0
+    while offset < input.count {
+        let step = max(1, splitPattern[splitIndex % splitPattern.count])
+        let end = min(input.count, offset + step)
+        hasher.update(input[offset..<end])
+        offset = end
+        splitIndex += 1
+    }
+}
+
+private func xofBytes(from hasher: BLAKE3.Hasher, count: Int, seek: UInt64 = 0) -> [UInt8] {
+    var reader = hasher.finalizeXOF()
+    reader.seek(to: seek)
+    var output = [UInt8](repeating: 0, count: count)
+    output.withUnsafeMutableBytes { reader.read(into: $0) }
+    return output
 }
 
 #if canImport(Metal)

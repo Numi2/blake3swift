@@ -191,7 +191,7 @@ swift run -c release blake3-bench --sizes 1m,16m,64m --iterations 8 --metal-mode
 
 When `--cpu-workers` is omitted, automatic CPU parallelism uses the library default. On Darwin hosts that report performance-core topology, that default is the performance-core count; otherwise it falls back to active processor count. Publication runs should record the emitted `defaultParallelWorkers` value and pin `--cpu-workers` when comparing CPU scheduler changes.
 
-The `context-auto` row uses `BLAKE3.Context`, which reuses chaining-value workspace and a dedicated CPU scheduler across iterations. Compare `parallel` against `context-auto` to see the cost of one-shot scheduling/allocation versus repeated-hash reuse.
+The `context-auto` row uses `BLAKE3.Context`, which reuses chaining-value workspace and a persistent CPU worker pool across iterations. Compare `parallel` against `context-auto` to see the cost of one-shot scheduling/allocation versus repeated-hash reuse.
 
 Optional RSS snapshots:
 
@@ -199,7 +199,60 @@ Optional RSS snapshots:
 swift run -c release blake3-bench --sizes 16m,64m --iterations 4 --metal-modes resident,e2e --memory-stats
 ```
 
-`--memory-stats` prints process resident memory before input allocation, after input allocation, and after each size. RSS is operating-system resident memory, not an exact allocation counter; use it to make workspace and file-path memory behavior visible in benchmark artifacts.
+`--memory-stats` prints process resident memory and Darwin allocator bytes/block counts before input allocation, after input allocation, and after each size. RSS is operating-system resident memory; allocator bytes and blocks come from `malloc_zone_statistics`. Treat both as benchmark-process diagnostics, not exact per-call allocation counts.
+
+Machine-readable benchmark report:
+
+```sh
+swift run -c release blake3-bench --sizes 16m,64m --iterations 4 --metal-modes resident,e2e --json-output benchmarks/results/local.json
+```
+
+`--json-output` writes schema version, command line, environment metadata, requested sizes, per-row raw nanosecond samples, throughput statistics, correctness, sustained summaries, and optional memory samples. Treat the JSON as the comparison artifact; Markdown tables are for quick review.
+
+Validate a JSON report before publishing it:
+
+```sh
+swift run -c release blake3-bench --validate-json benchmarks/results/local.json
+```
+
+The fixture scripts run this validation automatically. Validation fails for malformed reports, failed correctness rows, missing scalar baselines, empty sample sets, nonfinite throughput values, invalid digest strings, missing sustained rows when sustained timing was requested, or missing memory samples when `--memory-stats` was requested.
+
+Precompiled Metal library run:
+
+```sh
+swift run -c release blake3-bench --sizes 16m,64m --iterations 4 --metal-library /path/to/BLAKE3Metal.metallib --metal-modes resident,e2e
+```
+
+`--metal-library` uses `BLAKE3Metal.LibrarySource.metallib` for resident, staged, private, end-to-end, and Metal file modes. When omitted, the benchmark uses the runtime Metal source compiler. Publication artifacts should record the emitted `metalLibrary` value.
+
+Metal gate and tiled-file tuning knobs:
+
+```sh
+swift run -c release blake3-bench --sizes 1m,16m,64m --metal-modes resident,staged,e2e --minimum-gpu-bytes 16m
+swift run -c release blake3-bench --sizes 512m,1g --metal-modes none --file-modes metal-tiled-mmap --metal-tile-size 64m
+```
+
+`--minimum-gpu-bytes` changes the benchmark context's `.automatic` CPU/GPU gate and is recorded as `metal_minimum_gpu_byte_count` in JSON output. It does not affect explicit `*-gpu` rows. `--metal-tile-size` changes the tiled Metal mapped-file tile size and is recorded as `metal_tile_byte_count`.
+
+Metal autotune command:
+
+```sh
+swift run -c release blake3-bench \
+  --autotune-metal \
+  --autotune-sizes 16m,64m \
+  --autotune-iterations 3 \
+  --autotune-gates 1m,4m,16m,64m \
+  --autotune-metal-modes resident,staged,private-staged,e2e,private \
+  --autotune-output benchmarks/results/autotune-metal.json
+```
+
+`--autotune-metal` runs correctness-checked measured sweeps and emits recommendations based on geometric mean throughput across requested sizes. It currently recommends `minimum_gpu_bytes` and the fastest measured Metal mode for the selected timing classes. Add `--autotune-file-tiles --autotune-tile-sizes 8m,16m,32m,64m` when tiled file tile-size recommendations are needed. Validate the emitted report with:
+
+```sh
+swift run -c release blake3-bench --validate-autotune-json benchmarks/results/autotune-metal.json
+```
+
+Autotune recommendations are device, OS, Swift, power, thermal, and Metal-library-source specific. They are inputs to constant selection, not release claims by themselves.
 
 Primary publication sweep:
 

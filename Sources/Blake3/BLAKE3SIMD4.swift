@@ -290,25 +290,45 @@ enum BLAKE3SIMD4 {
         firstChunkIndex: Int,
         blockIndex: Int
     ) -> BlockWords4 {
-        let blockByteOffset = blockIndex * BLAKE3Core.blockLen
+        let block0 = loadFullBlockWords(input, chunkIndex: firstChunkIndex, blockIndex: blockIndex)
+        let block1 = loadFullBlockWords(input, chunkIndex: firstChunkIndex + 1, blockIndex: blockIndex)
+        let block2 = loadFullBlockWords(input, chunkIndex: firstChunkIndex + 2, blockIndex: blockIndex)
+        let block3 = loadFullBlockWords(input, chunkIndex: firstChunkIndex + 3, blockIndex: blockIndex)
+
         return BlockWords4(
-            loadWordVector(input, firstChunkIndex: firstChunkIndex, wordByteOffset: blockByteOffset + 0),
-            loadWordVector(input, firstChunkIndex: firstChunkIndex, wordByteOffset: blockByteOffset + 4),
-            loadWordVector(input, firstChunkIndex: firstChunkIndex, wordByteOffset: blockByteOffset + 8),
-            loadWordVector(input, firstChunkIndex: firstChunkIndex, wordByteOffset: blockByteOffset + 12),
-            loadWordVector(input, firstChunkIndex: firstChunkIndex, wordByteOffset: blockByteOffset + 16),
-            loadWordVector(input, firstChunkIndex: firstChunkIndex, wordByteOffset: blockByteOffset + 20),
-            loadWordVector(input, firstChunkIndex: firstChunkIndex, wordByteOffset: blockByteOffset + 24),
-            loadWordVector(input, firstChunkIndex: firstChunkIndex, wordByteOffset: blockByteOffset + 28),
-            loadWordVector(input, firstChunkIndex: firstChunkIndex, wordByteOffset: blockByteOffset + 32),
-            loadWordVector(input, firstChunkIndex: firstChunkIndex, wordByteOffset: blockByteOffset + 36),
-            loadWordVector(input, firstChunkIndex: firstChunkIndex, wordByteOffset: blockByteOffset + 40),
-            loadWordVector(input, firstChunkIndex: firstChunkIndex, wordByteOffset: blockByteOffset + 44),
-            loadWordVector(input, firstChunkIndex: firstChunkIndex, wordByteOffset: blockByteOffset + 48),
-            loadWordVector(input, firstChunkIndex: firstChunkIndex, wordByteOffset: blockByteOffset + 52),
-            loadWordVector(input, firstChunkIndex: firstChunkIndex, wordByteOffset: blockByteOffset + 56),
-            loadWordVector(input, firstChunkIndex: firstChunkIndex, wordByteOffset: blockByteOffset + 60)
+            Vector(block0[0], block1[0], block2[0], block3[0]),
+            Vector(block0[1], block1[1], block2[1], block3[1]),
+            Vector(block0[2], block1[2], block2[2], block3[2]),
+            Vector(block0[3], block1[3], block2[3], block3[3]),
+            Vector(block0[4], block1[4], block2[4], block3[4]),
+            Vector(block0[5], block1[5], block2[5], block3[5]),
+            Vector(block0[6], block1[6], block2[6], block3[6]),
+            Vector(block0[7], block1[7], block2[7], block3[7]),
+            Vector(block0[8], block1[8], block2[8], block3[8]),
+            Vector(block0[9], block1[9], block2[9], block3[9]),
+            Vector(block0[10], block1[10], block2[10], block3[10]),
+            Vector(block0[11], block1[11], block2[11], block3[11]),
+            Vector(block0[12], block1[12], block2[12], block3[12]),
+            Vector(block0[13], block1[13], block2[13], block3[13]),
+            Vector(block0[14], block1[14], block2[14], block3[14]),
+            Vector(block0[15], block1[15], block2[15], block3[15])
         )
+    }
+
+    @inline(__always)
+    private static func loadFullBlockWords(
+        _ input: BLAKE3Core.SendableRawBuffer,
+        chunkIndex: Int,
+        blockIndex: Int
+    ) -> BLAKE3Core.BlockWords {
+        let offset = chunkIndex * BLAKE3Core.chunkLen + blockIndex * BLAKE3Core.blockLen
+        var words = input.baseAddress.advanced(by: offset).loadUnaligned(as: BLAKE3Core.BlockWords.self)
+        #if _endian(big)
+        for index in 0..<16 {
+            words[index] = UInt32(littleEndian: words[index])
+        }
+        #endif
+        return words
     }
 
     @inline(__always)
@@ -316,14 +336,15 @@ enum BLAKE3SIMD4 {
         input: BLAKE3Core.SendableCVInput,
         firstParentIndex: Int
     ) -> BlockWords4 {
-        let left0 = input[firstParentIndex * 2]
-        let right0 = input[firstParentIndex * 2 + 1]
-        let left1 = input[(firstParentIndex + 1) * 2]
-        let right1 = input[(firstParentIndex + 1) * 2 + 1]
-        let left2 = input[(firstParentIndex + 2) * 2]
-        let right2 = input[(firstParentIndex + 2) * 2 + 1]
-        let left3 = input[(firstParentIndex + 3) * 2]
-        let right3 = input[(firstParentIndex + 3) * 2 + 1]
+        let firstChildIndex = firstParentIndex * 2
+        let left0 = input[firstChildIndex]
+        let right0 = input[firstChildIndex + 1]
+        let left1 = input[firstChildIndex + 2]
+        let right1 = input[firstChildIndex + 3]
+        let left2 = input[firstChildIndex + 4]
+        let right2 = input[firstChildIndex + 5]
+        let left3 = input[firstChildIndex + 6]
+        let right3 = input[firstChildIndex + 7]
 
         return BlockWords4(
             Vector(left0[0], left1[0], left2[0], left3[0]),
@@ -343,30 +364,6 @@ enum BLAKE3SIMD4 {
             Vector(right0[6], right1[6], right2[6], right3[6]),
             Vector(right0[7], right1[7], right2[7], right3[7])
         )
-    }
-
-    @inline(__always)
-    private static func loadWordVector(
-        _ input: BLAKE3Core.SendableRawBuffer,
-        firstChunkIndex: Int,
-        wordByteOffset: Int
-    ) -> Vector {
-        Vector(
-            load32(input, chunkIndex: firstChunkIndex, wordByteOffset: wordByteOffset),
-            load32(input, chunkIndex: firstChunkIndex + 1, wordByteOffset: wordByteOffset),
-            load32(input, chunkIndex: firstChunkIndex + 2, wordByteOffset: wordByteOffset),
-            load32(input, chunkIndex: firstChunkIndex + 3, wordByteOffset: wordByteOffset)
-        )
-    }
-
-    @inline(__always)
-    private static func load32(
-        _ input: BLAKE3Core.SendableRawBuffer,
-        chunkIndex: Int,
-        wordByteOffset: Int
-    ) -> UInt32 {
-        let offset = chunkIndex * BLAKE3Core.chunkLen + wordByteOffset
-        return UInt32(littleEndian: input.baseAddress.advanced(by: offset).loadUnaligned(as: UInt32.self))
     }
 
     @inline(__always)

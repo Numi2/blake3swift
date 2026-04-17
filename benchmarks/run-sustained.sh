@@ -10,11 +10,6 @@ DURATION_SECONDS="${DURATION_SECONDS:-30}"
 SUSTAINED_MODE="${SUSTAINED_MODE:-resident}"
 SUSTAINED_POLICY="${SUSTAINED_POLICY:-gpu}"
 OUT_DIR="${OUT_DIR:-benchmarks/results/$(date -u +%Y%m%dT%H%M%SZ)-sustained}"
-MEMORY_STATS_ARG=()
-
-if [[ "${MEMORY_STATS:-0}" == "1" ]]; then
-  MEMORY_STATS_ARG=(--memory-stats)
-fi
 
 mkdir -p "$OUT_DIR"
 
@@ -25,16 +20,38 @@ mkdir -p "$OUT_DIR"
   sw_vers 2>/dev/null || true
   sysctl -n machdep.cpu.brand_string 2>/dev/null || true
   sysctl -n hw.model 2>/dev/null || true
+  if [[ -n "${METAL_LIBRARY:-}" ]]; then
+    echo "metal_library=$METAL_LIBRARY"
+  else
+    echo "metal_library=runtime-source"
+  fi
+  echo "minimum_gpu_bytes=${MINIMUM_GPU_BYTES:-default}"
 } | tee "$OUT_DIR/environment.txt"
 
-swift run -c release blake3-bench \
-  --sizes "$SIZES" \
-  --iterations "$ITERATIONS" \
-  --metal-modes "$SUSTAINED_MODE" \
-  --sustained-seconds "$DURATION_SECONDS" \
-  --sustained-mode "$SUSTAINED_MODE" \
-  --sustained-policy "$SUSTAINED_POLICY" \
-  "${MEMORY_STATS_ARG[@]}" \
-  | tee "$OUT_DIR/sustained-$SUSTAINED_MODE.md"
+COMMAND=(
+  swift run -c release blake3-bench
+  --sizes "$SIZES"
+  --iterations "$ITERATIONS"
+  --metal-modes "$SUSTAINED_MODE"
+  --sustained-seconds "$DURATION_SECONDS"
+  --sustained-mode "$SUSTAINED_MODE"
+  --sustained-policy "$SUSTAINED_POLICY"
+  --json-output "$OUT_DIR/sustained-$SUSTAINED_MODE.json"
+)
+
+if [[ -n "${METAL_LIBRARY:-}" ]]; then
+  COMMAND+=(--metal-library "$METAL_LIBRARY")
+fi
+
+if [[ -n "${MINIMUM_GPU_BYTES:-}" ]]; then
+  COMMAND+=(--minimum-gpu-bytes "$MINIMUM_GPU_BYTES")
+fi
+
+if [[ "${MEMORY_STATS:-0}" == "1" ]]; then
+  COMMAND+=(--memory-stats)
+fi
+
+"${COMMAND[@]}" | tee "$OUT_DIR/sustained-$SUSTAINED_MODE.md"
+swift run -c release blake3-bench --validate-json "$OUT_DIR/sustained-$SUSTAINED_MODE.json"
 
 echo "Wrote sustained benchmark artifacts to $OUT_DIR"

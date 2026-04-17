@@ -27,9 +27,21 @@ public enum BLAKE3File {
         case memoryMappedParallel(maxThreads: Int? = nil)
         #if canImport(Metal)
         /// Wraps mapped file pages in a shared Metal buffer and hashes through ``BLAKE3Metal``.
-        case metalMemoryMapped(policy: BLAKE3Metal.ExecutionPolicy = .automatic, fallbackToCPU: Bool = true)
+        ///
+        /// Pass `librarySource` to use a precompiled `.metallib` instead of runtime source compilation.
+        case metalMemoryMapped(
+            policy: BLAKE3Metal.ExecutionPolicy = .automatic,
+            fallbackToCPU: Bool = true,
+            librarySource: BLAKE3Metal.LibrarySource = .runtimeSource
+        )
         /// Processes mapped file chunks on Metal in bounded tiles and performs canonical final tree reduction.
-        case metalTiledMemoryMapped(tileByteCount: Int = BLAKE3File.mappedTileByteCount, fallbackToCPU: Bool = true)
+        ///
+        /// Pass `librarySource` to use a precompiled `.metallib` instead of runtime source compilation.
+        case metalTiledMemoryMapped(
+            tileByteCount: Int = BLAKE3File.mappedTileByteCount,
+            fallbackToCPU: Bool = true,
+            librarySource: BLAKE3Metal.LibrarySource = .runtimeSource
+        )
         #endif
     }
 
@@ -51,14 +63,20 @@ public enum BLAKE3File {
     ) async throws -> BLAKE3.Digest {
         try Task.checkCancellation()
         #if canImport(Metal)
-        if case let .metalMemoryMapped(policy, fallbackToCPU) = strategy {
-            return try await hashMetalMappedAsync(path: path, policy: policy, fallbackToCPU: fallbackToCPU)
+        if case let .metalMemoryMapped(policy, fallbackToCPU, librarySource) = strategy {
+            return try await hashMetalMappedAsync(
+                path: path,
+                policy: policy,
+                fallbackToCPU: fallbackToCPU,
+                librarySource: librarySource
+            )
         }
-        if case let .metalTiledMemoryMapped(tileByteCount, fallbackToCPU) = strategy {
+        if case let .metalTiledMemoryMapped(tileByteCount, fallbackToCPU, librarySource) = strategy {
             return try await hashMetalTiledMappedAsync(
                 path: path,
                 tileByteCount: tileByteCount,
-                fallbackToCPU: fallbackToCPU
+                fallbackToCPU: fallbackToCPU,
+                librarySource: librarySource
             )
         }
         #endif
@@ -103,18 +121,20 @@ public enum BLAKE3File {
                 cancellationCheck: cancellationCheck
             )
         #if canImport(Metal)
-        case let .metalMemoryMapped(policy, fallbackToCPU):
+        case let .metalMemoryMapped(policy, fallbackToCPU, librarySource):
             return try hashMetalMapped(
                 path: path,
                 policy: policy,
                 fallbackToCPU: fallbackToCPU,
+                librarySource: librarySource,
                 cancellationCheck: cancellationCheck
             )
-        case let .metalTiledMemoryMapped(tileByteCount, fallbackToCPU):
+        case let .metalTiledMemoryMapped(tileByteCount, fallbackToCPU, librarySource):
             return try hashMetalTiledMapped(
                 path: path,
                 tileByteCount: tileByteCount,
                 fallbackToCPU: fallbackToCPU,
+                librarySource: librarySource,
                 cancellationCheck: cancellationCheck
             )
         #endif
@@ -191,6 +211,7 @@ public enum BLAKE3File {
         path: String,
         policy: BLAKE3Metal.ExecutionPolicy,
         fallbackToCPU: Bool,
+        librarySource: BLAKE3Metal.LibrarySource,
         cancellationCheck: (() throws -> Void)? = nil
     ) throws -> BLAKE3.Digest {
         do {
@@ -214,7 +235,7 @@ public enum BLAKE3File {
                     throw BLAKE3Error.metalCommandFailed("Unable to wrap mapped file pages in a Metal buffer.")
                 }
                 return try BLAKE3Metal
-                    .makeContext(device: device)
+                    .makeContext(device: device, librarySource: librarySource)
                     .hash(buffer: buffer, length: region.size, policy: policy)
             }
         } catch let error as CancellationError {
@@ -235,14 +256,15 @@ public enum BLAKE3File {
     private static func hashMetalMappedAsync(
         path: String,
         policy: BLAKE3Metal.ExecutionPolicy,
-        fallbackToCPU: Bool
+        fallbackToCPU: Bool,
+        librarySource: BLAKE3Metal.LibrarySource
     ) async throws -> BLAKE3.Digest {
         do {
             try Task.checkCancellation()
             guard let device = MTLCreateSystemDefaultDevice() else {
                 throw BLAKE3Error.metalUnavailable
             }
-            let context = try BLAKE3Metal.makeContext(device: device)
+            let context = try BLAKE3Metal.makeContext(device: device, librarySource: librarySource)
             return try await withMappedRegionAsync(path: path) { region in
                 try Task.checkCancellation()
                 guard region.size > 0,
@@ -280,7 +302,8 @@ public enum BLAKE3File {
     private static func hashMetalTiledMappedAsync(
         path: String,
         tileByteCount: Int,
-        fallbackToCPU: Bool
+        fallbackToCPU: Bool,
+        librarySource: BLAKE3Metal.LibrarySource
     ) async throws -> BLAKE3.Digest {
         do {
             try Task.checkCancellation()
@@ -289,7 +312,7 @@ public enum BLAKE3File {
             }
             let alignedTileByteCount = alignedMetalTileByteCount(tileByteCount)
             let tileChunkCapacity = max(1, alignedTileByteCount / BLAKE3.chunkByteCount)
-            let context = try BLAKE3Metal.makeContext(device: device)
+            let context = try BLAKE3Metal.makeContext(device: device, librarySource: librarySource)
             let chunkCVBuffer = try context.makeChunkChainingValueBuffer(chunkCapacity: tileChunkCapacity)
 
             return try await withMappedRegionAsync(path: path) { region in
@@ -383,6 +406,7 @@ public enum BLAKE3File {
         path: String,
         tileByteCount: Int,
         fallbackToCPU: Bool,
+        librarySource: BLAKE3Metal.LibrarySource,
         cancellationCheck: (() throws -> Void)? = nil
     ) throws -> BLAKE3.Digest {
         do {
@@ -392,7 +416,7 @@ public enum BLAKE3File {
             }
             let alignedTileByteCount = alignedMetalTileByteCount(tileByteCount)
             let tileChunkCapacity = max(1, alignedTileByteCount / BLAKE3.chunkByteCount)
-            let context = try BLAKE3Metal.makeContext(device: device)
+            let context = try BLAKE3Metal.makeContext(device: device, librarySource: librarySource)
             let chunkCVBuffer = try context.makeChunkChainingValueBuffer(chunkCapacity: tileChunkCapacity)
 
             return try withMappedRegion(path: path) { region in

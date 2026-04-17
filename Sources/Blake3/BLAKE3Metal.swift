@@ -23,6 +23,14 @@ public enum BLAKE3Metal {
 
     /// Default number of pooled resources used by async Metal helpers.
     public static let defaultAsyncInflightCommandCount = 3
+
+    /// Metal kernel source used by the runtime compiler fallback.
+    ///
+    /// Integrators can write this source to a `.metal` file and compile it into a `.metallib`, then pass
+    /// that file through ``LibrarySource/metallib(_:)`` when creating a context.
+    public static var kernelSource: String {
+        BLAKE3MetalKernelSource.chunkCVs
+    }
     private static let wideParentReductionThreshold = 512 * 1024
     private static let quadParentReductionThreshold = 32 * 1024
     private static let largeGridThreadThreshold = 1024 * 1024
@@ -31,6 +39,14 @@ public enum BLAKE3Metal {
 
     private static let defaultDevice = MTLCreateSystemDefaultDevice()
     private static let contextCache = BLAKE3MetalContextCache()
+
+    /// Source for Metal kernel library creation.
+    public enum LibrarySource: Equatable, Sendable {
+        /// Compile the built-in Metal source string at runtime.
+        case runtimeSource
+        /// Load precompiled kernels from a `.metallib` file.
+        case metallib(URL)
+    }
 
     /// Whether a system default Metal device was available when the module initialized.
     public static var isAvailable: Bool {
@@ -44,15 +60,21 @@ public enum BLAKE3Metal {
 
     /// Creates a reusable Metal context.
     ///
-    /// The context owns pipeline state, a command queue, and reusable scratch resources.
+    /// The context owns pipeline state, a command queue, and reusable scratch resources. Pass a
+    /// precompiled `.metallib` URL to avoid runtime `makeLibrary(source:)` startup cost in production.
     public static func makeContext(
         device: MTLDevice? = MTLCreateSystemDefaultDevice(),
-        minimumGPUByteCount: Int = defaultMinimumGPUByteCount
+        minimumGPUByteCount: Int = defaultMinimumGPUByteCount,
+        librarySource: LibrarySource = .runtimeSource
     ) throws -> Context {
         guard let device else {
             throw BLAKE3Error.metalUnavailable
         }
-        return try Context(device: device, minimumGPUByteCount: minimumGPUByteCount)
+        return try Context(
+            device: device,
+            minimumGPUByteCount: minimumGPUByteCount,
+            librarySource: librarySource
+        )
     }
 
     /// Hashes a resident Metal buffer.
@@ -105,9 +127,17 @@ public enum BLAKE3Metal {
     }
 
     /// Reusable Metal hashing context.
+    ///
+    /// A context owns pipeline state, one command queue, synchronous scratch buffers, and a default async
+    /// workspace. It is safe to share across tasks: synchronous calls serialize scratch-buffer reuse, while
+    /// async calls lease independent workspace resources. Caller-owned `MTLBuffer` values must remain valid
+    /// until the corresponding sync call returns or async call completes.
     public final class Context: @unchecked Sendable {
         public let device: MTLDevice
+        /// Minimum byte count where `.automatic` selects GPU work.
         public let minimumGPUByteCount: Int
+        /// Metal kernel source used for pipeline creation.
+        public let librarySource: LibrarySource
 
         private let pipelines: BLAKE3MetalPipelines
         private let commandQueue: MTLCommandQueue
@@ -122,13 +152,22 @@ public enum BLAKE3Metal {
         private var parentCVCapacity = 0
         private var parameterSlotCapacity = 0
 
+        /// Creates a Metal context for a device.
+        ///
+        /// `minimumGPUByteCount` controls the `.automatic` policy. `librarySource` can point at a
+        /// precompiled `.metallib` so production startup avoids runtime Metal source compilation.
         public init(
             device: MTLDevice,
-            minimumGPUByteCount: Int = BLAKE3Metal.defaultMinimumGPUByteCount
+            minimumGPUByteCount: Int = BLAKE3Metal.defaultMinimumGPUByteCount,
+            librarySource: LibrarySource = .runtimeSource
         ) throws {
             self.device = device
             self.minimumGPUByteCount = max(0, minimumGPUByteCount)
-            self.pipelines = try BLAKE3MetalPipelineCache.shared.pipelines(device: device)
+            self.librarySource = librarySource
+            self.pipelines = try BLAKE3MetalPipelineCache.shared.pipelines(
+                device: device,
+                librarySource: librarySource
+            )
             guard let commandQueue = device.makeCommandQueue() else {
                 throw BLAKE3Error.metalCommandFailed("Unable to create command queue.")
             }
@@ -139,6 +178,7 @@ public enum BLAKE3Metal {
             )
         }
 
+        /// Allocates a shared staging buffer for repeated end-to-end hashing or private-buffer uploads.
         public func makeStagingBuffer(capacity: Int) throws -> StagingBuffer {
             guard capacity >= 0 else {
                 throw BLAKE3Error.metalCommandFailed("Staging buffer capacity must be non-negative.")
@@ -152,6 +192,10 @@ public enum BLAKE3Metal {
             return StagingBuffer(buffer: buffer, capacity: capacity)
         }
 
+        /// Allocates a reusable async workspace for concurrent Metal hashing.
+        ///
+        /// Pass `preallocateForByteCount` when repeated calls have a known upper bound and allocation
+        /// latency should be removed from the measured path.
         public func makeAsyncWorkspace(
             maxPooledResources: Int = BLAKE3Metal.defaultAsyncInflightCommandCount,
             preallocateForByteCount: Int? = nil
@@ -163,6 +207,10 @@ public enum BLAKE3Metal {
             )
         }
 
+        /// Allocates a shared output buffer for chunk chaining values.
+        ///
+        /// Use this with ``writeChunkChainingValues(buffer:range:baseChunkCounter:into:)`` when a caller
+        /// wants to compose a larger tree or tiled file pipeline explicitly.
         public func makeChunkChainingValueBuffer(chunkCapacity: Int) throws -> ChunkChainingValueBuffer {
             guard chunkCapacity >= 0 else {
                 throw BLAKE3Error.metalCommandFailed("Chunk chaining value capacity must be non-negative.")
@@ -176,6 +224,10 @@ public enum BLAKE3Metal {
             return ChunkChainingValueBuffer(buffer: buffer, chunkCapacity: chunkCapacity)
         }
 
+        /// Creates a bounded async hashing pipeline.
+        ///
+        /// The pipeline owns `inFlightCount` staging buffers and an async workspace. Set
+        /// `usesPrivateBuffers` when uploads should land in private Metal memory before hashing.
         public func makeAsyncPipeline(
             inputCapacity: Int,
             inFlightCount: Int = BLAKE3Metal.defaultAsyncInflightCommandCount,
@@ -212,6 +264,7 @@ public enum BLAKE3Metal {
             )
         }
 
+        /// Allocates a private Metal input buffer for repeated resident-style GPU hashes.
         public func makePrivateBuffer(capacity: Int) throws -> PrivateBuffer {
             guard capacity >= 0 else {
                 throw BLAKE3Error.metalCommandFailed("Private buffer capacity must be non-negative.")
@@ -225,6 +278,7 @@ public enum BLAKE3Metal {
             return PrivateBuffer(buffer: buffer, capacity: capacity, length: 0)
         }
 
+        /// Allocates a private Metal input buffer and synchronously uploads `input`.
         public func makePrivateBuffer(input: some ContiguousBytes) throws -> PrivateBuffer {
             try input.withUnsafeBytes { raw in
                 let privateBuffer = try makePrivateBuffer(capacity: raw.count)
@@ -233,6 +287,7 @@ public enum BLAKE3Metal {
             }
         }
 
+        /// Allocates a private Metal input buffer and uploads through a caller-provided staging buffer.
         public func makePrivateBuffer(
             input: some ContiguousBytes,
             using stagingBuffer: StagingBuffer
@@ -244,6 +299,7 @@ public enum BLAKE3Metal {
             }
         }
 
+        /// Replaces private-buffer contents with a synchronous upload.
         public func replaceContents(
             of privateBuffer: PrivateBuffer,
             with input: some ContiguousBytes
@@ -253,6 +309,9 @@ public enum BLAKE3Metal {
             }
         }
 
+        /// Replaces private-buffer contents with a synchronous upload.
+        ///
+        /// The input buffer only needs to remain valid for the duration of the call.
         public func replaceContents(
             of privateBuffer: PrivateBuffer,
             with input: UnsafeRawBufferPointer
@@ -300,6 +359,7 @@ public enum BLAKE3Metal {
             privateBuffer.length = input.count
         }
 
+        /// Replaces private-buffer contents using a reusable staging buffer.
         public func replaceContents(
             of privateBuffer: PrivateBuffer,
             with input: some ContiguousBytes,
@@ -310,6 +370,9 @@ public enum BLAKE3Metal {
             }
         }
 
+        /// Replaces private-buffer contents using a reusable staging buffer.
+        ///
+        /// The input buffer only needs to remain valid for the duration of the call.
         public func replaceContents(
             of privateBuffer: PrivateBuffer,
             with input: UnsafeRawBufferPointer,
@@ -368,6 +431,9 @@ public enum BLAKE3Metal {
             privateBuffer.length = input.count
         }
 
+        /// Asynchronously uploads new private-buffer contents through a staging buffer.
+        ///
+        /// The staging and private buffers are locked until the blit command completes.
         public func replaceContentsAsync(
             of privateBuffer: PrivateBuffer,
             with input: some ContiguousBytes,
@@ -462,6 +528,7 @@ public enum BLAKE3Metal {
             try Task.checkCancellation()
         }
 
+        /// Hashes a resident Metal buffer through this context.
         public func hash(
             buffer: MTLBuffer,
             length: Int,
@@ -470,6 +537,7 @@ public enum BLAKE3Metal {
             try hash(buffer: buffer, range: 0..<length, policy: policy)
         }
 
+        /// Hashes a range of a resident Metal buffer through this context.
         public func hash(
             buffer: MTLBuffer,
             range: Range<Int>,
@@ -489,6 +557,10 @@ public enum BLAKE3Metal {
             )
         }
 
+        /// Writes chaining values for complete BLAKE3 chunks in a resident buffer.
+        ///
+        /// `range` must contain whole 1024-byte chunks. The returned value is the number of chunk chaining
+        /// values written into `outputBuffer`.
         @discardableResult
         public func writeChunkChainingValues(
             buffer: MTLBuffer,
@@ -552,6 +624,7 @@ public enum BLAKE3Metal {
             }
         }
 
+        /// Asynchronously writes chaining values using the context's default async workspace.
         @discardableResult
         public func writeChunkChainingValuesAsync(
             buffer: MTLBuffer,
@@ -568,6 +641,7 @@ public enum BLAKE3Metal {
             )
         }
 
+        /// Asynchronously writes chaining values using a caller-provided async workspace.
         @discardableResult
         public func writeChunkChainingValuesAsync(
             buffer: MTLBuffer,
@@ -657,6 +731,7 @@ public enum BLAKE3Metal {
             return writtenCount
         }
 
+        /// Asynchronously hashes a resident Metal buffer through this context.
         public func hashAsync(
             buffer: MTLBuffer,
             length: Int,
@@ -665,6 +740,7 @@ public enum BLAKE3Metal {
             try await hashAsync(buffer: buffer, range: 0..<length, policy: policy, workspace: defaultAsyncWorkspace)
         }
 
+        /// Asynchronously hashes a resident Metal buffer range through this context.
         public func hashAsync(
             buffer: MTLBuffer,
             range: Range<Int>,
@@ -673,6 +749,7 @@ public enum BLAKE3Metal {
             try await hashAsync(buffer: buffer, range: range, policy: policy, workspace: defaultAsyncWorkspace)
         }
 
+        /// Asynchronously hashes a resident Metal buffer using a caller-provided workspace.
         public func hashAsync(
             buffer: MTLBuffer,
             length: Int,
@@ -682,6 +759,7 @@ public enum BLAKE3Metal {
             try await hashAsync(buffer: buffer, range: 0..<length, policy: policy, workspace: asyncWorkspace)
         }
 
+        /// Asynchronously hashes a resident Metal buffer range using a caller-provided workspace.
         public func hashAsync(
             buffer: MTLBuffer,
             range: Range<Int>,
@@ -705,6 +783,7 @@ public enum BLAKE3Metal {
             )
         }
 
+        /// Hashes all committed bytes in a private input buffer.
         public func hash(
             privateBuffer: PrivateBuffer,
             policy: ExecutionPolicy = .gpu
@@ -716,6 +795,7 @@ public enum BLAKE3Metal {
             return try hashLocked(privateBuffer: privateBuffer, length: privateBuffer.length, policy: policy)
         }
 
+        /// Hashes a prefix of committed bytes in a private input buffer.
         public func hash(
             privateBuffer: PrivateBuffer,
             length: Int,
@@ -742,6 +822,7 @@ public enum BLAKE3Metal {
             return try hash(buffer: privateBuffer.buffer, length: length, policy: policy)
         }
 
+        /// Asynchronously hashes all committed bytes in a private input buffer.
         public func hashAsync(
             privateBuffer: PrivateBuffer,
             policy: ExecutionPolicy = .gpu
@@ -753,6 +834,7 @@ public enum BLAKE3Metal {
             )
         }
 
+        /// Asynchronously hashes a prefix of committed bytes in a private input buffer.
         public func hashAsync(
             privateBuffer: PrivateBuffer,
             length: Int,
@@ -766,6 +848,7 @@ public enum BLAKE3Metal {
             )
         }
 
+        /// Asynchronously hashes all committed private-buffer bytes using a caller-provided workspace.
         public func hashAsync(
             privateBuffer: PrivateBuffer,
             policy: ExecutionPolicy = .gpu,
@@ -783,6 +866,7 @@ public enum BLAKE3Metal {
             )
         }
 
+        /// Asynchronously hashes committed private-buffer bytes using a caller-provided workspace.
         public func hashAsync(
             privateBuffer: PrivateBuffer,
             length: Int,
@@ -819,6 +903,7 @@ public enum BLAKE3Metal {
             return try await hashAsync(buffer: privateBuffer.buffer, length: length, policy: policy, workspace: asyncWorkspace)
         }
 
+        /// Copies contiguous input into a staging buffer, then hashes that resident shared buffer.
         public func hash(
             input: some ContiguousBytes,
             using stagingBuffer: StagingBuffer,
@@ -829,6 +914,9 @@ public enum BLAKE3Metal {
             }
         }
 
+        /// Copies raw input into a staging buffer, then hashes that resident shared buffer.
+        ///
+        /// This is an end-to-end timing path because CPU copy/upload work is included.
         public func hash(
             input: UnsafeRawBufferPointer,
             using stagingBuffer: StagingBuffer,
@@ -858,6 +946,7 @@ public enum BLAKE3Metal {
             return try hash(buffer: stagingBuffer.buffer, length: input.count, policy: policy)
         }
 
+        /// Asynchronously hashes contiguous input through a staging buffer.
         public func hashAsync(
             input: some ContiguousBytes,
             using stagingBuffer: StagingBuffer,
@@ -871,6 +960,7 @@ public enum BLAKE3Metal {
             )
         }
 
+        /// Asynchronously hashes contiguous input through a staging buffer and caller-provided workspace.
         public func hashAsync(
             input: some ContiguousBytes,
             using stagingBuffer: StagingBuffer,
@@ -1016,8 +1106,14 @@ public enum BLAKE3Metal {
         }
     }
 
+    /// Pool of reusable Metal buffers for async hashing.
+    ///
+    /// A workspace can be shared by async calls from the same ``Context``. Calls lease one resource set for
+    /// the duration of their command buffer and release it after completion.
     public final class AsyncWorkspace: @unchecked Sendable {
+        /// Maximum number of concurrent resource sets retained by the pool.
         public let maxPooledResources: Int
+        /// Optional byte count used for eager buffer allocation.
         public let preallocatedByteCount: Int?
 
         fileprivate let deviceRegistryID: UInt64
@@ -1054,17 +1150,24 @@ public enum BLAKE3Metal {
         }
     }
 
+    /// Shared Metal buffer containing chunk chaining values.
+    ///
+    /// The readable byte range is limited to values produced by the last write call. Accessors lock the
+    /// object so it can be passed across tasks without exposing partially-written state.
     public final class ChunkChainingValueBuffer: @unchecked Sendable {
+        /// Maximum number of chunk chaining values this buffer can hold.
         public let chunkCapacity: Int
 
         fileprivate let buffer: MTLBuffer
         fileprivate let lock = NSLock()
         fileprivate var writtenChunkCount = 0
 
+        /// Underlying shared Metal buffer.
         public var metalBuffer: MTLBuffer {
             buffer
         }
 
+        /// Number of chunk chaining values written by the last successful write.
         public var chunkCount: Int {
             lock.lock()
             defer {
@@ -1073,10 +1176,12 @@ public enum BLAKE3Metal {
             return writtenChunkCount
         }
 
+        /// Number of readable bytes in ``metalBuffer``.
         public var byteCount: Int {
             chunkCount * BLAKE3.digestByteCount
         }
 
+        /// Provides read-only access to written chaining-value bytes for the duration of `body`.
         public func withUnsafeBytes<R>(
             _ body: (UnsafeRawBufferPointer) throws -> R
         ) rethrows -> R {
@@ -1112,10 +1217,18 @@ public enum BLAKE3Metal {
         }
     }
 
+    /// Bounded async hashing pipeline with reusable staging resources.
+    ///
+    /// Calls may be made concurrently. The pipeline limits concurrent work to ``inFlightCount`` slots and
+    /// reuses each slot's buffers after the previous command completes.
     public final class AsyncPipeline: @unchecked Sendable {
+        /// Maximum accepted byte count for staged input.
         public let inputCapacity: Int
+        /// Maximum number of concurrent hashes.
         public let inFlightCount: Int
+        /// Execution policy applied to each hash.
         public let policy: ExecutionPolicy
+        /// Whether input is uploaded into private Metal buffers before hashing.
         public let usesPrivateBuffers: Bool
 
         private let context: Context
@@ -1145,6 +1258,7 @@ public enum BLAKE3Metal {
             self.slots = AsyncPipelineSlotPool(slotCount: inFlightCount)
         }
 
+        /// Hashes contiguous input using one pipeline slot.
         public func hash(input: some ContiguousBytes) async throws -> BLAKE3.Digest {
             let slot = try slots.acquire()
             defer {
@@ -1187,6 +1301,7 @@ public enum BLAKE3Metal {
             return digest
         }
 
+        /// Hashes a resident Metal buffer using one pipeline slot.
         public func hash(buffer: MTLBuffer, length: Int) async throws -> BLAKE3.Digest {
             let slot = try slots.acquire()
             defer {
@@ -1202,6 +1317,7 @@ public enum BLAKE3Metal {
             return digest
         }
 
+        /// Hashes a resident Metal buffer range using one pipeline slot.
         public func hash(buffer: MTLBuffer, range: Range<Int>) async throws -> BLAKE3.Digest {
             let slot = try slots.acquire()
             defer {
@@ -1217,6 +1333,7 @@ public enum BLAKE3Metal {
             return digest
         }
 
+        /// Hashes all committed bytes in a private buffer using one pipeline slot.
         public func hash(privateBuffer: PrivateBuffer) async throws -> BLAKE3.Digest {
             let slot = try slots.acquire()
             defer {
@@ -1231,6 +1348,7 @@ public enum BLAKE3Metal {
             return digest
         }
 
+        /// Hashes a prefix of committed private-buffer bytes using one pipeline slot.
         public func hash(privateBuffer: PrivateBuffer, length: Int) async throws -> BLAKE3.Digest {
             let slot = try slots.acquire()
             defer {
@@ -1247,11 +1365,17 @@ public enum BLAKE3Metal {
         }
     }
 
+    /// Shared Metal buffer used for CPU-to-GPU staging.
+    ///
+    /// Hash and upload helpers lock the staging buffer while copying into it and while dependent async GPU
+    /// work is pending.
     public final class StagingBuffer: @unchecked Sendable {
+        /// Maximum number of input bytes accepted by helpers using this buffer.
         public let capacity: Int
         fileprivate let buffer: MTLBuffer
         fileprivate let lock = NSLock()
 
+        /// Underlying shared Metal buffer.
         public var metalBuffer: MTLBuffer {
             buffer
         }
@@ -1270,16 +1394,23 @@ public enum BLAKE3Metal {
         }
     }
 
+    /// Private Metal input buffer plus committed byte length.
+    ///
+    /// The capacity is fixed. Upload helpers update the committed length after successful blits, and hash
+    /// helpers lock the object while reading that length.
     public final class PrivateBuffer: @unchecked Sendable {
+        /// Maximum number of bytes this private buffer can hold.
         public let capacity: Int
         fileprivate let buffer: MTLBuffer
         fileprivate let lock = NSLock()
         fileprivate var length: Int
 
+        /// Underlying private Metal buffer.
         public var metalBuffer: MTLBuffer {
             buffer
         }
 
+        /// Number of bytes committed by the most recent successful upload.
         public var byteCount: Int {
             lock.lock()
             defer {

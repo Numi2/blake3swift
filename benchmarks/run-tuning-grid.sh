@@ -8,35 +8,75 @@ SIZES="${SIZES:-64m,256m,512m}"
 ITERATIONS="${ITERATIONS:-4}"
 CPU_WORKER_COUNTS="${CPU_WORKER_COUNTS:-4 6 8 10}"
 METAL_MODE_SETS="${METAL_MODE_SETS:-resident private staged e2e private,private-staged}"
+METAL_GATE_BYTES_LIST="${METAL_GATE_BYTES_LIST:-16m}"
+METAL_TILE_SIZES="${METAL_TILE_SIZES:-}"
 OUT_DIR="${OUT_DIR:-benchmarks/results/$(date -u +%Y%m%dT%H%M%SZ)-tuning}"
-MEMORY_STATS_ARG=()
-
-if [[ "${MEMORY_STATS:-0}" == "1" ]]; then
-  MEMORY_STATS_ARG=(--memory-stats)
-fi
 
 mkdir -p "$OUT_DIR"
 
 for workers in $CPU_WORKER_COUNTS; do
-  swift run -c release blake3-bench \
-    --sizes "$SIZES" \
-    --iterations "$ITERATIONS" \
-    --metal-modes none \
-    --file-modes none \
-    --cpu-workers "$workers" \
-    "${MEMORY_STATS_ARG[@]}" \
-    | tee "$OUT_DIR/cpu-workers-$workers.md"
+  COMMAND=(
+    swift run -c release blake3-bench
+    --sizes "$SIZES"
+    --iterations "$ITERATIONS"
+    --metal-modes none
+    --file-modes none
+    --cpu-workers "$workers"
+    --json-output "$OUT_DIR/cpu-workers-$workers.json"
+  )
+  if [[ -n "${METAL_LIBRARY:-}" ]]; then
+    COMMAND+=(--metal-library "$METAL_LIBRARY")
+  fi
+  if [[ "${MEMORY_STATS:-0}" == "1" ]]; then
+    COMMAND+=(--memory-stats)
+  fi
+  "${COMMAND[@]}" | tee "$OUT_DIR/cpu-workers-$workers.md"
+  swift run -c release blake3-bench --validate-json "$OUT_DIR/cpu-workers-$workers.json"
 done
 
 for modes in $METAL_MODE_SETS; do
-  safe_name="${modes//,/-}"
-  swift run -c release blake3-bench \
-    --sizes "$SIZES" \
-    --iterations "$ITERATIONS" \
-    --metal-modes "$modes" \
-    --file-modes none \
-    "${MEMORY_STATS_ARG[@]}" \
-    | tee "$OUT_DIR/metal-$safe_name.md"
+  for gate_bytes in $METAL_GATE_BYTES_LIST; do
+    safe_modes="${modes//,/-}"
+    safe_gate="${gate_bytes//[^A-Za-z0-9]/-}"
+    COMMAND=(
+      swift run -c release blake3-bench
+      --sizes "$SIZES"
+      --iterations "$ITERATIONS"
+      --metal-modes "$modes"
+      --file-modes none
+      --minimum-gpu-bytes "$gate_bytes"
+      --json-output "$OUT_DIR/metal-$safe_modes-gate-$safe_gate.json"
+    )
+    if [[ -n "${METAL_LIBRARY:-}" ]]; then
+      COMMAND+=(--metal-library "$METAL_LIBRARY")
+    fi
+    if [[ "${MEMORY_STATS:-0}" == "1" ]]; then
+      COMMAND+=(--memory-stats)
+    fi
+    "${COMMAND[@]}" | tee "$OUT_DIR/metal-$safe_modes-gate-$safe_gate.md"
+    swift run -c release blake3-bench --validate-json "$OUT_DIR/metal-$safe_modes-gate-$safe_gate.json"
+  done
+done
+
+for tile_size in $METAL_TILE_SIZES; do
+  safe_tile="${tile_size//[^A-Za-z0-9]/-}"
+  COMMAND=(
+    swift run -c release blake3-bench
+    --sizes "$SIZES"
+    --iterations "$ITERATIONS"
+    --metal-modes none
+    --file-modes metal-tiled-mmap
+    --metal-tile-size "$tile_size"
+    --json-output "$OUT_DIR/metal-tiled-file-tile-$safe_tile.json"
+  )
+  if [[ -n "${METAL_LIBRARY:-}" ]]; then
+    COMMAND+=(--metal-library "$METAL_LIBRARY")
+  fi
+  if [[ "${MEMORY_STATS:-0}" == "1" ]]; then
+    COMMAND+=(--memory-stats)
+  fi
+  "${COMMAND[@]}" | tee "$OUT_DIR/metal-tiled-file-tile-$safe_tile.md"
+  swift run -c release blake3-bench --validate-json "$OUT_DIR/metal-tiled-file-tile-$safe_tile.json"
 done
 
 echo "Wrote tuning grid artifacts to $OUT_DIR"

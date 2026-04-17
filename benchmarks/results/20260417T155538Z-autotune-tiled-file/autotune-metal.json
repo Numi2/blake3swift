@@ -1,0 +1,340 @@
+{
+  "command_line" : [
+    ".build/arm64-apple-macosx/release/blake3-bench",
+    "--autotune-metal",
+    "--autotune-sizes",
+    "512m,1g",
+    "--autotune-iterations",
+    "2",
+    "--autotune-gates",
+    "16m",
+    "--autotune-metal-modes",
+    "resident",
+    "--autotune-output",
+    "benchmarks/results/20260417T155538Z-autotune-tiled-file/autotune-metal.json",
+    "--autotune-file-tiles",
+    "--autotune-tile-sizes",
+    "8m,16m,32m,64m"
+  ],
+  "environment" : {
+    "backend" : "swift-simd4",
+    "default_parallel_workers" : 4,
+    "metal_device" : "Apple M4",
+    "metal_library" : "runtime-source",
+    "parallel_simd_degree" : 4,
+    "simd_degree" : 4
+  },
+  "generated_at_utc" : "2026-04-17T15:55:50.866Z",
+  "measurements" : [
+    {
+      "byte_count" : 536870912,
+      "candidate" : "context-auto",
+      "category" : "cpu-baseline",
+      "correct" : true,
+      "digest" : "12371166c97de69889e246a706d9f6150d71e2aca07cbcee91a0b213d77c418e",
+      "iterations" : 2,
+      "maximum_gib_per_second" : 3.8407115873784665,
+      "median_gib_per_second" : 3.8106714810970135,
+      "minimum_gib_per_second" : 3.7806313748155604,
+      "p95_gib_per_second" : 3.8407115873784665,
+      "sample_nanoseconds" : [
+        132253042,
+        130184209
+      ],
+      "size" : "512.0 MiB"
+    },
+    {
+      "byte_count" : 536870912,
+      "candidate" : "resident-auto",
+      "category" : "minimum-gpu-bytes",
+      "correct" : true,
+      "digest" : "12371166c97de69889e246a706d9f6150d71e2aca07cbcee91a0b213d77c418e",
+      "iterations" : 2,
+      "maximum_gib_per_second" : 56.15164898301502,
+      "median_gib_per_second" : 48.98021882932653,
+      "minimum_gib_per_second" : 41.80878867563805,
+      "p95_gib_per_second" : 56.15164898301502,
+      "parameter_name" : "minimum_gpu_bytes",
+      "parameter_value_bytes" : 16777216,
+      "sample_nanoseconds" : [
+        11959208,
+        8904458
+      ],
+      "size" : "512.0 MiB"
+    },
+    {
+      "byte_count" : 536870912,
+      "candidate" : "resident-gpu",
+      "category" : "metal-mode",
+      "correct" : true,
+      "digest" : "12371166c97de69889e246a706d9f6150d71e2aca07cbcee91a0b213d77c418e",
+      "iterations" : 2,
+      "maximum_gib_per_second" : 67.1719429780063,
+      "median_gib_per_second" : 62.71487399002237,
+      "minimum_gib_per_second" : 58.25780500203844,
+      "p95_gib_per_second" : 67.1719429780063,
+      "parameter_name" : "mode",
+      "sample_nanoseconds" : [
+        8582541,
+        7443584
+      ],
+      "size" : "512.0 MiB"
+    },
+    {
+      "byte_count" : 536870912,
+      "candidate" : "metal-tiled-mmap",
+      "category" : "metal-file-tile",
+      "correct" : true,
+      "digest" : "12371166c97de69889e246a706d9f6150d71e2aca07cbcee91a0b213d77c418e",
+      "iterations" : 2,
+      "maximum_gib_per_second" : 3.092034391288567,
+      "median_gib_per_second" : 3.077312657701021,
+      "minimum_gib_per_second" : 3.0625909241134743,
+      "p95_gib_per_second" : 3.092034391288567,
+      "parameter_name" : "tile_bytes",
+      "parameter_value_bytes" : 8388608,
+      "sample_nanoseconds" : [
+        161705834,
+        163260459
+      ],
+      "size" : "512.0 MiB"
+    },
+    {
+      "byte_count" : 536870912,
+      "candidate" : "metal-tiled-mmap",
+      "category" : "metal-file-tile",
+      "correct" : true,
+      "digest" : "12371166c97de69889e246a706d9f6150d71e2aca07cbcee91a0b213d77c418e",
+      "iterations" : 2,
+      "maximum_gib_per_second" : 3.6289792047298195,
+      "median_gib_per_second" : 3.618742040606395,
+      "minimum_gib_per_second" : 3.6085048764829706,
+      "p95_gib_per_second" : 3.6289792047298195,
+      "parameter_name" : "tile_bytes",
+      "parameter_value_bytes" : 16777216,
+      "sample_nanoseconds" : [
+        137779792,
+        138561542
+      ],
+      "size" : "512.0 MiB"
+    },
+    {
+      "byte_count" : 536870912,
+      "candidate" : "metal-tiled-mmap",
+      "category" : "metal-file-tile",
+      "correct" : true,
+      "digest" : "12371166c97de69889e246a706d9f6150d71e2aca07cbcee91a0b213d77c418e",
+      "iterations" : 2,
+      "maximum_gib_per_second" : 3.771408646322411,
+      "median_gib_per_second" : 3.721804812941011,
+      "minimum_gib_per_second" : 3.6722009795596113,
+      "p95_gib_per_second" : 3.771408646322411,
+      "parameter_name" : "tile_bytes",
+      "parameter_value_bytes" : 33554432,
+      "sample_nanoseconds" : [
+        132576458,
+        136158125
+      ],
+      "size" : "512.0 MiB"
+    },
+    {
+      "byte_count" : 536870912,
+      "candidate" : "metal-tiled-mmap",
+      "category" : "metal-file-tile",
+      "correct" : true,
+      "digest" : "12371166c97de69889e246a706d9f6150d71e2aca07cbcee91a0b213d77c418e",
+      "iterations" : 2,
+      "maximum_gib_per_second" : 3.851834056949151,
+      "median_gib_per_second" : 3.835018360564539,
+      "minimum_gib_per_second" : 3.8182026641799274,
+      "p95_gib_per_second" : 3.851834056949151,
+      "parameter_name" : "tile_bytes",
+      "parameter_value_bytes" : 67108864,
+      "sample_nanoseconds" : [
+        130951666,
+        129808292
+      ],
+      "size" : "512.0 MiB"
+    },
+    {
+      "byte_count" : 1073741824,
+      "candidate" : "context-auto",
+      "category" : "cpu-baseline",
+      "correct" : true,
+      "digest" : "22c331c8d557533787e929d24ca6851b2351888c8ce0d82262852df4a837e340",
+      "iterations" : 2,
+      "maximum_gib_per_second" : 3.7312104497055945,
+      "median_gib_per_second" : 3.6080108792407186,
+      "minimum_gib_per_second" : 3.4848113087758423,
+      "p95_gib_per_second" : 3.7312104497055945,
+      "sample_nanoseconds" : [
+        268009541,
+        286959583
+      ],
+      "size" : "1.0 GiB"
+    },
+    {
+      "byte_count" : 1073741824,
+      "candidate" : "resident-auto",
+      "category" : "minimum-gpu-bytes",
+      "correct" : true,
+      "digest" : "22c331c8d557533787e929d24ca6851b2351888c8ce0d82262852df4a837e340",
+      "iterations" : 2,
+      "maximum_gib_per_second" : 62.68708175962638,
+      "median_gib_per_second" : 58.77286565870814,
+      "minimum_gib_per_second" : 54.85864955778991,
+      "p95_gib_per_second" : 62.68708175962638,
+      "parameter_name" : "minimum_gpu_bytes",
+      "parameter_value_bytes" : 16777216,
+      "sample_nanoseconds" : [
+        18228666,
+        15952250
+      ],
+      "size" : "1.0 GiB"
+    },
+    {
+      "byte_count" : 1073741824,
+      "candidate" : "resident-gpu",
+      "category" : "metal-mode",
+      "correct" : true,
+      "digest" : "22c331c8d557533787e929d24ca6851b2351888c8ce0d82262852df4a837e340",
+      "iterations" : 2,
+      "maximum_gib_per_second" : 62.8083142380356,
+      "median_gib_per_second" : 62.52303577885466,
+      "minimum_gib_per_second" : 62.23775731967372,
+      "p95_gib_per_second" : 62.8083142380356,
+      "parameter_name" : "mode",
+      "sample_nanoseconds" : [
+        15921459,
+        16067417
+      ],
+      "size" : "1.0 GiB"
+    },
+    {
+      "byte_count" : 1073741824,
+      "candidate" : "metal-tiled-mmap",
+      "category" : "metal-file-tile",
+      "correct" : true,
+      "digest" : "22c331c8d557533787e929d24ca6851b2351888c8ce0d82262852df4a837e340",
+      "iterations" : 2,
+      "maximum_gib_per_second" : 3.204555164930251,
+      "median_gib_per_second" : 3.202605329587736,
+      "minimum_gib_per_second" : 3.2006554942452214,
+      "p95_gib_per_second" : 3.204555164930251,
+      "parameter_name" : "tile_bytes",
+      "parameter_value_bytes" : 8388608,
+      "sample_nanoseconds" : [
+        312436000,
+        312055792
+      ],
+      "size" : "1.0 GiB"
+    },
+    {
+      "byte_count" : 1073741824,
+      "candidate" : "metal-tiled-mmap",
+      "category" : "metal-file-tile",
+      "correct" : true,
+      "digest" : "22c331c8d557533787e929d24ca6851b2351888c8ce0d82262852df4a837e340",
+      "iterations" : 2,
+      "maximum_gib_per_second" : 3.8846089799410333,
+      "median_gib_per_second" : 3.707042812366149,
+      "minimum_gib_per_second" : 3.5294766447912647,
+      "p95_gib_per_second" : 3.8846089799410333,
+      "parameter_name" : "tile_bytes",
+      "parameter_value_bytes" : 16777216,
+      "sample_nanoseconds" : [
+        283328125,
+        257426167
+      ],
+      "size" : "1.0 GiB"
+    },
+    {
+      "byte_count" : 1073741824,
+      "candidate" : "metal-tiled-mmap",
+      "category" : "metal-file-tile",
+      "correct" : true,
+      "digest" : "22c331c8d557533787e929d24ca6851b2351888c8ce0d82262852df4a837e340",
+      "iterations" : 2,
+      "maximum_gib_per_second" : 4.023602451983335,
+      "median_gib_per_second" : 3.9982174523456715,
+      "minimum_gib_per_second" : 3.9728324527080083,
+      "p95_gib_per_second" : 4.023602451983335,
+      "parameter_name" : "tile_bytes",
+      "parameter_value_bytes" : 33554432,
+      "sample_nanoseconds" : [
+        248533500,
+        251709583
+      ],
+      "size" : "1.0 GiB"
+    },
+    {
+      "byte_count" : 1073741824,
+      "candidate" : "metal-tiled-mmap",
+      "category" : "metal-file-tile",
+      "correct" : true,
+      "digest" : "22c331c8d557533787e929d24ca6851b2351888c8ce0d82262852df4a837e340",
+      "iterations" : 2,
+      "maximum_gib_per_second" : 4.57494036885475,
+      "median_gib_per_second" : 4.326581356258686,
+      "minimum_gib_per_second" : 4.078222343662621,
+      "p95_gib_per_second" : 4.57494036885475,
+      "parameter_name" : "tile_bytes",
+      "parameter_value_bytes" : 67108864,
+      "sample_nanoseconds" : [
+        245204875,
+        218582084
+      ],
+      "size" : "1.0 GiB"
+    }
+  ],
+  "recommendations" : [
+    {
+      "category" : "minimum-gpu-bytes",
+      "parameter_name" : "minimum_gpu_bytes",
+      "rationale" : "Highest geometric mean resident-auto throughput across autotune sizes.",
+      "recommended_value" : "16.0 MiB",
+      "recommended_value_bytes" : 16777216,
+      "score_gib_per_second" : 53.65359094403779
+    },
+    {
+      "category" : "metal-mode",
+      "parameter_name" : "mode",
+      "rationale" : "Highest geometric mean forced-GPU throughput across autotune sizes; compare timing class before publishing.",
+      "recommended_value" : "resident-gpu",
+      "score_gib_per_second" : 62.618881420419285
+    },
+    {
+      "category" : "metal-file-tile",
+      "parameter_name" : "tile_bytes",
+      "rationale" : "Highest geometric mean tiled Metal file throughput across autotune sizes.",
+      "recommended_value" : "64.0 MiB",
+      "recommended_value_bytes" : 67108864,
+      "score_gib_per_second" : 4.073391577018871
+    }
+  ],
+  "request" : {
+    "gate_candidates_bytes" : [
+      16777216
+    ],
+    "includes_file_tile_sweep" : true,
+    "iterations" : 2,
+    "mode_candidates" : [
+      "resident"
+    ],
+    "sizes" : [
+      "512.0 MiB",
+      "1.0 GiB"
+    ],
+    "sizes_bytes" : [
+      536870912,
+      1073741824
+    ],
+    "tile_candidates_bytes" : [
+      8388608,
+      16777216,
+      33554432,
+      67108864
+    ]
+  },
+  "schema_version" : 1
+}

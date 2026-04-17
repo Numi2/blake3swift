@@ -12,11 +12,13 @@ This repository is **not open source**. It is proprietary source-available softw
 
 - Native Swift BLAKE3 core with no vendored C target.
 - One-shot, keyed, derived-key, streaming, XOF, and reusable context APIs.
+- Reusable CPU contexts with persistent parallel worker pools for repeated hashes.
 - SIMD4 chunk and parent reduction paths for CPU throughput.
 - CPU parallel hashing defaults to detected performance-core count on Darwin when available, with explicit worker overrides for reproducible benchmarks.
 - Bounded-memory CV stack for streaming and multi-GB file hashing.
 - CPU file strategies for buffered reads and memory-mapped hashing.
 - Metal resident-buffer, staged-buffer, private-buffer, async pipeline, and tiled file hashing APIs.
+- Runtime Metal compilation fallback plus precompiled `.metallib` loading for production startup control.
 - Benchmark harness with separate resident, end-to-end, CPU, file, and sustained-run modes.
 
 ## Requirements
@@ -166,6 +168,23 @@ let digest = try context.hash(
 print(digest)
 ```
 
+Production integrations can avoid runtime Metal compilation by precompiling the bundled kernel source and loading a `.metallib`:
+
+```swift
+let context = try BLAKE3Metal.makeContext(
+    device: device,
+    librarySource: .metallib(URL(fileURLWithPath: "/path/to/BLAKE3Metal.metallib"))
+)
+```
+
+The built-in source is available as `BLAKE3Metal.kernelSource`. The benchmark executable can print that source for packaging:
+
+```bash
+swift run -c release blake3-bench --print-metal-source > BLAKE3Metal.metal
+xcrun -sdk macosx metal -c BLAKE3Metal.metal -o BLAKE3Metal.air
+xcrun -sdk macosx metallib BLAKE3Metal.air -o BLAKE3Metal.metallib
+```
+
 For repeated async jobs, use an async pipeline so staging and command resources are reused:
 
 ```swift
@@ -235,11 +254,20 @@ Reproducible benchmark wrappers live under [benchmarks](benchmarks):
 benchmarks/run-smoke.sh
 benchmarks/run-publication.sh
 benchmarks/run-sustained.sh
+benchmarks/run-autotune.sh
 ```
 
 Publication runs should keep the generated `environment.txt`, raw markdown output, exact commit, power mode, and thermal notes with the release artifacts.
 
-Set `MEMORY_STATS=1` on the fixture scripts, or pass `--memory-stats` to `blake3-bench`, to include process RSS snapshots beside timing rows.
+Set `MEMORY_STATS=1` on the fixture scripts, or pass `--memory-stats` to `blake3-bench`, to include process RSS plus allocator bytes/block snapshots beside timing rows.
+
+Set `METAL_LIBRARY=/path/to/BLAKE3Metal.metallib` on the fixture scripts, or pass `--metal-library /path/to/BLAKE3Metal.metallib`, to benchmark precompiled Metal library loading instead of runtime source compilation.
+
+Set `MINIMUM_GPU_BYTES=16m` to tune the `.automatic` Metal CPU/GPU gate, and `METAL_TILE_SIZE=64m` to tune tiled Metal file benchmarking. The emitted JSON records both values.
+
+Run `benchmarks/run-autotune.sh` to measure Metal gate and mode candidates and emit validated recommendation JSON. Set `AUTOTUNE_FILE_TILES=1` when tiled file tile-size recommendations are needed.
+
+Publication and tuning fixtures write and validate machine-readable JSON reports next to their Markdown tables. For ad hoc runs, pass `--json-output /path/to/report.json` to preserve per-sample timings and environment metadata, then `--validate-json /path/to/report.json` before publishing.
 
 ## Examples
 
@@ -267,6 +295,7 @@ Useful docs:
 - [M4 Metal performance strategy](docs/m4-metal-performance-strategy.md)
 - [Complete implementation roadmap](docs/complete-implementation-roadmap.md)
 - [Performance results](docs/performance-results.md)
+- [Metal library packaging](docs/metal-library-packaging.md)
 - [API stability notes](docs/api-stability.md)
 - [Release process](docs/release-process.md)
 - [Security review notes](docs/security-review.md)

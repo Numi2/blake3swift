@@ -7,7 +7,8 @@ This file records candidate public performance data after sustained measurements
 - Keep resident, staged, wrapped, private, end-to-end, file, and sustained timing classes separate.
 - Report median, min, p95, max, and correctness for sweep rows.
 - Report average, median, min, p95, max, first-quarter, last-quarter, iteration count, and correctness for sustained rows.
-- Keep raw benchmark output and `environment.txt` from `benchmarks/run-publication.sh` or `benchmarks/run-sustained.sh` with release artifacts.
+- Keep raw Markdown output, JSON reports, and `environment.txt` from `benchmarks/run-publication.sh` or `benchmarks/run-sustained.sh` with release artifacts.
+- Record whether Metal rows used `runtime-source` or a packaged `.metallib`.
 - Do not present a single best sample as sustained throughput.
 
 ## Apple M4 Candidate Sweep
@@ -53,6 +54,17 @@ Staged and wrapped rows are diagnostic application-path data, not resident or en
 
 ## Sustained Apple M4 Candidate Runs
 
+120-second resident GPU run from `benchmarks/results/20260417T155605Z-sustained-resident-120s`:
+
+```sh
+SIZES=512m,1g ITERATIONS=2 DURATION_SECONDS=120 SUSTAINED_MODE=resident SUSTAINED_POLICY=gpu MEMORY_STATS=1 benchmarks/run-sustained.sh
+```
+
+| Size | Mode | Duration | Average GiB/s | Median GiB/s | Min GiB/s | P95 GiB/s | Max GiB/s | First 25% GiB/s | Last 25% GiB/s | Iterations | Correct |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 512 MiB | resident GPU | 120 s | 54.97 | 55.78 | 28.39 | 69.00 | 75.71 | 62.29 | 50.20 | 13194 | ok |
+| 1 GiB | resident GPU | 120 s | 45.36 | 48.03 | 4.37 | 54.06 | 68.46 | 47.77 | 45.08 | 5444 | ok |
+
 Post-fusion 30-second sustained resident GPU check:
 
 ```sh
@@ -73,6 +85,23 @@ swift run -c release blake3-bench --sizes 1g --iterations 4 --metal-modes privat
 | Size | Mode | Duration | Average GiB/s | Median GiB/s | P95 GiB/s | Max GiB/s | First 25% GiB/s | Last 25% GiB/s | Correct |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | 1 GiB | private resident GPU | 30 s | 66.64 | 66.57 | 73.51 | 75.93 | 66.02 | 66.74 | ok |
+
+## Apple M4 Autotune Runs
+
+Default autotune artifact: `benchmarks/results/20260417T155523Z-autotune-default`.
+
+| Category | Recommendation | Score GiB/s | Notes |
+| --- | --- | ---: | --- |
+| `minimum_gpu_bytes` | 4 MiB | 24.18 | Best geometric mean across 16 MiB and 64 MiB resident-auto measurements. |
+| `mode` | private-gpu | 28.27 | Fastest forced-GPU timing class in this sweep; resident private-buffer data, not end-to-end throughput. |
+
+Tiled-file autotune artifact: `benchmarks/results/20260417T155538Z-autotune-tiled-file`.
+
+| Category | Recommendation | Score GiB/s | Notes |
+| --- | --- | ---: | --- |
+| `minimum_gpu_bytes` | 16 MiB | 53.65 | Best geometric mean across 512 MiB and 1 GiB resident-auto measurements. |
+| `mode` | resident-gpu | 62.62 | Fastest forced-GPU timing class in this large-input sweep. |
+| `tile_bytes` | 64 MiB | 4.07 | Best measured tiled Metal file tile size across 512 MiB and 1 GiB. |
 
 ## File Publication Status
 

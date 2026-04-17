@@ -33,7 +33,9 @@ For a public release, collect and attach:
 - `sw_vers`
 - `sysctl -n machdep.cpu.brand_string` or Apple silicon model identifier
 - `git rev-parse HEAD`
-- Benchmark commands and raw output
+- Benchmark commands, raw Markdown output, and JSON reports
+- Autotune command, raw Markdown output, JSON report, and accepted constants when changing Metal thresholds or modes
+- Metal library source mode: runtime source compiler or packaged `.metallib`
 - Thermal window and power mode notes
 
 For performance claims, keep these timing classes separate:

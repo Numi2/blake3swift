@@ -86,34 +86,116 @@ enum BLAKE3Core {
         }
     }
 
+    private final class ParallelSchedulerState: @unchecked Sendable {
+        let workerCount: Int
+        let startSemaphore = DispatchSemaphore(value: 0)
+        let doneSemaphore = DispatchSemaphore(value: 0)
+        let stateLock = NSLock()
+        let performLock = NSLock()
+        var iterations = 0
+        var nextIndex = 0
+        var body: (@Sendable (Int) -> Void)?
+        var shutdown = false
+
+        init(workerCount: Int) {
+            self.workerCount = workerCount
+        }
+    }
+
     final class ParallelScheduler: @unchecked Sendable {
         let workerCount: Int
-        private let queue: DispatchQueue
+        private let state: ParallelSchedulerState
+        private var workers: [Thread] = []
 
         init(workerCount: Int) {
             self.workerCount = max(1, workerCount)
-            self.queue = DispatchQueue(
-                label: "com.blake3swift.cpu-parallel.\(self.workerCount)",
-                qos: .userInitiated,
-                attributes: .concurrent
-            )
+            self.state = ParallelSchedulerState(workerCount: self.workerCount)
+            if self.workerCount > 1 {
+                self.workers = (0..<self.workerCount).map { workerIndex in
+                    let thread = Thread { [state] in
+                        Self.workerLoop(state: state, workerIndex: workerIndex)
+                    }
+                    thread.name = "com.blake3swift.cpu-parallel.\(self.workerCount).\(workerIndex)"
+                    thread.qualityOfService = .userInitiated
+                    thread.start()
+                    return thread
+                }
+            }
+        }
+
+        deinit {
+            state.performLock.lock()
+            state.stateLock.lock()
+            state.shutdown = true
+            state.body = nil
+            state.iterations = 0
+            state.nextIndex = 0
+            state.stateLock.unlock()
+            for _ in workers {
+                state.startSemaphore.signal()
+            }
+            state.performLock.unlock()
         }
 
         func perform(iterations: Int, _ body: @escaping @Sendable (Int) -> Void) {
-            guard iterations > 1 else {
-                if iterations == 1 {
-                    body(0)
+            guard iterations > 0 else {
+                return
+            }
+            guard iterations > 1, !workers.isEmpty else {
+                for index in 0..<iterations {
+                    body(index)
                 }
                 return
             }
 
-            let group = DispatchGroup()
-            for index in 0..<iterations {
-                queue.async(group: group) {
+            let activeWorkers = min(iterations, workerCount)
+            state.performLock.lock()
+
+            state.stateLock.lock()
+            state.iterations = iterations
+            state.nextIndex = 0
+            state.body = body
+            state.stateLock.unlock()
+
+            for _ in 0..<activeWorkers {
+                state.startSemaphore.signal()
+            }
+            for _ in 0..<activeWorkers {
+                state.doneSemaphore.wait()
+            }
+
+            state.stateLock.lock()
+            state.body = nil
+            state.iterations = 0
+            state.nextIndex = 0
+            state.stateLock.unlock()
+
+            state.performLock.unlock()
+        }
+
+        private static func workerLoop(state: ParallelSchedulerState, workerIndex _: Int) {
+            while true {
+                state.startSemaphore.wait()
+
+                while true {
+                    state.stateLock.lock()
+                    if state.shutdown {
+                        state.stateLock.unlock()
+                        return
+                    }
+                    guard let body = state.body, state.nextIndex < state.iterations else {
+                        state.stateLock.unlock()
+                        break
+                    }
+                    let index = state.nextIndex
+                    state.nextIndex += 1
+                    state.stateLock.unlock()
+
                     body(index)
                 }
+
+                state.doneSemaphore.signal()
             }
-            group.wait()
         }
     }
 
@@ -950,12 +1032,7 @@ enum BLAKE3Core {
 
     @inline(__always)
     private static func loadFullBlockWords(baseAddress: UnsafeRawPointer) -> BlockWords {
-        var words = BlockWords(repeating: 0)
-        withUnsafeMutableBytes(of: &words) { destination in
-            destination.copyMemory(
-                from: UnsafeRawBufferPointer(start: baseAddress, count: blockLen)
-            )
-        }
+        var words = baseAddress.loadUnaligned(as: BlockWords.self)
         canonicalLittleEndianWords(&words)
         return words
     }
@@ -1139,60 +1216,92 @@ enum BLAKE3Core {
         let m14 = blockWords[14]
         let m15 = blockWords[15]
 
-        var state = BlockWords(
-            cv[0], cv[1], cv[2], cv[3],
-            cv[4], cv[5], cv[6], cv[7],
-            iv[0], iv[1], iv[2], iv[3],
-            UInt32(truncatingIfNeeded: counter),
-            UInt32(truncatingIfNeeded: counter >> 32),
-            blockLength,
-            flags
+        var s0 = cv[0]
+        var s1 = cv[1]
+        var s2 = cv[2]
+        var s3 = cv[3]
+        var s4 = cv[4]
+        var s5 = cv[5]
+        var s6 = cv[6]
+        var s7 = cv[7]
+        var s8 = iv[0]
+        var s9 = iv[1]
+        var s10 = iv[2]
+        var s11 = iv[3]
+        var s12 = UInt32(truncatingIfNeeded: counter)
+        var s13 = UInt32(truncatingIfNeeded: counter >> 32)
+        var s14 = blockLength
+        var s15 = flags
+
+        roundWords(
+            &s0, &s1, &s2, &s3, &s4, &s5, &s6, &s7,
+            &s8, &s9, &s10, &s11, &s12, &s13, &s14, &s15,
+            m0, m1, m2, m3, m4, m5, m6, m7,
+            m8, m9, m10, m11, m12, m13, m14, m15
+        )
+        roundWords(
+            &s0, &s1, &s2, &s3, &s4, &s5, &s6, &s7,
+            &s8, &s9, &s10, &s11, &s12, &s13, &s14, &s15,
+            m2, m6, m3, m10, m7, m0, m4, m13,
+            m1, m11, m12, m5, m9, m14, m15, m8
+        )
+        roundWords(
+            &s0, &s1, &s2, &s3, &s4, &s5, &s6, &s7,
+            &s8, &s9, &s10, &s11, &s12, &s13, &s14, &s15,
+            m3, m4, m10, m12, m13, m2, m7, m14,
+            m6, m5, m9, m0, m11, m15, m8, m1
+        )
+        roundWords(
+            &s0, &s1, &s2, &s3, &s4, &s5, &s6, &s7,
+            &s8, &s9, &s10, &s11, &s12, &s13, &s14, &s15,
+            m10, m7, m12, m9, m14, m3, m13, m15,
+            m4, m0, m11, m2, m5, m8, m1, m6
+        )
+        roundWords(
+            &s0, &s1, &s2, &s3, &s4, &s5, &s6, &s7,
+            &s8, &s9, &s10, &s11, &s12, &s13, &s14, &s15,
+            m12, m13, m9, m11, m15, m10, m14, m8,
+            m7, m2, m5, m3, m0, m1, m6, m4
+        )
+        roundWords(
+            &s0, &s1, &s2, &s3, &s4, &s5, &s6, &s7,
+            &s8, &s9, &s10, &s11, &s12, &s13, &s14, &s15,
+            m9, m14, m11, m5, m8, m12, m15, m1,
+            m13, m3, m0, m10, m2, m6, m4, m7
+        )
+        roundWords(
+            &s0, &s1, &s2, &s3, &s4, &s5, &s6, &s7,
+            &s8, &s9, &s10, &s11, &s12, &s13, &s14, &s15,
+            m11, m15, m5, m0, m1, m9, m8, m6,
+            m14, m10, m2, m12, m3, m4, m7, m13
         )
 
-        withUnsafeMutableBytes(of: &state) { rawState in
-            let stateWords = rawState.bindMemory(to: UInt32.self).baseAddress!
-            roundWords(
-                state: stateWords,
-                m0, m1, m2, m3, m4, m5, m6, m7,
-                m8, m9, m10, m11, m12, m13, m14, m15
-            )
-            roundWords(
-                state: stateWords,
-                m2, m6, m3, m10, m7, m0, m4, m13,
-                m1, m11, m12, m5, m9, m14, m15, m8
-            )
-            roundWords(
-                state: stateWords,
-                m3, m4, m10, m12, m13, m2, m7, m14,
-                m6, m5, m9, m0, m11, m15, m8, m1
-            )
-            roundWords(
-                state: stateWords,
-                m10, m7, m12, m9, m14, m3, m13, m15,
-                m4, m0, m11, m2, m5, m8, m1, m6
-            )
-            roundWords(
-                state: stateWords,
-                m12, m13, m9, m11, m15, m10, m14, m8,
-                m7, m2, m5, m3, m0, m1, m6, m4
-            )
-            roundWords(
-                state: stateWords,
-                m9, m14, m11, m5, m8, m12, m15, m1,
-                m13, m3, m0, m10, m2, m6, m4, m7
-            )
-            roundWords(
-                state: stateWords,
-                m11, m15, m5, m0, m1, m9, m8, m6,
-                m14, m10, m2, m12, m3, m4, m7, m13
-            )
-        }
-        return state
+        return BlockWords(
+            s0, s1, s2, s3,
+            s4, s5, s6, s7,
+            s8, s9, s10, s11,
+            s12, s13, s14, s15
+        )
     }
 
     @inline(__always)
     private static func roundWords(
-        state: UnsafeMutablePointer<UInt32>,
+        _ s0: inout UInt32,
+        _ s1: inout UInt32,
+        _ s2: inout UInt32,
+        _ s3: inout UInt32,
+        _ s4: inout UInt32,
+        _ s5: inout UInt32,
+        _ s6: inout UInt32,
+        _ s7: inout UInt32,
+        _ s8: inout UInt32,
+        _ s9: inout UInt32,
+        _ s10: inout UInt32,
+        _ s11: inout UInt32,
+        _ s12: inout UInt32,
+        _ s13: inout UInt32,
+        _ s14: inout UInt32,
+        _ s15: inout UInt32,
         _ m0: UInt32,
         _ m1: UInt32,
         _ m2: UInt32,
@@ -1210,31 +1319,25 @@ enum BLAKE3Core {
         _ m14: UInt32,
         _ m15: UInt32
     ) {
-        gWords(state, 0, 4, 8, 12, m0, m1)
-        gWords(state, 1, 5, 9, 13, m2, m3)
-        gWords(state, 2, 6, 10, 14, m4, m5)
-        gWords(state, 3, 7, 11, 15, m6, m7)
-        gWords(state, 0, 5, 10, 15, m8, m9)
-        gWords(state, 1, 6, 11, 12, m10, m11)
-        gWords(state, 2, 7, 8, 13, m12, m13)
-        gWords(state, 3, 4, 9, 14, m14, m15)
+        gWords(&s0, &s4, &s8, &s12, m0, m1)
+        gWords(&s1, &s5, &s9, &s13, m2, m3)
+        gWords(&s2, &s6, &s10, &s14, m4, m5)
+        gWords(&s3, &s7, &s11, &s15, m6, m7)
+        gWords(&s0, &s5, &s10, &s15, m8, m9)
+        gWords(&s1, &s6, &s11, &s12, m10, m11)
+        gWords(&s2, &s7, &s8, &s13, m12, m13)
+        gWords(&s3, &s4, &s9, &s14, m14, m15)
     }
 
     @inline(__always)
     private static func gWords(
-        _ state: UnsafeMutablePointer<UInt32>,
-        _ aIndex: Int,
-        _ bIndex: Int,
-        _ cIndex: Int,
-        _ dIndex: Int,
+        _ a: inout UInt32,
+        _ b: inout UInt32,
+        _ c: inout UInt32,
+        _ d: inout UInt32,
         _ x: UInt32,
         _ y: UInt32
     ) {
-        var a = state[aIndex]
-        var b = state[bIndex]
-        var c = state[cIndex]
-        var d = state[dIndex]
-
         a = a &+ b &+ x
         d = rotateRight(d ^ a, by: 16)
         c = c &+ d
@@ -1243,11 +1346,6 @@ enum BLAKE3Core {
         d = rotateRight(d ^ a, by: 8)
         c = c &+ d
         b = rotateRight(b ^ c, by: 7)
-
-        state[aIndex] = a
-        state[bIndex] = b
-        state[cIndex] = c
-        state[dIndex] = d
     }
 
     @inline(__always)

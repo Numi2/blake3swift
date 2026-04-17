@@ -32,20 +32,32 @@ struct BLAKE3MetalPipelines {
 final class BLAKE3MetalPipelineCache: @unchecked Sendable {
     static let shared = BLAKE3MetalPipelineCache()
 
+    private struct CacheKey: Hashable {
+        let deviceRegistryID: UInt64
+        let libraryIdentifier: String
+    }
+
     private let lock = NSLock()
-    private var pipelines: [UInt64: BLAKE3MetalPipelines] = [:]
+    private var pipelines: [CacheKey: BLAKE3MetalPipelines] = [:]
 
     private init() {}
 
-    func pipelines(device: MTLDevice) throws -> BLAKE3MetalPipelines {
+    func pipelines(
+        device: MTLDevice,
+        librarySource: BLAKE3Metal.LibrarySource = .runtimeSource
+    ) throws -> BLAKE3MetalPipelines {
+        let key = CacheKey(
+            deviceRegistryID: device.registryID,
+            libraryIdentifier: librarySource.cacheIdentifier
+        )
         lock.lock()
-        if let pipelines = pipelines[device.registryID] {
+        if let pipelines = pipelines[key] {
             lock.unlock()
             return pipelines
         }
         lock.unlock()
 
-        let library = try device.makeLibrary(source: BLAKE3MetalKernelSource.chunkCVs, options: nil)
+        let library = try librarySource.makeLibrary(device: device)
         guard let chunkFunction = library.makeFunction(name: "blake3_chunk_cvs"),
               let chunkFullFunction = library.makeFunction(name: "blake3_chunk_full_cvs"),
               let parentFunction = library.makeFunction(name: "blake3_parent_cvs"),
@@ -71,10 +83,30 @@ final class BLAKE3MetalPipelineCache: @unchecked Sendable {
         )
 
         lock.lock()
-        self.pipelines[device.registryID] = pipelines
+        self.pipelines[key] = pipelines
         lock.unlock()
 
         return pipelines
+    }
+}
+
+private extension BLAKE3Metal.LibrarySource {
+    var cacheIdentifier: String {
+        switch self {
+        case .runtimeSource:
+            return "runtime-source"
+        case let .metallib(url):
+            return "metallib:\(url.standardizedFileURL.path)"
+        }
+    }
+
+    func makeLibrary(device: MTLDevice) throws -> MTLLibrary {
+        switch self {
+        case .runtimeSource:
+            return try device.makeLibrary(source: BLAKE3MetalKernelSource.chunkCVs, options: nil)
+        case let .metallib(url):
+            return try device.makeLibrary(URL: url)
+        }
     }
 }
 
@@ -245,13 +277,6 @@ enum BLAKE3MetalKernelSource {
                 count = parentCount;
             }
         }
-    }
-
-    static inline void store32(device uchar *destination, uint word) {
-        destination[0] = uchar(word);
-        destination[1] = uchar(word >> 8u);
-        destination[2] = uchar(word >> 16u);
-        destination[3] = uchar(word >> 24u);
     }
 
     static inline void chunk_cv(device const uchar *input,

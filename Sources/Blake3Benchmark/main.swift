@@ -178,6 +178,24 @@ private func reportsMemoryStats() -> Bool {
     hasArgument(named: "--memory-stats")
 }
 
+private func jsonOutputPath() -> String? {
+    guard let path = argumentValue(named: "--json-output"),
+          !path.isEmpty
+    else {
+        return nil
+    }
+    return path
+}
+
+private func jsonValidationPath() -> String? {
+    guard let path = argumentValue(named: "--validate-json"),
+          !path.isEmpty
+    else {
+        return nil
+    }
+    return path
+}
+
 private func fileTimingModes() -> [FileTimingMode] {
     guard let rawValue = argumentValue(named: "--file-modes") else {
         return []
@@ -293,6 +311,42 @@ private func sustainedPolicy() -> BLAKE3Metal.ExecutionPolicy {
         return .automatic
     }
 }
+
+private func metalMinimumGPUByteCount() -> Int {
+    guard let rawValue = argumentValue(named: "--minimum-gpu-bytes"),
+          let parsed = parseByteCount(Substring(rawValue))
+    else {
+        return BLAKE3Metal.defaultMinimumGPUByteCount
+    }
+    return parsed
+}
+
+private func metalTileByteCount() -> Int {
+    guard let rawValue = argumentValue(named: "--metal-tile-size") ?? argumentValue(named: "--tile-size"),
+          let parsed = parseByteCount(Substring(rawValue))
+    else {
+        return BLAKE3File.mappedTileByteCount
+    }
+    return max(BLAKE3.chunkByteCount, parsed)
+}
+
+private func metalLibrarySource() -> BLAKE3Metal.LibrarySource {
+    guard let path = argumentValue(named: "--metal-library"),
+          !path.isEmpty
+    else {
+        return .runtimeSource
+    }
+    return .metallib(URL(fileURLWithPath: path))
+}
+
+private func metalLibraryDescription(_ source: BLAKE3Metal.LibrarySource) -> String {
+    switch source {
+    case .runtimeSource:
+        return "runtime-source"
+    case let .metallib(url):
+        return "metallib:\(url.standardizedFileURL.path)"
+    }
+}
 #endif
 
 private func fillDeterministically(_ bytes: inout [UInt8]) {
@@ -377,6 +431,32 @@ private func withNoCopyMetalBuffer<R>(
     }
 }
 
+private func withNoCopyMetalBufferThrowing<R>(
+    device: MTLDevice,
+    input: [UInt8],
+    _ body: (MTLBuffer) throws -> R
+) throws -> R? {
+    guard !input.isEmpty else {
+        guard let buffer = device.makeBuffer(length: 1, options: .storageModeShared) else {
+            return nil
+        }
+        return try body(buffer)
+    }
+    return try input.withUnsafeBytes { raw -> R? in
+        guard let baseAddress = raw.baseAddress,
+              let buffer = device.makeBuffer(
+                bytesNoCopy: UnsafeMutableRawPointer(mutating: baseAddress),
+                length: raw.count,
+                options: .storageModeShared,
+                deallocator: nil
+              )
+        else {
+            return nil
+        }
+        return try body(buffer)
+    }
+}
+
 private func runBenchmark(
     backend: String,
     mode: String,
@@ -391,6 +471,33 @@ private func runBenchmark(
     for _ in 0..<iterations {
         let started = DispatchTime.now().uptimeNanoseconds
         finalDigest = operation(input)
+        let elapsed = DispatchTime.now().uptimeNanoseconds - started
+        sampleNanoseconds.append(elapsed)
+    }
+
+    return BenchmarkResult(
+        backend: backend,
+        mode: mode,
+        byteCount: input.count,
+        sampleNanoseconds: sampleNanoseconds,
+        digest: finalDigest
+    )
+}
+
+private func runThrowingBenchmark(
+    backend: String,
+    mode: String,
+    input: [UInt8],
+    iterations: Int,
+    operation: ([UInt8]) throws -> BLAKE3.Digest
+) throws -> BenchmarkResult {
+    var sampleNanoseconds = [UInt64]()
+    sampleNanoseconds.reserveCapacity(iterations)
+    var finalDigest = try operation(input)
+
+    for _ in 0..<iterations {
+        let started = DispatchTime.now().uptimeNanoseconds
+        finalDigest = try operation(input)
         let elapsed = DispatchTime.now().uptimeNanoseconds - started
         sampleNanoseconds.append(elapsed)
     }
@@ -480,6 +587,138 @@ private struct BenchmarkResult {
                 throughput(byteCount: byteCount, nanoseconds: nanoseconds)
             }
         )
+    }
+}
+
+private struct BenchmarkReport: Codable {
+    let schemaVersion: Int
+    let generatedAtUTC: String
+    let commandLine: [String]
+    let environment: BenchmarkEnvironment
+    let request: BenchmarkRequest
+    let rows: [BenchmarkRow]
+    let sustainedRows: [SustainedRow]
+    let memorySamples: [MemorySample]
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case generatedAtUTC = "generated_at_utc"
+        case commandLine = "command_line"
+        case environment
+        case request
+        case rows
+        case sustainedRows = "sustained_rows"
+        case memorySamples = "memory_samples"
+    }
+}
+
+private struct BenchmarkEnvironment: Codable {
+    let backend: String
+    let simdDegree: Int
+    let parallelSIMDDegree: Int
+    let defaultParallelWorkers: Int
+    let hasherBytes: Int
+    let metalDevice: String?
+    let metalLibrary: String?
+    let metalMinimumGPUByteCount: Int?
+    let metalTileByteCount: Int?
+    let metalModes: [String]
+    let fileModes: [String]
+    let cpuWorkers: Int?
+    let memoryStats: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case backend
+        case simdDegree = "simd_degree"
+        case parallelSIMDDegree = "parallel_simd_degree"
+        case defaultParallelWorkers = "default_parallel_workers"
+        case hasherBytes = "hasher_bytes"
+        case metalDevice = "metal_device"
+        case metalLibrary = "metal_library"
+        case metalMinimumGPUByteCount = "metal_minimum_gpu_byte_count"
+        case metalTileByteCount = "metal_tile_byte_count"
+        case metalModes = "metal_modes"
+        case fileModes = "file_modes"
+        case cpuWorkers = "cpu_workers"
+        case memoryStats = "memory_stats"
+    }
+}
+
+private struct BenchmarkRequest: Codable {
+    let sizes: [String]
+    let sizesBytes: [Int]
+    let iterationsOverride: Int?
+    let sustainedSeconds: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case sizes
+        case sizesBytes = "sizes_bytes"
+        case iterationsOverride = "iterations_override"
+        case sustainedSeconds = "sustained_seconds"
+    }
+}
+
+private struct BenchmarkRow: Codable {
+    let size: String
+    let byteCount: Int
+    let backend: String
+    let mode: String
+    let iterations: Int
+    let sampleNanoseconds: [UInt64]
+    let medianGiBPerSecond: Double
+    let minimumGiBPerSecond: Double
+    let p95GiBPerSecond: Double
+    let maximumGiBPerSecond: Double
+    let digest: String
+    let correct: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case size
+        case byteCount = "byte_count"
+        case backend
+        case mode
+        case iterations
+        case sampleNanoseconds = "sample_nanoseconds"
+        case medianGiBPerSecond = "median_gib_per_second"
+        case minimumGiBPerSecond = "minimum_gib_per_second"
+        case p95GiBPerSecond = "p95_gib_per_second"
+        case maximumGiBPerSecond = "maximum_gib_per_second"
+        case digest
+        case correct
+    }
+}
+
+private struct SustainedRow: Codable {
+    let size: String
+    let byteCount: Int
+    let name: String
+    let iterations: Int
+    let elapsedSeconds: Double
+    let averageGiBPerSecond: Double
+    let medianGiBPerSecond: Double
+    let minimumGiBPerSecond: Double
+    let p95GiBPerSecond: Double
+    let maximumGiBPerSecond: Double
+    let firstQuarterGiBPerSecond: Double
+    let lastQuarterGiBPerSecond: Double
+    let digest: String
+    let correct: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case size
+        case byteCount = "byte_count"
+        case name
+        case iterations
+        case elapsedSeconds = "elapsed_seconds"
+        case averageGiBPerSecond = "average_gib_per_second"
+        case medianGiBPerSecond = "median_gib_per_second"
+        case minimumGiBPerSecond = "minimum_gib_per_second"
+        case p95GiBPerSecond = "p95_gib_per_second"
+        case maximumGiBPerSecond = "maximum_gib_per_second"
+        case firstQuarterGiBPerSecond = "first_quarter_gib_per_second"
+        case lastQuarterGiBPerSecond = "last_quarter_gib_per_second"
+        case digest
+        case correct
     }
 }
 
@@ -646,15 +885,49 @@ private func residentMemoryBytes() -> UInt64? {
     return UInt64(info.resident_size)
 }
 
+private struct AllocatorStats {
+    let bytesInUse: UInt64
+    let blocksInUse: UInt64
+}
+
+private func allocatorStats() -> AllocatorStats? {
+    var stats = malloc_statistics_t()
+    malloc_zone_statistics(nil, &stats)
+    guard stats.size_in_use > 0 || stats.blocks_in_use > 0 else {
+        return nil
+    }
+    return AllocatorStats(
+        bytesInUse: UInt64(stats.size_in_use),
+        blocksInUse: UInt64(stats.blocks_in_use)
+    )
+}
+
 private func formatMemory(_ byteCount: UInt64) -> String {
     let mib = Double(byteCount) / 1_048_576.0
     return String(format: "%.1f MiB", mib)
 }
 
-private struct MemorySample {
+private func formatOptionalMemory(_ byteCount: UInt64?) -> String {
+    guard let byteCount else {
+        return "n/a"
+    }
+    return formatMemory(byteCount)
+}
+
+private struct MemorySample: Codable {
     let sizeLabel: String
     let phase: String
-    let residentBytes: UInt64
+    let residentBytes: UInt64?
+    let allocatorBytesInUse: UInt64?
+    let allocatorBlocksInUse: UInt64?
+
+    enum CodingKeys: String, CodingKey {
+        case sizeLabel = "size_label"
+        case phase
+        case residentBytes = "resident_bytes"
+        case allocatorBytesInUse = "allocator_bytes_in_use"
+        case allocatorBlocksInUse = "allocator_blocks_in_use"
+    }
 }
 
 private func recordMemoryStats(
@@ -662,10 +935,23 @@ private func recordMemoryStats(
     phase: String,
     into memorySamples: inout [MemorySample]
 ) {
-    guard reportsMemoryStats(), let rss = residentMemoryBytes() else {
+    guard reportsMemoryStats() else {
         return
     }
-    memorySamples.append(MemorySample(sizeLabel: label, phase: phase, residentBytes: rss))
+    let rss = residentMemoryBytes()
+    let allocator = allocatorStats()
+    guard rss != nil || allocator != nil else {
+        return
+    }
+    memorySamples.append(
+        MemorySample(
+            sizeLabel: label,
+            phase: phase,
+            residentBytes: rss,
+            allocatorBytesInUse: allocator?.bytesInUse,
+            allocatorBlocksInUse: allocator?.blocksInUse
+        )
+    )
 }
 
 private func printMemoryStats(_ memorySamples: [MemorySample]) {
@@ -673,23 +959,943 @@ private func printMemoryStats(_ memorySamples: [MemorySample]) {
         return
     }
     print("")
-    print("| Size | Memory Phase | RSS |")
-    print("| --- | --- | ---: |")
+    print("| Size | Memory Phase | RSS | Allocator In Use | Allocator Blocks |")
+    print("| --- | --- | ---: | ---: | ---: |")
     for sample in memorySamples {
-        print("| \(sample.sizeLabel) | \(sample.phase) | \(formatMemory(sample.residentBytes)) |")
+        let allocatorBlocks = sample.allocatorBlocksInUse.map(String.init) ?? "n/a"
+        print(
+            "| \(sample.sizeLabel) | \(sample.phase) | \(formatOptionalMemory(sample.residentBytes)) | \(formatOptionalMemory(sample.allocatorBytesInUse)) | \(allocatorBlocks) |"
+        )
+    }
+}
+
+private func generatedTimestampUTC() -> String {
+    let formatter = ISO8601DateFormatter()
+    formatter.timeZone = TimeZone(secondsFromGMT: 0)
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter.string(from: Date())
+}
+
+private func iterationsOverride() -> Int? {
+    guard let rawValue = argumentValue(named: "--iterations"),
+          let parsed = Int(rawValue),
+          parsed > 0
+    else {
+        return nil
+    }
+    return parsed
+}
+
+private func writeJSONReport(_ report: BenchmarkReport, to path: String) throws {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+    let data = try encoder.encode(report)
+    let url = URL(fileURLWithPath: path)
+    try FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    try data.write(to: url, options: .atomic)
+}
+
+private func validateJSONReport(at path: String) throws {
+    let data = try Data(contentsOf: URL(fileURLWithPath: path))
+    let decoder = JSONDecoder()
+    let report = try decoder.decode(BenchmarkReport.self, from: data)
+    try validate(report)
+}
+
+private func validate(_ report: BenchmarkReport) throws {
+    try require(report.schemaVersion == 1, "unsupported schema_version \(report.schemaVersion)")
+    try require(!report.generatedAtUTC.isEmpty, "missing generated_at_utc")
+    try require(!report.commandLine.isEmpty, "missing command_line")
+    try require(!report.request.sizesBytes.isEmpty, "missing requested sizes")
+    try require(
+        report.request.sizes.count == report.request.sizesBytes.count,
+        "requested sizes and sizes_bytes counts differ"
+    )
+    try require(!report.rows.isEmpty, "report contains no benchmark rows")
+
+    let requestedSizes = Set(report.request.sizesBytes)
+    for byteCount in requestedSizes {
+        try require(
+            report.rows.contains { $0.byteCount == byteCount && $0.backend == "cpu" && $0.mode == "scalar" },
+            "missing cpu scalar baseline row for byte_count \(byteCount)"
+        )
+    }
+
+    for row in report.rows {
+        try validate(row, requestedSizes: requestedSizes)
+    }
+
+    if let sustainedSeconds = report.request.sustainedSeconds, sustainedSeconds > 0 {
+        try require(!report.sustainedRows.isEmpty, "sustained run requested but no sustained rows found")
+    }
+    for row in report.sustainedRows {
+        try validate(row, requestedSizes: requestedSizes)
+    }
+
+    if report.environment.memoryStats {
+        try require(!report.memorySamples.isEmpty, "memory_stats was requested but no memory samples were recorded")
+    }
+    for sample in report.memorySamples {
+        try require(!sample.sizeLabel.isEmpty, "memory sample has empty size label")
+        try require(!sample.phase.isEmpty, "memory sample has empty phase")
+        try require(
+            sample.residentBytes != nil || sample.allocatorBytesInUse != nil || sample.allocatorBlocksInUse != nil,
+            "memory sample has no recorded memory metrics"
+        )
+        if let residentBytes = sample.residentBytes {
+            try require(residentBytes > 0, "memory sample has non-positive RSS")
+        }
+        if let allocatorBytesInUse = sample.allocatorBytesInUse {
+            try require(allocatorBytesInUse > 0, "memory sample has non-positive allocator bytes")
+        }
+        if let allocatorBlocksInUse = sample.allocatorBlocksInUse {
+            try require(allocatorBlocksInUse > 0, "memory sample has non-positive allocator blocks")
+        }
+    }
+}
+
+private func validate(_ row: BenchmarkRow, requestedSizes: Set<Int>) throws {
+    try require(requestedSizes.contains(row.byteCount), "row byte_count \(row.byteCount) was not requested")
+    try require(!row.size.isEmpty, "row has empty size label")
+    try require(row.byteCount > 0, "row has non-positive byte_count")
+    try require(!row.backend.isEmpty, "row has empty backend")
+    try require(!row.mode.isEmpty, "row has empty mode")
+    try require(row.correct, "\(row.backend) \(row.mode) \(row.size) is not correct")
+    try require(row.iterations > 0, "\(row.backend) \(row.mode) \(row.size) has no iterations")
+    try require(
+        row.iterations == row.sampleNanoseconds.count,
+        "\(row.backend) \(row.mode) \(row.size) iteration count does not match sample count"
+    )
+    try require(
+        row.sampleNanoseconds.allSatisfy { $0 > 0 },
+        "\(row.backend) \(row.mode) \(row.size) contains non-positive sample"
+    )
+    try validateThroughputStats(
+        minimum: row.minimumGiBPerSecond,
+        median: row.medianGiBPerSecond,
+        p95: row.p95GiBPerSecond,
+        maximum: row.maximumGiBPerSecond,
+        label: "\(row.backend) \(row.mode) \(row.size)"
+    )
+    try validateDigest(row.digest, label: "\(row.backend) \(row.mode) \(row.size)")
+}
+
+private func validate(_ row: SustainedRow, requestedSizes: Set<Int>) throws {
+    try require(requestedSizes.contains(row.byteCount), "sustained byte_count \(row.byteCount) was not requested")
+    try require(!row.size.isEmpty, "sustained row has empty size label")
+    try require(!row.name.isEmpty, "sustained row has empty name")
+    try require(row.correct, "\(row.name) \(row.size) is not correct")
+    try require(row.iterations > 0, "\(row.name) \(row.size) has no iterations")
+    try require(row.elapsedSeconds.isFinite && row.elapsedSeconds > 0, "\(row.name) has invalid elapsed seconds")
+    try require(
+        row.averageGiBPerSecond.isFinite && row.averageGiBPerSecond >= 0,
+        "\(row.name) has invalid average throughput"
+    )
+    try validateThroughputStats(
+        minimum: row.minimumGiBPerSecond,
+        median: row.medianGiBPerSecond,
+        p95: row.p95GiBPerSecond,
+        maximum: row.maximumGiBPerSecond,
+        label: "\(row.name) \(row.size)"
+    )
+    try require(
+        row.firstQuarterGiBPerSecond.isFinite && row.firstQuarterGiBPerSecond >= 0,
+        "\(row.name) has invalid first-quarter throughput"
+    )
+    try require(
+        row.lastQuarterGiBPerSecond.isFinite && row.lastQuarterGiBPerSecond >= 0,
+        "\(row.name) has invalid last-quarter throughput"
+    )
+    try validateDigest(row.digest, label: "\(row.name) \(row.size)")
+}
+
+private func validateThroughputStats(
+    minimum: Double,
+    median: Double,
+    p95: Double,
+    maximum: Double,
+    label: String
+) throws {
+    for (name, value) in [
+        ("minimum", minimum),
+        ("median", median),
+        ("p95", p95),
+        ("maximum", maximum)
+    ] {
+        try require(value.isFinite && value >= 0, "\(label) has invalid \(name) throughput")
+    }
+    try require(minimum <= median, "\(label) minimum throughput exceeds median")
+    try require(median <= maximum, "\(label) median throughput exceeds maximum")
+    try require(minimum <= p95 && p95 <= maximum, "\(label) p95 throughput is outside min/max")
+}
+
+private func validateDigest(_ digest: String, label: String) throws {
+    try require(digest.count == BLAKE3.Digest.byteCount * 2, "\(label) has invalid digest length")
+    try require(
+        digest.utf8.allSatisfy { byte in
+            (byte >= 48 && byte <= 57) || (byte >= 97 && byte <= 102)
+        },
+        "\(label) digest is not lowercase hexadecimal"
+    )
+}
+
+private func require(_ condition: Bool, _ message: String) throws {
+    if !condition {
+        throw BenchmarkValidationError(message)
+    }
+}
+
+private struct BenchmarkValidationError: Error, CustomStringConvertible {
+    let description: String
+
+    init(_ description: String) {
+        self.description = description
+    }
+}
+
+#if canImport(Metal)
+private struct AutotuneReport: Codable {
+    let schemaVersion: Int
+    let generatedAtUTC: String
+    let commandLine: [String]
+    let environment: AutotuneEnvironment
+    let request: AutotuneRequest
+    let measurements: [AutotuneMeasurement]
+    let recommendations: [AutotuneRecommendation]
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case generatedAtUTC = "generated_at_utc"
+        case commandLine = "command_line"
+        case environment
+        case request
+        case measurements
+        case recommendations
+    }
+}
+
+private struct AutotuneEnvironment: Codable {
+    let backend: String
+    let simdDegree: Int
+    let parallelSIMDDegree: Int
+    let defaultParallelWorkers: Int
+    let metalDevice: String
+    let metalLibrary: String
+
+    enum CodingKeys: String, CodingKey {
+        case backend
+        case simdDegree = "simd_degree"
+        case parallelSIMDDegree = "parallel_simd_degree"
+        case defaultParallelWorkers = "default_parallel_workers"
+        case metalDevice = "metal_device"
+        case metalLibrary = "metal_library"
+    }
+}
+
+private struct AutotuneRequest: Codable {
+    let sizes: [String]
+    let sizesBytes: [Int]
+    let iterations: Int
+    let gateCandidatesBytes: [Int]
+    let modeCandidates: [String]
+    let tileCandidatesBytes: [Int]
+    let includesFileTileSweep: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case sizes
+        case sizesBytes = "sizes_bytes"
+        case iterations
+        case gateCandidatesBytes = "gate_candidates_bytes"
+        case modeCandidates = "mode_candidates"
+        case tileCandidatesBytes = "tile_candidates_bytes"
+        case includesFileTileSweep = "includes_file_tile_sweep"
+    }
+}
+
+private struct AutotuneMeasurement: Codable {
+    let category: String
+    let candidate: String
+    let parameterName: String?
+    let parameterValueBytes: Int?
+    let size: String
+    let byteCount: Int
+    let iterations: Int
+    let sampleNanoseconds: [UInt64]
+    let medianGiBPerSecond: Double
+    let minimumGiBPerSecond: Double
+    let p95GiBPerSecond: Double
+    let maximumGiBPerSecond: Double
+    let digest: String
+    let correct: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case category
+        case candidate
+        case parameterName = "parameter_name"
+        case parameterValueBytes = "parameter_value_bytes"
+        case size
+        case byteCount = "byte_count"
+        case iterations
+        case sampleNanoseconds = "sample_nanoseconds"
+        case medianGiBPerSecond = "median_gib_per_second"
+        case minimumGiBPerSecond = "minimum_gib_per_second"
+        case p95GiBPerSecond = "p95_gib_per_second"
+        case maximumGiBPerSecond = "maximum_gib_per_second"
+        case digest
+        case correct
+    }
+}
+
+private struct AutotuneRecommendation: Codable {
+    let category: String
+    let parameterName: String
+    let recommendedValue: String
+    let recommendedValueBytes: Int?
+    let scoreGiBPerSecond: Double
+    let rationale: String
+
+    enum CodingKeys: String, CodingKey {
+        case category
+        case parameterName = "parameter_name"
+        case recommendedValue = "recommended_value"
+        case recommendedValueBytes = "recommended_value_bytes"
+        case scoreGiBPerSecond = "score_gib_per_second"
+        case rationale
+    }
+}
+
+private func autotuneOutputPath() -> String? {
+    if let path = argumentValue(named: "--autotune-output"), !path.isEmpty {
+        return path
+    }
+    return jsonOutputPath()
+}
+
+private func autotuneValidationPath() -> String? {
+    guard let path = argumentValue(named: "--validate-autotune-json"), !path.isEmpty else {
+        return nil
+    }
+    return path
+}
+
+private func byteCountListArgument(named name: String, default defaultValues: [Int]) -> [Int] {
+    guard let rawValue = argumentValue(named: name) else {
+        return defaultValues
+    }
+    let parsed = rawValue
+        .split(separator: ",")
+        .compactMap(parseByteCount)
+        .filter { $0 > 0 }
+    return parsed.isEmpty ? defaultValues : Array(Set(parsed)).sorted()
+}
+
+private func autotuneSizes() -> [Int] {
+    if argumentValue(named: "--autotune-sizes") != nil {
+        return byteCountListArgument(
+            named: "--autotune-sizes",
+            default: [16 * 1024 * 1024, 64 * 1024 * 1024]
+        )
+    }
+    if argumentValue(named: "--sizes") != nil {
+        return benchmarkSizes()
+    }
+    return [16 * 1024 * 1024, 64 * 1024 * 1024]
+}
+
+private func autotuneIterations() -> Int {
+    if let rawValue = argumentValue(named: "--autotune-iterations"),
+       let parsed = Int(rawValue),
+       parsed > 0 {
+        return parsed
+    }
+    if let rawValue = argumentValue(named: "--iterations"),
+       let parsed = Int(rawValue),
+       parsed > 0 {
+        return parsed
+    }
+    return 3
+}
+
+private func autotuneGateCandidates() -> [Int] {
+    byteCountListArgument(
+        named: "--autotune-gates",
+        default: [
+            1 * 1024 * 1024,
+            4 * 1024 * 1024,
+            16 * 1024 * 1024,
+            64 * 1024 * 1024
+        ]
+    )
+}
+
+private func autotuneTileCandidates() -> [Int] {
+    byteCountListArgument(
+        named: "--autotune-tile-sizes",
+        default: [
+            8 * 1024 * 1024,
+            16 * 1024 * 1024,
+            32 * 1024 * 1024,
+            64 * 1024 * 1024
+        ]
+    ).map { max(BLAKE3.chunkByteCount, $0) }
+}
+
+private func parseAutotuneMetalMode(_ token: String) -> MetalTimingMode? {
+    switch token.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+    case "resident", "resident-gpu", "device", "device-resident":
+        return .resident
+    case "private", "private-gpu", "private-resident", "device-private":
+        return .privateResident
+    case "private-staged", "private-staged-gpu", "private-upload", "staged-private":
+        return .privateStaged
+    case "staged", "staged-gpu", "pooled", "reused", "reuse":
+        return .staged
+    case "wrapped", "wrapped-gpu", "nocopy", "no-copy", "bytes-no-copy":
+        return .wrapped
+    case "e2e", "e2e-gpu", "end-to-end", "endtoend":
+        return .endToEnd
+    default:
+        return nil
+    }
+}
+
+private func autotuneModeCandidates() -> [MetalTimingMode] {
+    guard let rawValue = argumentValue(named: "--autotune-metal-modes") else {
+        return [.resident, .staged, .privateStaged, .endToEnd, .privateResident]
+    }
+    let modes = rawValue
+        .split(separator: ",")
+        .compactMap { parseAutotuneMetalMode(String($0)) }
+    return modes.isEmpty ? [.resident, .staged, .privateStaged, .endToEnd, .privateResident] : modes
+}
+
+private func includesAutotuneFileTileSweep() -> Bool {
+    hasArgument(named: "--autotune-file-tiles")
+        || hasArgument(named: "--autotune-tiles")
+}
+
+private func makeAutotuneMeasurement(
+    category: String,
+    candidate: String,
+    parameterName: String?,
+    parameterValueBytes: Int?,
+    label: String,
+    result: BenchmarkResult,
+    expectedDigest: BLAKE3.Digest
+) -> AutotuneMeasurement {
+    let stats = result.throughputStats
+    return AutotuneMeasurement(
+        category: category,
+        candidate: candidate,
+        parameterName: parameterName,
+        parameterValueBytes: parameterValueBytes,
+        size: label,
+        byteCount: result.byteCount,
+        iterations: result.sampleNanoseconds.count,
+        sampleNanoseconds: result.sampleNanoseconds,
+        medianGiBPerSecond: stats.median,
+        minimumGiBPerSecond: stats.minimum,
+        p95GiBPerSecond: stats.p95,
+        maximumGiBPerSecond: stats.maximum,
+        digest: result.digest.description,
+        correct: result.digest == expectedDigest
+    )
+}
+
+private func geometricMean(_ values: [Double]) -> Double {
+    guard !values.isEmpty,
+          values.allSatisfy({ $0.isFinite && $0 > 0 })
+    else {
+        return 0
+    }
+    return exp(values.map(log).reduce(0, +) / Double(values.count))
+}
+
+private func bestScoredCandidate<Key: Comparable>(
+    _ scores: [Key: [Double]]
+) -> (key: Key, score: Double)? {
+    scores
+        .map { (key: $0.key, score: geometricMean($0.value)) }
+        .sorted { lhs, rhs in
+            if lhs.score == rhs.score {
+                return lhs.key < rhs.key
+            }
+            return lhs.score > rhs.score
+        }
+        .first
+}
+
+private func writeAutotuneReport(_ report: AutotuneReport, to path: String) throws {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+    let data = try encoder.encode(report)
+    let url = URL(fileURLWithPath: path)
+    try FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    try data.write(to: url, options: .atomic)
+}
+
+private func validateAutotuneReport(at path: String) throws {
+    let data = try Data(contentsOf: URL(fileURLWithPath: path))
+    let report = try JSONDecoder().decode(AutotuneReport.self, from: data)
+    try validate(report)
+}
+
+private func validate(_ report: AutotuneReport) throws {
+    try require(report.schemaVersion == 1, "unsupported autotune schema_version \(report.schemaVersion)")
+    try require(!report.generatedAtUTC.isEmpty, "missing generated_at_utc")
+    try require(!report.commandLine.isEmpty, "missing command_line")
+    try require(!report.request.sizesBytes.isEmpty, "missing autotune sizes")
+    try require(!report.measurements.isEmpty, "autotune report has no measurements")
+    try require(!report.recommendations.isEmpty, "autotune report has no recommendations")
+    for measurement in report.measurements {
+        try require(measurement.byteCount > 0, "measurement has non-positive byte_count")
+        try require(measurement.iterations > 0, "measurement has no iterations")
+        try require(measurement.iterations == measurement.sampleNanoseconds.count, "measurement sample count mismatch")
+        try require(measurement.sampleNanoseconds.allSatisfy { $0 > 0 }, "measurement contains non-positive sample")
+        try require(measurement.correct, "measurement \(measurement.category)/\(measurement.candidate)/\(measurement.size) is not correct")
+        try validateThroughputStats(
+            minimum: measurement.minimumGiBPerSecond,
+            median: measurement.medianGiBPerSecond,
+            p95: measurement.p95GiBPerSecond,
+            maximum: measurement.maximumGiBPerSecond,
+            label: "\(measurement.category) \(measurement.candidate) \(measurement.size)"
+        )
+        try validateDigest(measurement.digest, label: "\(measurement.category) \(measurement.candidate)")
+    }
+    for recommendation in report.recommendations {
+        try require(!recommendation.category.isEmpty, "recommendation has empty category")
+        try require(!recommendation.parameterName.isEmpty, "recommendation has empty parameter name")
+        try require(!recommendation.recommendedValue.isEmpty, "recommendation has empty value")
+        try require(
+            recommendation.scoreGiBPerSecond.isFinite && recommendation.scoreGiBPerSecond >= 0,
+            "recommendation has invalid score"
+        )
+    }
+}
+
+private func printAutotuneMeasurement(_ measurement: AutotuneMeasurement) {
+    print(
+        String(
+            format: "| %@ | %@ | %@ | %@ | %.2f | %.2f | %.2f | %.2f | %@ |",
+            measurement.category as NSString,
+            measurement.candidate as NSString,
+            measurement.size as NSString,
+            measurement.parameterValueBytes.map(formatBytes) as NSString? ?? "n/a",
+            measurement.medianGiBPerSecond,
+            measurement.minimumGiBPerSecond,
+            measurement.p95GiBPerSecond,
+            measurement.maximumGiBPerSecond,
+            (measurement.correct ? "ok" : "FAIL") as NSString
+        )
+    )
+}
+
+private func runMetalAutotune() throws {
+    guard let device = MTLCreateSystemDefaultDevice() else {
+        throw BLAKE3Error.metalUnavailable
+    }
+
+    let librarySource = metalLibrarySource()
+    let sizes = autotuneSizes()
+    let iterations = autotuneIterations()
+    let gateCandidates = autotuneGateCandidates()
+    let modeCandidates = autotuneModeCandidates()
+    let tileCandidates = autotuneTileCandidates()
+    let includeFileTiles = includesAutotuneFileTileSweep()
+
+    var measurements = [AutotuneMeasurement]()
+    var gateScores = [Int: [Double]]()
+    var modeScores = [String: [Double]]()
+    var tileScores = [Int: [Double]]()
+
+    print("BLAKE3 Swift Metal autotune")
+    print("metalDevice=\(device.name)")
+    print("metalLibrary=\(metalLibraryDescription(librarySource))")
+    print("sizes=\(sizes.map(formatBytes).joined(separator: ", "))")
+    print("iterations=\(iterations)")
+    print("gateCandidates=\(gateCandidates.map(formatBytes).joined(separator: ", "))")
+    print("modeCandidates=\(modeCandidates.map(\.labelComponent).joined(separator: ","))")
+    if includeFileTiles {
+        print("tileCandidates=\(tileCandidates.map(formatBytes).joined(separator: ", "))")
+    }
+    print("")
+    print("| Category | Candidate | Size | Parameter | Median GiB/s | Min GiB/s | P95 GiB/s | Max GiB/s | Correct |")
+    print("| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |")
+
+    for size in sizes {
+        let label = formatBytes(size)
+        var input = [UInt8](repeating: 0, count: size)
+        fillDeterministically(&input)
+        let expectedDigest = hashScalarForBenchmark(input)
+        let cpuContext = BLAKE3.Context()
+        let cpuBaseline = runBenchmark(
+            backend: "cpu",
+            mode: "context-auto",
+            input: input,
+            iterations: iterations
+        ) { bytes in
+            cpuContext.hash(bytes, mode: .automatic)
+        }
+        let cpuMeasurement = makeAutotuneMeasurement(
+            category: "cpu-baseline",
+            candidate: "context-auto",
+            parameterName: nil,
+            parameterValueBytes: nil,
+            label: label,
+            result: cpuBaseline,
+            expectedDigest: expectedDigest
+        )
+        measurements.append(cpuMeasurement)
+        printAutotuneMeasurement(cpuMeasurement)
+
+        guard let residentBuffer = makeMetalBuffer(device: device, input: input) else {
+            throw BLAKE3Error.metalCommandFailed("Unable to allocate resident autotune buffer.")
+        }
+
+        for gate in gateCandidates {
+            let context = try BLAKE3Metal.makeContext(
+                device: device,
+                minimumGPUByteCount: gate,
+                librarySource: librarySource
+            )
+            let result = try runThrowingBenchmark(
+                backend: "metal-autotune",
+                mode: "resident-auto-gate-\(gate)",
+                input: input,
+                iterations: iterations
+            ) { _ in
+                try context.hash(buffer: residentBuffer, length: size, policy: .automatic)
+            }
+            let measurement = makeAutotuneMeasurement(
+                category: "minimum-gpu-bytes",
+                candidate: "resident-auto",
+                parameterName: "minimum_gpu_bytes",
+                parameterValueBytes: gate,
+                label: label,
+                result: result,
+                expectedDigest: expectedDigest
+            )
+            measurements.append(measurement)
+            gateScores[gate, default: []].append(measurement.medianGiBPerSecond)
+            printAutotuneMeasurement(measurement)
+        }
+
+        let modeContext = try BLAKE3Metal.makeContext(
+            device: device,
+            minimumGPUByteCount: metalMinimumGPUByteCount(),
+            librarySource: librarySource
+        )
+
+        for mode in modeCandidates {
+            let candidate = "\(mode.labelComponent)-gpu"
+            let result: BenchmarkResult?
+            switch mode {
+            case .resident:
+                result = try runThrowingBenchmark(
+                    backend: "metal-autotune",
+                    mode: candidate,
+                    input: input,
+                    iterations: iterations
+                ) { _ in
+                    try modeContext.hash(buffer: residentBuffer, length: size, policy: .gpu)
+                }
+            case .privateResident:
+                guard size > BLAKE3.chunkByteCount else {
+                    result = nil
+                    break
+                }
+                let privateBuffer = try modeContext.makePrivateBuffer(input: input)
+                result = try runThrowingBenchmark(
+                    backend: "metal-autotune",
+                    mode: candidate,
+                    input: input,
+                    iterations: iterations
+                ) { _ in
+                    try modeContext.hash(privateBuffer: privateBuffer, policy: .gpu)
+                }
+            case .privateStaged:
+                guard size > BLAKE3.chunkByteCount else {
+                    result = nil
+                    break
+                }
+                let privateBuffer = try modeContext.makePrivateBuffer(capacity: size)
+                let stagingBuffer = try modeContext.makeStagingBuffer(capacity: size)
+                result = try runThrowingBenchmark(
+                    backend: "metal-autotune",
+                    mode: candidate,
+                    input: input,
+                    iterations: iterations
+                ) { bytes in
+                    try modeContext.replaceContents(of: privateBuffer, with: bytes, using: stagingBuffer)
+                    return try modeContext.hash(privateBuffer: privateBuffer, policy: .gpu)
+                }
+            case .staged:
+                let stagingBuffer = try modeContext.makeStagingBuffer(capacity: size)
+                result = try runThrowingBenchmark(
+                    backend: "metal-autotune",
+                    mode: candidate,
+                    input: input,
+                    iterations: iterations
+                ) { bytes in
+                    try modeContext.hash(input: bytes, using: stagingBuffer, policy: .gpu)
+                }
+            case .wrapped:
+                result = try runThrowingBenchmark(
+                    backend: "metal-autotune",
+                    mode: candidate,
+                    input: input,
+                    iterations: iterations
+                ) { bytes in
+                    guard let digest = try withNoCopyMetalBufferThrowing(device: device, input: bytes, { buffer in
+                        try modeContext.hash(buffer: buffer, length: size, policy: .gpu)
+                    }) else {
+                        throw BLAKE3Error.metalCommandFailed("Unable to wrap autotune input buffer.")
+                    }
+                    return digest
+                }
+            case .endToEnd:
+                result = try runThrowingBenchmark(
+                    backend: "metal-autotune",
+                    mode: candidate,
+                    input: input,
+                    iterations: iterations
+                ) { bytes in
+                    guard let buffer = makeMetalBuffer(device: device, input: bytes) else {
+                        throw BLAKE3Error.metalCommandFailed("Unable to allocate end-to-end autotune buffer.")
+                    }
+                    return try modeContext.hash(buffer: buffer, length: size, policy: .gpu)
+                }
+            }
+
+            guard let result else {
+                continue
+            }
+            let measurement = makeAutotuneMeasurement(
+                category: "metal-mode",
+                candidate: candidate,
+                parameterName: "mode",
+                parameterValueBytes: nil,
+                label: label,
+                result: result,
+                expectedDigest: expectedDigest
+            )
+            measurements.append(measurement)
+            modeScores[candidate, default: []].append(measurement.medianGiBPerSecond)
+            printAutotuneMeasurement(measurement)
+        }
+
+        if includeFileTiles {
+            let fileURL = try makeBenchmarkFile(input: input, byteCount: size)
+            defer {
+                try? FileManager.default.removeItem(at: fileURL)
+                try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent())
+            }
+            for tile in tileCandidates {
+                let result = try runFileBenchmark(
+                    backend: "metal-autotune-file",
+                    mode: "metal-tiled-mmap-tile-\(tile)",
+                    path: fileURL.path,
+                    byteCount: size,
+                    iterations: iterations
+                ) { path in
+                    try BLAKE3File.hash(
+                        path: path,
+                        strategy: .metalTiledMemoryMapped(
+                            tileByteCount: tile,
+                            fallbackToCPU: false,
+                            librarySource: librarySource
+                        )
+                    )
+                }
+                let measurement = makeAutotuneMeasurement(
+                    category: "metal-file-tile",
+                    candidate: "metal-tiled-mmap",
+                    parameterName: "tile_bytes",
+                    parameterValueBytes: tile,
+                    label: label,
+                    result: result,
+                    expectedDigest: expectedDigest
+                )
+                measurements.append(measurement)
+                tileScores[tile, default: []].append(measurement.medianGiBPerSecond)
+                printAutotuneMeasurement(measurement)
+            }
+        }
+    }
+
+    var recommendations = [AutotuneRecommendation]()
+    if let bestGate = bestScoredCandidate(gateScores) {
+        recommendations.append(
+            AutotuneRecommendation(
+                category: "minimum-gpu-bytes",
+                parameterName: "minimum_gpu_bytes",
+                recommendedValue: formatBytes(bestGate.key),
+                recommendedValueBytes: bestGate.key,
+                scoreGiBPerSecond: bestGate.score,
+                rationale: "Highest geometric mean resident-auto throughput across autotune sizes."
+            )
+        )
+    }
+    if let bestMode = bestScoredCandidate(modeScores) {
+        recommendations.append(
+            AutotuneRecommendation(
+                category: "metal-mode",
+                parameterName: "mode",
+                recommendedValue: bestMode.key,
+                recommendedValueBytes: nil,
+                scoreGiBPerSecond: bestMode.score,
+                rationale: "Highest geometric mean forced-GPU throughput across autotune sizes; compare timing class before publishing."
+            )
+        )
+    }
+    if let bestTile = bestScoredCandidate(tileScores) {
+        recommendations.append(
+            AutotuneRecommendation(
+                category: "metal-file-tile",
+                parameterName: "tile_bytes",
+                recommendedValue: formatBytes(bestTile.key),
+                recommendedValueBytes: bestTile.key,
+                scoreGiBPerSecond: bestTile.score,
+                rationale: "Highest geometric mean tiled Metal file throughput across autotune sizes."
+            )
+        )
+    }
+
+    let report = AutotuneReport(
+        schemaVersion: 1,
+        generatedAtUTC: generatedTimestampUTC(),
+        commandLine: CommandLine.arguments,
+        environment: AutotuneEnvironment(
+            backend: BLAKE3.activeBackend.rawValue,
+            simdDegree: BLAKE3.simdDegree,
+            parallelSIMDDegree: BLAKE3.parallelSIMDDegree,
+            defaultParallelWorkers: BLAKE3.defaultParallelWorkerCount,
+            metalDevice: device.name,
+            metalLibrary: metalLibraryDescription(librarySource)
+        ),
+        request: AutotuneRequest(
+            sizes: sizes.map(formatBytes),
+            sizesBytes: sizes,
+            iterations: iterations,
+            gateCandidatesBytes: gateCandidates,
+            modeCandidates: modeCandidates.map(\.labelComponent),
+            tileCandidatesBytes: includeFileTiles ? tileCandidates : [],
+            includesFileTileSweep: includeFileTiles
+        ),
+        measurements: measurements,
+        recommendations: recommendations
+    )
+    try validate(report)
+
+    print("")
+    print("| Recommendation | Value | Score GiB/s | Rationale |")
+    print("| --- | --- | ---: | --- |")
+    for recommendation in recommendations {
+        print(
+            String(
+                format: "| %@ | %@ | %.2f | %@ |",
+                recommendation.parameterName as NSString,
+                recommendation.recommendedValue as NSString,
+                recommendation.scoreGiBPerSecond,
+                recommendation.rationale as NSString
+            )
+        )
+    }
+
+    if let outputPath = autotuneOutputPath() {
+        try writeAutotuneReport(report, to: outputPath)
+        print("autotuneJsonOutput=\(outputPath)")
+    }
+}
+#endif
+
+#if canImport(Metal)
+if hasArgument(named: "--print-metal-source") {
+    print(BLAKE3Metal.kernelSource)
+    Darwin.exit(0)
+}
+if let validationPath = autotuneValidationPath() {
+    do {
+        try validateAutotuneReport(at: validationPath)
+        print("autotuneJsonValidation=ok path=\(validationPath)")
+        Darwin.exit(0)
+    } catch {
+        fputs("autotuneJsonValidation=FAIL path=\(validationPath) error=\(error)\n", stderr)
+        Darwin.exit(1)
+    }
+}
+if hasArgument(named: "--autotune-metal") {
+    do {
+        try runMetalAutotune()
+        Darwin.exit(0)
+    } catch {
+        fputs("autotuneMetal=FAIL error=\(error)\n", stderr)
+        Darwin.exit(1)
+    }
+}
+#endif
+if let validationPath = jsonValidationPath() {
+    do {
+        try validateJSONReport(at: validationPath)
+        print("jsonValidation=ok path=\(validationPath)")
+        Darwin.exit(0)
+    } catch {
+        fputs("jsonValidation=FAIL path=\(validationPath) error=\(error)\n", stderr)
+        Darwin.exit(1)
     }
 }
 
 print("BLAKE3 Swift benchmark")
 print("backend=\(BLAKE3.activeBackend.rawValue) simdDegree=\(BLAKE3.simdDegree) parallelSIMDDegree=\(BLAKE3.parallelSIMDDegree) defaultParallelWorkers=\(BLAKE3.defaultParallelWorkerCount) hasherBytes=\(BLAKE3.nativeHasherByteCount)")
+private let requestedSizes = benchmarkSizes()
+private let requestedIterationsOverride = iterationsOverride()
+private let requestedJSONOutputPath = jsonOutputPath()
 private let requestedFileTimingModes = fileTimingModes()
 #if canImport(Metal)
-let metalDevice = MTLCreateSystemDefaultDevice()
-let metalContext = metalDevice.flatMap { try? BLAKE3Metal.makeContext(device: $0) }
+private let requestedMetalLibrarySource = metalLibrarySource()
+private let requestedMetalMinimumGPUByteCount = metalMinimumGPUByteCount()
+private let requestedMetalTileByteCount = metalTileByteCount()
 private let requestedMetalTimingModes = metalTimingModes()
+private let requestedMetalFileTiming = requestedFileTimingModes.contains(.metalMemoryMapped)
+    || requestedFileTimingModes.contains(.metalTiledMemoryMapped)
+private let requestedMetalWork = !requestedMetalTimingModes.isEmpty || requestedMetalFileTiming
+let metalDevice = MTLCreateSystemDefaultDevice()
+let metalContext: BLAKE3Metal.Context?
+let metalContextError: Error?
+if let metalDevice, requestedMetalWork {
+    do {
+        metalContext = try BLAKE3Metal.makeContext(
+            device: metalDevice,
+            minimumGPUByteCount: requestedMetalMinimumGPUByteCount,
+            librarySource: requestedMetalLibrarySource
+        )
+        metalContextError = nil
+    } catch {
+        metalContext = nil
+        metalContextError = error
+    }
+} else {
+    metalContext = nil
+    metalContextError = nil
+}
 if let metalDevice {
     print("metalDevice=\(metalDevice.name)")
+    print("metalLibrary=\(metalLibraryDescription(requestedMetalLibrarySource))")
+    print("metalMinimumGPUByteCount=\(requestedMetalMinimumGPUByteCount)")
+    print("metalTileByteCount=\(requestedMetalTileByteCount)")
     print("metalModes=\(requestedMetalTimingModes.map(\.rawValue).joined(separator: ","))")
+    if let metalContextError {
+        print("metalLibraryError=\(metalContextError)")
+        if requestedMetalWork {
+            fatalError("Metal context creation failed for requested Metal benchmark/file modes.")
+        }
+    }
     if requestedMetalTimingModes.contains(.resident) {
         print("metal-resident includes: \(MetalTimingMode.resident.description)")
     }
@@ -710,7 +1916,7 @@ if let metalDevice {
     }
 }
 #endif
-print("sizes=\(benchmarkSizes().map(formatBytes).joined(separator: ", "))")
+print("sizes=\(requestedSizes.map(formatBytes).joined(separator: ", "))")
 if !requestedFileTimingModes.isEmpty {
     print("fileModes=\(requestedFileTimingModes.map(\.rawValue).joined(separator: ","))")
     for mode in requestedFileTimingModes {
@@ -721,15 +1927,17 @@ if let cpuWorkers = cpuWorkerCount() {
     print("cpuWorkers=\(cpuWorkers)")
 }
 if reportsMemoryStats() {
-    print("memoryStats=rss")
+    print("memoryStats=rss,allocator")
 }
 print("")
 print("| Size | Backend | Mode | Median GiB/s | Min GiB/s | P95 GiB/s | Max GiB/s | Correct |")
 print("| --- | --- | --- | ---: | ---: | ---: | ---: | --- |")
 
 private var memorySamples = [MemorySample]()
+private var benchmarkRows = [BenchmarkRow]()
+private var sustainedRows = [SustainedRow]()
 
-for size in benchmarkSizes() {
+for size in requestedSizes {
     let iterations = iterationCount(for: size)
     let cpuWorkers = cpuWorkerCount()
     let label = formatBytes(size)
@@ -840,7 +2048,11 @@ for size in benchmarkSizes() {
                     ) { path in
                         try BLAKE3File.hash(
                             path: path,
-                            strategy: .metalMemoryMapped(policy: .gpu, fallbackToCPU: false)
+                            strategy: .metalMemoryMapped(
+                                policy: .gpu,
+                                fallbackToCPU: false,
+                                librarySource: requestedMetalLibrarySource
+                            )
                         )
                     }
                 )
@@ -856,7 +2068,11 @@ for size in benchmarkSizes() {
                     ) { path in
                         try BLAKE3File.hash(
                             path: path,
-                            strategy: .metalTiledMemoryMapped(fallbackToCPU: false)
+                            strategy: .metalTiledMemoryMapped(
+                                tileByteCount: requestedMetalTileByteCount,
+                                fallbackToCPU: false,
+                                librarySource: requestedMetalLibrarySource
+                            )
                         )
                     }
                 )
@@ -1030,6 +2246,22 @@ for size in benchmarkSizes() {
     for result in results {
         let stats = result.throughputStats
         let correct = result.digest == scalar.digest
+        benchmarkRows.append(
+            BenchmarkRow(
+                size: label,
+                byteCount: result.byteCount,
+                backend: result.backend,
+                mode: result.mode,
+                iterations: result.sampleNanoseconds.count,
+                sampleNanoseconds: result.sampleNanoseconds,
+                medianGiBPerSecond: stats.median,
+                minimumGiBPerSecond: stats.minimum,
+                p95GiBPerSecond: stats.p95,
+                maximumGiBPerSecond: stats.maximum,
+                digest: result.digest.description,
+                correct: correct
+            )
+        )
         print(
             String(
                 format: "| %@ | %@ | %@ | %.2f | %.2f | %.2f | %.2f | %@ |",
@@ -1104,6 +2336,25 @@ for size in benchmarkSizes() {
                 return try! metalContext.hash(buffer: buffer, length: size, policy: policy)
             }
         }
+        let sustainedCorrect = sustained.digest == scalar.digest
+        sustainedRows.append(
+            SustainedRow(
+                size: label,
+                byteCount: size,
+                name: sustained.name,
+                iterations: sustained.iterations,
+                elapsedSeconds: sustained.elapsedSeconds,
+                averageGiBPerSecond: sustained.averageGiBPerSecond,
+                medianGiBPerSecond: sustained.throughputStats.median,
+                minimumGiBPerSecond: sustained.throughputStats.minimum,
+                p95GiBPerSecond: sustained.throughputStats.p95,
+                maximumGiBPerSecond: sustained.throughputStats.maximum,
+                firstQuarterGiBPerSecond: sustained.firstQuarterGiBPerSecond,
+                lastQuarterGiBPerSecond: sustained.lastQuarterGiBPerSecond,
+                digest: sustained.digest.description,
+                correct: sustainedCorrect
+            )
+        )
         print(
             String(
                 format: "%@  %-20@ %.1f s  avg %8.2f GiB/s  min %8.2f  median %8.2f  p95 %8.2f  max %8.2f  first25%% %8.2f  last25%% %8.2f  n %d  correct ok",
@@ -1120,6 +2371,9 @@ for size in benchmarkSizes() {
                 sustained.iterations
             )
         )
+        if !sustainedCorrect {
+            fatalError("\(sustained.name) digest mismatch for \(label)")
+        }
     }
     #endif
 
@@ -1127,3 +2381,58 @@ for size in benchmarkSizes() {
 }
 
 printMemoryStats(memorySamples)
+
+if let requestedJSONOutputPath {
+    #if canImport(Metal)
+    let reportMetalDevice = metalDevice?.name
+    let reportMetalLibrary = metalDevice.map { _ in metalLibraryDescription(requestedMetalLibrarySource) }
+    let reportMetalMinimumGPUByteCount = metalDevice.map { _ in requestedMetalMinimumGPUByteCount }
+    let reportMetalTileByteCount = metalDevice.map { _ in requestedMetalTileByteCount }
+    let reportMetalModes = requestedMetalTimingModes.map(\.rawValue)
+    let reportSustainedSeconds = sustainedSeconds()
+    #else
+    let reportMetalDevice: String? = nil
+    let reportMetalLibrary: String? = nil
+    let reportMetalMinimumGPUByteCount: Int? = nil
+    let reportMetalTileByteCount: Int? = nil
+    let reportMetalModes: [String] = []
+    let reportSustainedSeconds: Double? = nil
+    #endif
+
+    let report = BenchmarkReport(
+        schemaVersion: 1,
+        generatedAtUTC: generatedTimestampUTC(),
+        commandLine: CommandLine.arguments,
+        environment: BenchmarkEnvironment(
+            backend: BLAKE3.activeBackend.rawValue,
+            simdDegree: BLAKE3.simdDegree,
+            parallelSIMDDegree: BLAKE3.parallelSIMDDegree,
+            defaultParallelWorkers: BLAKE3.defaultParallelWorkerCount,
+            hasherBytes: BLAKE3.nativeHasherByteCount,
+            metalDevice: reportMetalDevice,
+            metalLibrary: reportMetalLibrary,
+            metalMinimumGPUByteCount: reportMetalMinimumGPUByteCount,
+            metalTileByteCount: reportMetalTileByteCount,
+            metalModes: reportMetalModes,
+            fileModes: requestedFileTimingModes.map(\.rawValue),
+            cpuWorkers: cpuWorkerCount(),
+            memoryStats: reportsMemoryStats()
+        ),
+        request: BenchmarkRequest(
+            sizes: requestedSizes.map(formatBytes),
+            sizesBytes: requestedSizes,
+            iterationsOverride: requestedIterationsOverride,
+            sustainedSeconds: reportSustainedSeconds
+        ),
+        rows: benchmarkRows,
+        sustainedRows: sustainedRows,
+        memorySamples: memorySamples
+    )
+
+    do {
+        try writeJSONReport(report, to: requestedJSONOutputPath)
+        print("jsonOutput=\(requestedJSONOutputPath)")
+    } catch {
+        fatalError("failed to write JSON benchmark report: \(error)")
+    }
+}
