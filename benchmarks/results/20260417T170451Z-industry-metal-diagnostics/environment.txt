@@ -1,0 +1,14 @@
+date_utc=2026-04-17T17:04:51Z
+commit=d3fd271fda4054b9ded3d5f5aa9f02d3bc7e8a49
+swift=Apple Swift version 6.3 (swiftlang-6.3.0.123.5 clang-2100.0.123.102) Target: arm64-apple-macosx26.0 
+ProductName:		macOS
+ProductVersion:		26.5
+BuildVersion:		25F5042g
+Apple M4
+Mac16,12
+performance_cores=4
+active_cpus=10
+metal_library=runtime-source
+sizes=16m,64m,256m,512m,1g
+iterations=8
+metal_modes=resident,staged,wrapped,e2e,private,private-staged
