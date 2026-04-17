@@ -1,0 +1,18 @@
+.DS_Store
+
+# SwiftPM
+.build/
+.swiftpm/
+Package.resolved
+
+# Xcode and local Apple tooling
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+*.xcuserstate
+
+# Local benchmark output
+*.trace
+*.jsonl
+benchmark-results/
