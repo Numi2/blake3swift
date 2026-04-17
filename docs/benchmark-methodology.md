@@ -189,6 +189,18 @@ CPU worker tuning sweep:
 swift run -c release blake3-bench --sizes 1m,16m,64m --iterations 8 --metal-modes none --cpu-workers 8
 ```
 
+When `--cpu-workers` is omitted, automatic CPU parallelism uses the library default. On Darwin hosts that report performance-core topology, that default is the performance-core count; otherwise it falls back to active processor count. Publication runs should record the emitted `defaultParallelWorkers` value and pin `--cpu-workers` when comparing CPU scheduler changes.
+
+The `context-auto` row uses `BLAKE3.Context`, which reuses chaining-value workspace and a dedicated CPU scheduler across iterations. Compare `parallel` against `context-auto` to see the cost of one-shot scheduling/allocation versus repeated-hash reuse.
+
+Optional RSS snapshots:
+
+```sh
+swift run -c release blake3-bench --sizes 16m,64m --iterations 4 --metal-modes resident,e2e --memory-stats
+```
+
+`--memory-stats` prints process resident memory before input allocation, after input allocation, and after each size. RSS is operating-system resident memory, not an exact allocation counter; use it to make workspace and file-path memory behavior visible in benchmark artifacts.
+
 Primary publication sweep:
 
 ```sh

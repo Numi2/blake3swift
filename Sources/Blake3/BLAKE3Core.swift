@@ -1,4 +1,7 @@
 import Dispatch
+#if canImport(Darwin)
+import Darwin
+#endif
 import Foundation
 
 enum BLAKE3Core {
@@ -11,6 +14,7 @@ enum BLAKE3Core {
     static let chunkLen = 1_024
     static let simdMinBytes = 16 * 1_024
     static let parallelMinBytes = 256 * 1_024
+    static let defaultParallelWorkerCount = detectedDefaultParallelWorkerCount()
 
     static let chunkStart: UInt32 = 1 << 0
     static let chunkEnd: UInt32 = 1 << 1
@@ -79,6 +83,37 @@ enum BLAKE3Core {
         mutating func reset(keepingCapacity: Bool = true) {
             chunkCVs.removeAll(keepingCapacity: keepingCapacity)
             scratchCVs.removeAll(keepingCapacity: keepingCapacity)
+        }
+    }
+
+    final class ParallelScheduler: @unchecked Sendable {
+        let workerCount: Int
+        private let queue: DispatchQueue
+
+        init(workerCount: Int) {
+            self.workerCount = max(1, workerCount)
+            self.queue = DispatchQueue(
+                label: "com.blake3swift.cpu-parallel.\(self.workerCount)",
+                qos: .userInitiated,
+                attributes: .concurrent
+            )
+        }
+
+        func perform(iterations: Int, _ body: @escaping @Sendable (Int) -> Void) {
+            guard iterations > 1 else {
+                if iterations == 1 {
+                    body(0)
+                }
+                return
+            }
+
+            let group = DispatchGroup()
+            for index in 0..<iterations {
+                queue.async(group: group) {
+                    body(index)
+                }
+            }
+            group.wait()
         }
     }
 
@@ -371,6 +406,7 @@ enum BLAKE3Core {
         key: ChainingValue,
         flags: UInt32,
         maxWorkers: Int?,
+        scheduler: ParallelScheduler? = nil,
         workspace: inout Workspace
     ) -> Output {
         if input.count <= chunkLen {
@@ -382,6 +418,7 @@ enum BLAKE3Core {
             key: key,
             flags: flags,
             maxWorkers: maxWorkers,
+            scheduler: scheduler,
             into: &workspace.chunkCVs
         )
         var currentCount = workspace.chunkCVs.count
@@ -395,7 +432,8 @@ enum BLAKE3Core {
                     key: key,
                     flags: flags,
                     into: &workspace.scratchCVs,
-                    maxWorkers: maxWorkers
+                    maxWorkers: maxWorkers,
+                    scheduler: scheduler
                 )
             } else {
                 currentCount = reduceParentLevel(
@@ -404,7 +442,8 @@ enum BLAKE3Core {
                     key: key,
                     flags: flags,
                     into: &workspace.chunkCVs,
-                    maxWorkers: maxWorkers
+                    maxWorkers: maxWorkers,
+                    scheduler: scheduler
                 )
             }
             currentIsChunkCVs.toggle()
@@ -512,7 +551,7 @@ enum BLAKE3Core {
         if blockCount > 1 {
             for blockIndex in 0..<(blockCount - 1) {
                 let blockOffset = blockIndex * blockLen
-                let blockWords = loadBlockWords(input, offset: blockOffset)
+                let blockWords = loadFullBlockWords(input, offset: blockOffset)
                 let blockFlags = flags | (blockIndex == 0 ? chunkStart : 0)
                 compressInPlace(
                     cv: &cv,
@@ -588,11 +627,12 @@ enum BLAKE3Core {
         key: ChainingValue,
         flags: UInt32
     ) -> Output {
-        var blockWords = BlockWords(repeating: 0)
-        for index in 0..<8 {
-            blockWords[index] = left[index]
-            blockWords[index + 8] = right[index]
-        }
+        let blockWords = BlockWords(
+            left[0], left[1], left[2], left[3],
+            left[4], left[5], left[6], left[7],
+            right[0], right[1], right[2], right[3],
+            right[4], right[5], right[6], right[7]
+        )
         return Output(
             inputCV: key,
             blockWords: blockWords,
@@ -608,6 +648,7 @@ enum BLAKE3Core {
         flags: UInt32,
         baseChunkCounter: Int = 0,
         maxWorkers: Int?,
+        scheduler: ParallelScheduler? = nil,
         into output: inout [ChainingValue]
     ) {
         let chunkCount = (input.count + chunkLen - 1) / chunkLen
@@ -621,7 +662,10 @@ enum BLAKE3Core {
         output.reserveCapacity(chunkCount)
         output.append(contentsOf: repeatElement(ChainingValue(repeating: 0), count: chunkCount))
 
-        let workerCount = clampedWorkerCount(requested: maxWorkers, workItems: chunkCount)
+        let workerCount = clampedWorkerCount(
+            requested: maxWorkers ?? scheduler?.workerCount,
+            workItems: chunkCount
+        )
         let chunksPerWorker = (chunkCount + workerCount - 1) / workerCount
         let fullChunkCount = input.count / chunkLen
         let inputBytes = SendableRawBuffer(baseAddress: baseAddress, count: input.count)
@@ -642,7 +686,7 @@ enum BLAKE3Core {
                         output: outputStorage
                     )
                 } else {
-                    DispatchQueue.concurrentPerform(iterations: workerCount) { workerIndex in
+                    parallelPerform(iterations: workerCount, scheduler: scheduler) { workerIndex in
                         let start = workerIndex * chunksPerWorker
                         let end = min(chunkCount, start + chunksPerWorker)
                         guard start < end else {
@@ -744,7 +788,8 @@ enum BLAKE3Core {
         key: ChainingValue,
         flags: UInt32,
         into next: inout [ChainingValue],
-        maxWorkers: Int?
+        maxWorkers: Int?,
+        scheduler: ParallelScheduler? = nil
     ) -> Int {
         precondition(count >= 2)
         precondition(count <= current.count)
@@ -774,13 +819,16 @@ enum BLAKE3Core {
             return nextCount
         }
 
-        let workerCount = clampedWorkerCount(requested: maxWorkers, workItems: parentCount)
+        let workerCount = clampedWorkerCount(
+            requested: maxWorkers ?? scheduler?.workerCount,
+            workItems: parentCount
+        )
         let parentsPerWorker = (parentCount + workerCount - 1) / workerCount
         current.withUnsafeBufferPointer { currentBuffer in
             next.withUnsafeMutableBufferPointer { nextBuffer in
                 let currentInput = SendableCVInput(baseAddress: currentBuffer.baseAddress!)
                 let nextStorage = SendableCVStorage(baseAddress: nextBuffer.baseAddress!)
-                DispatchQueue.concurrentPerform(iterations: workerCount) { workerIndex in
+                parallelPerform(iterations: workerCount, scheduler: scheduler) { workerIndex in
                     let start = workerIndex * parentsPerWorker
                     let end = min(parentCount, start + parentsPerWorker)
                     guard start < end else {
@@ -802,6 +850,18 @@ enum BLAKE3Core {
             next[nextCount - 1] = current[count - 1]
         }
         return nextCount
+    }
+
+    private static func parallelPerform(
+        iterations: Int,
+        scheduler: ParallelScheduler?,
+        _ body: @escaping @Sendable (Int) -> Void
+    ) {
+        if let scheduler {
+            scheduler.perform(iterations: iterations, body)
+        } else {
+            DispatchQueue.concurrentPerform(iterations: iterations, execute: body)
+        }
     }
 
     private static func reduceParentRange(
@@ -838,10 +898,36 @@ enum BLAKE3Core {
     }
 
     private static func clampedWorkerCount(requested: Int?, workItems: Int) -> Int {
-        let defaultWorkers = max(1, ProcessInfo.processInfo.activeProcessorCount)
-        let workers = max(1, requested ?? defaultWorkers)
+        let workers = normalizedParallelWorkerCount(requested)
         return max(1, min(workers, workItems))
     }
+
+    static func normalizedParallelWorkerCount(_ requested: Int?) -> Int {
+        max(1, requested ?? defaultParallelWorkerCount)
+    }
+
+    private static func detectedDefaultParallelWorkerCount() -> Int {
+        #if canImport(Darwin)
+        if let performanceCores = sysctlInteger(named: "hw.perflevel0.physicalcpu"), performanceCores > 0 {
+            return performanceCores
+        }
+        if let performanceThreads = sysctlInteger(named: "hw.perflevel0.logicalcpu"), performanceThreads > 0 {
+            return performanceThreads
+        }
+        #endif
+        return max(1, ProcessInfo.processInfo.activeProcessorCount)
+    }
+
+    #if canImport(Darwin)
+    private static func sysctlInteger(named name: String) -> Int? {
+        var value: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        guard sysctlbyname(name, &value, &size, nil, 0) == 0 else {
+            return nil
+        }
+        return Int(value)
+    }
+    #endif
 
     @inline(__always)
     private static func loadBlockWords(_ input: UnsafeRawBufferPointer, offset: Int) -> BlockWords {

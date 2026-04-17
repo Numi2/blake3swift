@@ -165,6 +165,7 @@ enum BLAKE3SIMD4 {
         }
     }
 
+    @inline(__always)
     static func hashFourFullChunks(
         input: BLAKE3Core.SendableRawBuffer,
         firstChunkIndex: Int,
@@ -239,6 +240,7 @@ enum BLAKE3SIMD4 {
         }
     }
 
+    @inline(__always)
     static func hashFourParents(
         input: BLAKE3Core.SendableCVInput,
         firstParentIndex: Int,

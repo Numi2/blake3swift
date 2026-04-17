@@ -1,5 +1,9 @@
 public extension BLAKE3 {
+    /// Fixed-size 32-byte BLAKE3 digest.
+    ///
+    /// `Digest` is value-typed, `Sendable`, and compares using a constant-time byte comparison.
     struct Digest: Sendable, Hashable, CustomStringConvertible {
+        /// Number of bytes in a standard BLAKE3 digest.
         public static let byteCount = 32
 
         private typealias Storage = (
@@ -40,6 +44,9 @@ public extension BLAKE3 {
             )
         }
 
+        /// Provides temporary raw access to the digest bytes.
+        ///
+        /// The pointer passed to `body` is only valid for the duration of the closure.
         public func withUnsafeBytes<R>(
             _ body: (UnsafeRawBufferPointer) throws -> R
         ) rethrows -> R {
@@ -49,12 +56,14 @@ public extension BLAKE3 {
             }
         }
 
+        /// Digest bytes in canonical order.
         public var bytes: [UInt8] {
             withUnsafeBytes { raw in
                 Array(raw.bindMemory(to: UInt8.self))
             }
         }
 
+        /// Compares two digests without data-dependent early exit.
         public func constantTimeEquals(_ other: Digest) -> Bool {
             var difference: UInt8 = 0
             withUnsafeBytes { lhs in
@@ -81,6 +90,7 @@ public extension BLAKE3 {
             }
         }
 
+        /// Lowercase hexadecimal digest string.
         public var description: String {
             let table = Array("0123456789abcdef".utf8)
             var output = [UInt8]()

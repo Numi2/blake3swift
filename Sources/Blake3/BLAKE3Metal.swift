@@ -2,14 +2,26 @@
 import Foundation
 import Metal
 
+/// Metal-backed BLAKE3 hashing APIs.
+///
+/// Resident-buffer APIs expose hashing when data is already in an `MTLBuffer`.
+/// Staging, private-buffer, async pipeline, and file APIs make ownership and transfer costs explicit
+/// so benchmarks can keep resident, end-to-end, and repeated-call timing classes separate.
 public enum BLAKE3Metal {
+    /// Backend selection policy for Metal-capable hash calls.
     public enum ExecutionPolicy: Equatable, Sendable {
+        /// Uses CPU below the context threshold and GPU for larger inputs.
         case automatic
+        /// Forces the CPU fallback path through the same API surface.
         case cpu
+        /// Forces Metal execution and throws if Metal work cannot be encoded or completed.
         case gpu
     }
 
+    /// Default byte threshold for automatic GPU selection.
     public static let defaultMinimumGPUByteCount = 16 * 1024 * 1024
+
+    /// Default number of pooled resources used by async Metal helpers.
     public static let defaultAsyncInflightCommandCount = 3
     private static let wideParentReductionThreshold = 512 * 1024
     private static let quadParentReductionThreshold = 32 * 1024
@@ -20,14 +32,19 @@ public enum BLAKE3Metal {
     private static let defaultDevice = MTLCreateSystemDefaultDevice()
     private static let contextCache = BLAKE3MetalContextCache()
 
+    /// Whether a system default Metal device was available when the module initialized.
     public static var isAvailable: Bool {
         defaultDevice != nil
     }
 
+    /// Name of the system default Metal device, if available.
     public static var deviceName: String? {
         defaultDevice?.name
     }
 
+    /// Creates a reusable Metal context.
+    ///
+    /// The context owns pipeline state, a command queue, and reusable scratch resources.
     public static func makeContext(
         device: MTLDevice? = MTLCreateSystemDefaultDevice(),
         minimumGPUByteCount: Int = defaultMinimumGPUByteCount
@@ -38,6 +55,10 @@ public enum BLAKE3Metal {
         return try Context(device: device, minimumGPUByteCount: minimumGPUByteCount)
     }
 
+    /// Hashes a resident Metal buffer.
+    ///
+    /// The buffer must remain valid until the synchronous call returns. With `.gpu`, timing belongs to the
+    /// resident class: no Swift input allocation or upload is included.
     public static func hash(
         buffer: MTLBuffer,
         length: Int,
@@ -46,6 +67,7 @@ public enum BLAKE3Metal {
         try hash(buffer: buffer, range: 0..<length, policy: policy)
     }
 
+    /// Hashes a range of a resident Metal buffer.
     public static func hash(
         buffer: MTLBuffer,
         range: Range<Int>,
@@ -58,6 +80,9 @@ public enum BLAKE3Metal {
         )
     }
 
+    /// Asynchronously hashes a resident Metal buffer.
+    ///
+    /// The buffer must remain valid until the returned task completes.
     public static func hashAsync(
         buffer: MTLBuffer,
         length: Int,
@@ -66,6 +91,7 @@ public enum BLAKE3Metal {
         try await hashAsync(buffer: buffer, range: 0..<length, policy: policy)
     }
 
+    /// Asynchronously hashes a range of a resident Metal buffer.
     public static func hashAsync(
         buffer: MTLBuffer,
         range: Range<Int>,
@@ -78,6 +104,7 @@ public enum BLAKE3Metal {
         )
     }
 
+    /// Reusable Metal hashing context.
     public final class Context: @unchecked Sendable {
         public let device: MTLDevice
         public let minimumGPUByteCount: Int

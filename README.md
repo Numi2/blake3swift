@@ -4,11 +4,16 @@ BLAKE3Swift is a dependency-free Swift implementation of BLAKE3 for Apple platfo
 
 The project is performance-focused, but correctness comes first: the Swift implementation is tested against the official BLAKE3 vectors, keyed hashing, key derivation, extended output, streaming updates, file hashing, and Metal/CPU parity.
 
+## License
+
+This repository is **not open source**. It is proprietary source-available software for evaluation, audit, verification, and benchmark review only. Production, commercial, hosted, redistributed, or revenue-connected use requires a separate commercial license. See [LICENSE.md](LICENSE.md).
+
 ## Features
 
 - Native Swift BLAKE3 core with no vendored C target.
 - One-shot, keyed, derived-key, streaming, XOF, and reusable context APIs.
 - SIMD4 chunk and parent reduction paths for CPU throughput.
+- CPU parallel hashing defaults to detected performance-core count on Darwin when available, with explicit worker overrides for reproducible benchmarks.
 - Bounded-memory CV stack for streaming and multi-GB file hashing.
 - CPU file strategies for buffered reads and memory-mapped hashing.
 - Metal resident-buffer, staged-buffer, private-buffer, async pipeline, and tiled file hashing APIs.
@@ -26,9 +31,11 @@ Add the package to `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/Numi2/blake3swift.git", branch: "main")
+    .package(url: "https://github.com/Numi2/blake3swift.git", branch: "main") // Evaluation only.
 ]
 ```
+
+Use a tagged release instead of `main` once public release tags are available.
 
 Then add the library product to a target:
 
@@ -205,7 +212,7 @@ swift run -c release blake3-bench \
   --sizes 512m,1g \
   --iterations 3 \
   --metal-modes none \
-  --file-modes cpu-mmap-parallel,metal-mmap,metal-tiled-mmap
+  --file-modes mmap-parallel,metal-mmap,metal-tiled-mmap
 ```
 
 ### Timing Classes
@@ -222,6 +229,30 @@ For sustained claims, use repeated large runs and report median plus min/max or 
 
 See [docs/benchmark-methodology.md](docs/benchmark-methodology.md) for the full benchmark contract.
 
+Reproducible benchmark wrappers live under [benchmarks](benchmarks):
+
+```bash
+benchmarks/run-smoke.sh
+benchmarks/run-publication.sh
+benchmarks/run-sustained.sh
+```
+
+Publication runs should keep the generated `environment.txt`, raw markdown output, exact commit, power mode, and thermal notes with the release artifacts.
+
+Set `MEMORY_STATS=1` on the fixture scripts, or pass `--memory-stats` to `blake3-bench`, to include process RSS snapshots beside timing rows.
+
+## Examples
+
+Runnable examples are isolated in a separate package so the root library product stays small:
+
+```bash
+swift run --package-path Examples Blake3Examples all
+swift run --package-path Examples Blake3Examples metal-resident
+swift run --package-path Examples Blake3Examples tiled-file
+```
+
+The examples cover one-shot hashing, streaming, keyed hash, XOF, CPU file hashing, Metal resident hashing, async pipeline hashing, and tiled file hashing.
+
 ## Development
 
 ```bash
@@ -235,7 +266,11 @@ Useful docs:
 - [World-class performance plan](docs/world-class-performance-plan.md)
 - [M4 Metal performance strategy](docs/m4-metal-performance-strategy.md)
 - [Complete implementation roadmap](docs/complete-implementation-roadmap.md)
+- [Performance results](docs/performance-results.md)
+- [API stability notes](docs/api-stability.md)
+- [Release process](docs/release-process.md)
+- [Security review notes](docs/security-review.md)
 
 ## Status
 
-This repository is an active performance engineering project. The Swift and Metal APIs are intended to be explicit about ownership, buffering, timing, and concurrency, but APIs may evolve as benchmarks and hardware tuning improve.
+This repository is an active performance engineering project. The Swift and Metal APIs are intended to be explicit about ownership, buffering, timing, and concurrency, but APIs may evolve as benchmarks and hardware tuning improve. See [docs/api-stability.md](docs/api-stability.md) before pinning an integration.

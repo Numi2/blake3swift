@@ -248,8 +248,79 @@ final class BLAKE3Tests: XCTestCase {
         }
     }
 
+    func testDifferentialWeirdBoundariesAndStreamingSplits() throws {
+        let key = Array("whats the Elvish word for friend".utf8)
+        let contextString = "BLAKE3 2019-12-27 16:29:52 test vectors context"
+        let sizes = [
+            0,
+            1,
+            63,
+            64,
+            65,
+            1_023,
+            1_024,
+            1_025,
+            2_047,
+            2_048,
+            2_049,
+            4_095,
+            4_096,
+            4_097,
+            16_383,
+            16_384,
+            16_385,
+            65_535,
+            65_536,
+            65_537,
+            256 * 1_024 - 1,
+            256 * 1_024,
+            256 * 1_024 + 1
+        ]
+        let splitPattern = [1, 63, 64, 65, 1_023, 1_024, 1_025, 4_097]
+
+        for size in sizes {
+            let input = deterministicInput(byteCount: size)
+            let serialDigest = BLAKE3.hash(input)
+            XCTAssertEqual(BLAKE3.hashScalar(input), serialDigest, "scalar mismatch for byteCount=\(size)")
+            XCTAssertEqual(BLAKE3.hashParallel(input, maxWorkers: 2), serialDigest, "parallel mismatch for byteCount=\(size)")
+            XCTAssertEqual(
+                try BLAKE3.keyedHashParallel(key: key, input: input),
+                try BLAKE3.keyedHash(key: key, input: input),
+                "keyed parallel mismatch for byteCount=\(size)"
+            )
+            XCTAssertEqual(
+                try BLAKE3.deriveKeyParallel(context: contextString, material: input, outputByteCount: 96),
+                try BLAKE3.deriveKey(context: contextString, material: input, outputByteCount: 96),
+                "derive-key parallel mismatch for byteCount=\(size)"
+            )
+
+            var stream = BLAKE3.Hasher()
+            var offset = 0
+            var splitIndex = 0
+            while offset < input.count {
+                let step = splitPattern[splitIndex % splitPattern.count]
+                let end = min(input.count, offset + step)
+                stream.update(input[offset..<end])
+                offset = end
+                splitIndex += 1
+            }
+            XCTAssertEqual(stream.finalize(), serialDigest, "streaming mismatch for byteCount=\(size)")
+
+            var xofReader = stream.finalizeXOF()
+            var xof = [UInt8](repeating: 0, count: 96)
+            xof.withUnsafeMutableBytes { xofReader.read(into: $0) }
+            var oneShotReader = BLAKE3.Hasher()
+            oneShotReader.update(input)
+            var expectedReader = oneShotReader.finalizeXOF()
+            var expectedXOF = [UInt8](repeating: 0, count: 96)
+            expectedXOF.withUnsafeMutableBytes { expectedReader.read(into: $0) }
+            XCTAssertEqual(xof, expectedXOF, "XOF mismatch for byteCount=\(size)")
+        }
+    }
+
     func testCPUContextMatchesOneShotAcrossModes() throws {
         let context = BLAKE3.Context()
+        let tunedContext = BLAKE3.Context(maxWorkers: 2)
         let sizes = [
             0,
             1,
@@ -270,6 +341,11 @@ final class BLAKE3Tests: XCTestCase {
                 context.hash(input, mode: .parallel(maxWorkers: 2)),
                 expected,
                 "parallel context mismatch for byteCount=\(size)"
+            )
+            XCTAssertEqual(
+                tunedContext.hash(input, mode: .automatic),
+                expected,
+                "tuned reusable context mismatch for byteCount=\(size)"
             )
         }
     }
@@ -359,6 +435,51 @@ final class BLAKE3Tests: XCTestCase {
             )
         }
         #endif
+    }
+
+    func testFileStrategiesMatchOneShotAcrossWeirdBoundaries() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("blake3swift-file-boundary-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let sizes = [
+            0,
+            1,
+            63,
+            64,
+            65,
+            1_023,
+            1_024,
+            1_025,
+            16_383,
+            16_384,
+            16_385,
+            256 * 1_024 + 1
+        ]
+
+        for size in sizes {
+            let input = deterministicInput(byteCount: size)
+            let expected = BLAKE3.hash(input)
+            let url = directory.appendingPathComponent("input-\(size).bin")
+            try Data(input).write(to: url, options: .atomic)
+
+            XCTAssertEqual(
+                try BLAKE3File.hash(path: url.path, strategy: .read(bufferSize: 257)),
+                expected,
+                "read file mismatch for byteCount=\(size)"
+            )
+            XCTAssertEqual(
+                try BLAKE3File.hash(path: url.path, strategy: .memoryMapped),
+                expected,
+                "mapped file mismatch for byteCount=\(size)"
+            )
+            XCTAssertEqual(
+                try BLAKE3File.hash(path: url.path, strategy: .memoryMappedParallel(maxThreads: 2)),
+                expected,
+                "mapped parallel file mismatch for byteCount=\(size)"
+            )
+        }
     }
 
     func testFileAsyncHashing() async throws {

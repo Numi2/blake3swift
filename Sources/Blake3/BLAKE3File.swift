@@ -7,20 +7,33 @@ import Foundation
 import Metal
 #endif
 
+/// File hashing APIs for regular files.
+///
+/// CPU strategies work without Metal. Metal strategies fall back to CPU by default unless their
+/// `fallbackToCPU` parameter is set to `false`.
 public enum BLAKE3File {
+    /// Default tile size used by mapped CPU and tiled Metal file paths.
     public static let mappedTileByteCount = 16 * 1024 * 1024
 
+    /// File hashing strategy.
     public enum Strategy: Equatable, Sendable {
+        /// Chooses the bounded memory-mapped CPU path with read fallback.
         case automatic
+        /// Streams the file through a reusable read buffer.
         case read(bufferSize: Int = 64 * 1024)
+        /// Hashes a memory-mapped regular file on the calling thread.
         case memoryMapped
+        /// Hashes a memory-mapped regular file with CPU parallelism.
         case memoryMappedParallel(maxThreads: Int? = nil)
         #if canImport(Metal)
+        /// Wraps mapped file pages in a shared Metal buffer and hashes through ``BLAKE3Metal``.
         case metalMemoryMapped(policy: BLAKE3Metal.ExecutionPolicy = .automatic, fallbackToCPU: Bool = true)
+        /// Processes mapped file chunks on Metal in bounded tiles and performs canonical final tree reduction.
         case metalTiledMemoryMapped(tileByteCount: Int = BLAKE3File.mappedTileByteCount, fallbackToCPU: Bool = true)
         #endif
     }
 
+    /// Hashes a regular file with the selected strategy.
     public static func hash(
         path: String,
         strategy: Strategy = .automatic
@@ -28,6 +41,10 @@ public enum BLAKE3File {
         try hash(path: path, strategy: strategy, cancellationCheck: nil)
     }
 
+    /// Hashes a regular file asynchronously.
+    ///
+    /// CPU strategies run on a detached task. Metal strategies keep mapped pages alive until GPU work
+    /// completes and check task cancellation between major file or tile operations.
     public static func hashAsync(
         path: String,
         strategy: Strategy = .automatic

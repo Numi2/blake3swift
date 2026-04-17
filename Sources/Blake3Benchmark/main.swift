@@ -101,6 +101,12 @@ private func argumentValue(named name: String) -> String? {
     return nil
 }
 
+private func hasArgument(named name: String) -> Bool {
+    CommandLine.arguments.dropFirst().contains { argument in
+        argument == name || argument == "\(name)=true" || argument == "\(name)=1"
+    }
+}
+
 private func benchmarkSizes() -> [Int] {
     guard let rawValue = argumentValue(named: "--sizes") else {
         return defaultSizes
@@ -166,6 +172,10 @@ private func cpuWorkerCount() -> Int? {
         return nil
     }
     return parsed
+}
+
+private func reportsMemoryStats() -> Bool {
+    hasArgument(named: "--memory-stats")
 }
 
 private func fileTimingModes() -> [FileTimingMode] {
@@ -617,8 +627,61 @@ private func formatBytes(_ byteCount: Int) -> String {
     return "\(byteCount) B"
 }
 
+private func residentMemoryBytes() -> UInt64? {
+    var info = mach_task_basic_info_data_t()
+    var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info_data_t>.size / MemoryLayout<natural_t>.size)
+    let result = withUnsafeMutablePointer(to: &info) { pointer in
+        pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { rebound in
+            task_info(
+                mach_task_self_,
+                task_flavor_t(MACH_TASK_BASIC_INFO),
+                rebound,
+                &count
+            )
+        }
+    }
+    guard result == KERN_SUCCESS else {
+        return nil
+    }
+    return UInt64(info.resident_size)
+}
+
+private func formatMemory(_ byteCount: UInt64) -> String {
+    let mib = Double(byteCount) / 1_048_576.0
+    return String(format: "%.1f MiB", mib)
+}
+
+private struct MemorySample {
+    let sizeLabel: String
+    let phase: String
+    let residentBytes: UInt64
+}
+
+private func recordMemoryStats(
+    size label: String,
+    phase: String,
+    into memorySamples: inout [MemorySample]
+) {
+    guard reportsMemoryStats(), let rss = residentMemoryBytes() else {
+        return
+    }
+    memorySamples.append(MemorySample(sizeLabel: label, phase: phase, residentBytes: rss))
+}
+
+private func printMemoryStats(_ memorySamples: [MemorySample]) {
+    guard !memorySamples.isEmpty else {
+        return
+    }
+    print("")
+    print("| Size | Memory Phase | RSS |")
+    print("| --- | --- | ---: |")
+    for sample in memorySamples {
+        print("| \(sample.sizeLabel) | \(sample.phase) | \(formatMemory(sample.residentBytes)) |")
+    }
+}
+
 print("BLAKE3 Swift benchmark")
-print("backend=\(BLAKE3.activeBackend.rawValue) simdDegree=\(BLAKE3.simdDegree) parallelSIMDDegree=\(BLAKE3.parallelSIMDDegree) hasherBytes=\(BLAKE3.nativeHasherByteCount)")
+print("backend=\(BLAKE3.activeBackend.rawValue) simdDegree=\(BLAKE3.simdDegree) parallelSIMDDegree=\(BLAKE3.parallelSIMDDegree) defaultParallelWorkers=\(BLAKE3.defaultParallelWorkerCount) hasherBytes=\(BLAKE3.nativeHasherByteCount)")
 private let requestedFileTimingModes = fileTimingModes()
 #if canImport(Metal)
 let metalDevice = MTLCreateSystemDefaultDevice()
@@ -657,17 +720,25 @@ if !requestedFileTimingModes.isEmpty {
 if let cpuWorkers = cpuWorkerCount() {
     print("cpuWorkers=\(cpuWorkers)")
 }
+if reportsMemoryStats() {
+    print("memoryStats=rss")
+}
 print("")
 print("| Size | Backend | Mode | Median GiB/s | Min GiB/s | P95 GiB/s | Max GiB/s | Correct |")
 print("| --- | --- | --- | ---: | ---: | ---: | ---: | --- |")
 
-for size in benchmarkSizes() {
-    var input = [UInt8](repeating: 0, count: size)
-    fillDeterministically(&input)
+private var memorySamples = [MemorySample]()
 
+for size in benchmarkSizes() {
     let iterations = iterationCount(for: size)
     let cpuWorkers = cpuWorkerCount()
     let label = formatBytes(size)
+    recordMemoryStats(size: label, phase: "before-input", into: &memorySamples)
+
+    var input = [UInt8](repeating: 0, count: size)
+    fillDeterministically(&input)
+    recordMemoryStats(size: label, phase: "after-input", into: &memorySamples)
+
     let scalar = runBenchmark(
         backend: "cpu",
         mode: "scalar",
@@ -1051,4 +1122,8 @@ for size in benchmarkSizes() {
         )
     }
     #endif
+
+    recordMemoryStats(size: label, phase: "after-size", into: &memorySamples)
 }
+
+printMemoryStats(memorySamples)

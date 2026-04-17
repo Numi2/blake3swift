@@ -192,13 +192,21 @@ private final class BLAKE3HasherStorage {
 }
 
 public extension BLAKE3 {
+    /// Incremental BLAKE3 hasher with copy-on-write value semantics.
+    ///
+    /// `Hasher` is intended to be mutated by one task at a time. Copying a hasher is cheap until either
+    /// copy is mutated, at which point the internal chaining-value stack and buffered chunk are copied.
     struct Hasher {
         private var storage: BLAKE3HasherStorage
 
+        /// Creates an unkeyed streaming hasher.
         public init() {
             self.storage = BLAKE3HasherStorage()
         }
 
+        /// Creates a keyed streaming hasher.
+        ///
+        /// `key` must be exactly ``BLAKE3/keyByteCount`` bytes and is not retained after initialization.
         public init(key: some ContiguousBytes) throws {
             self.storage = try key.withUnsafeBytes { keyBytes in
                 guard keyBytes.count == BLAKE3.keyByteCount else {
@@ -214,6 +222,9 @@ public extension BLAKE3 {
             }
         }
 
+        /// Creates a streaming hasher for BLAKE3 key derivation.
+        ///
+        /// `context` is encoded as UTF-8 exactly.
         public init(deriveKeyContext context: String) {
             let contextBytes = Array(context.utf8)
             let contextKey = contextBytes.withUnsafeBytes { raw in
@@ -231,23 +242,31 @@ public extension BLAKE3 {
             }
         }
 
+        /// Adds contiguous input to the stream.
         public mutating func update(_ input: some ContiguousBytes) {
             input.withUnsafeBytes { raw in
                 update(raw)
             }
         }
 
+        /// Adds raw input to the stream.
+        ///
+        /// The buffer only needs to remain valid for the duration of this call.
         public mutating func update(_ input: UnsafeRawBufferPointer) {
             ensureUniqueStorage()
             storage.update(input)
         }
 
+        /// Adds contiguous input using CPU parallelism when the input is large enough.
+        ///
+        /// Pass `maxWorkers` to pin the worker count for benchmark reproducibility.
         public mutating func updateParallel(_ input: some ContiguousBytes, maxWorkers: Int? = nil) {
             input.withUnsafeBytes { raw in
                 updateParallel(raw, maxWorkers: maxWorkers)
             }
         }
 
+        /// Adds raw input using CPU parallelism when the input is large enough.
         public mutating func updateParallel(_ input: UnsafeRawBufferPointer, maxWorkers: Int? = nil) {
             ensureUniqueStorage()
             storage.updateParallel(input, maxWorkers: maxWorkers)
@@ -258,6 +277,7 @@ public extension BLAKE3 {
             storage.updateParallel(input, maxWorkers: maxWorkers, leavesTrailingChunk: false)
         }
 
+        /// Resets the stream while keeping internal capacity for reuse.
         public mutating func reset() {
             ensureUniqueStorage()
             storage.reset()
@@ -267,6 +287,7 @@ public extension BLAKE3 {
             storage.retainedTreeNodeCount
         }
 
+        /// Finalizes the stream into a 32-byte digest without consuming the hasher.
         public func finalize() -> Digest {
             var output = [UInt8](repeating: 0, count: BLAKE3.digestByteCount)
             output.withUnsafeMutableBytes { raw in
@@ -275,17 +296,23 @@ public extension BLAKE3 {
             return Digest(output)
         }
 
+        /// Writes root output bytes without consuming the hasher.
+        ///
+        /// Passing a buffer larger than 32 bytes uses BLAKE3's extendable-output mode.
         public func finalize(into output: UnsafeMutableRawBufferPointer) {
             storage.rootOutput().writeRootBytes(into: output)
         }
 
+        /// Creates an extendable-output reader without consuming the hasher.
         public func finalizeXOF() -> OutputReader {
             OutputReader(output: storage.rootOutput())
         }
     }
 
+    /// Reader for BLAKE3 extendable output.
     struct OutputReader {
         private let output: BLAKE3Core.Output
+        /// Current byte position in the output stream.
         public private(set) var position: UInt64
 
         fileprivate init(output: BLAKE3Core.Output, position: UInt64 = 0) {
@@ -293,10 +320,12 @@ public extension BLAKE3 {
             self.position = position
         }
 
+        /// Sets the next byte offset that ``read(into:)`` will read from.
         public mutating func seek(to position: UInt64) {
             self.position = position
         }
 
+        /// Reads bytes into `output` and advances ``position`` by the number of bytes written.
         public mutating func read(into output: UnsafeMutableRawBufferPointer) {
             self.output.writeRootBytes(into: output, seek: position)
             position &+= UInt64(output.count)
