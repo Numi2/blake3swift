@@ -1,4 +1,5 @@
-import Blake3
+@_spi(Benchmark) import Blake3
+import Blake3BenchmarkSupport
 import Darwin
 import Foundation
 #if canImport(Metal)
@@ -394,6 +395,11 @@ private func hashParallelForBenchmark(_ input: UnsafeRawBufferPointer) -> BLAKE3
 @inline(never)
 private func hashParallelForBenchmark(_ input: UnsafeRawBufferPointer, maxWorkers: Int?) -> BLAKE3.Digest {
     BLAKE3.hashParallel(input, maxWorkers: maxWorkers)
+}
+
+@inline(never)
+private func hashOfficialCForBenchmark(_ input: UnsafeRawBufferPointer) -> BLAKE3.Digest {
+    OfficialCBLAKE3.hash(input)
 }
 
 @inline(never)
@@ -1861,6 +1867,7 @@ print(
         "defaultBackendPolicy=\(BLAKE3.defaultBackendPolicy.rawValue) " +
         "defaultMetalMinimumBytes=\(BLAKE3.defaultMetalMinimumByteCount)"
 )
+print("officialCVersion=\(OfficialCBLAKE3.version)")
 private let requestedSizes = benchmarkSizes()
 private let requestedIterationsOverride = iterationsOverride()
 private let requestedJSONOutputPath = jsonOutputPath()
@@ -1977,6 +1984,13 @@ for size in requestedSizes {
     ) { rawInput in
         hashParallelForBenchmark(rawInput, maxWorkers: cpuWorkers)
     }
+    let officialC = runRawBenchmark(
+        backend: "official-c",
+        mode: "one-shot",
+        input: input,
+        iterations: iterations,
+        operation: hashOfficialCForBenchmark
+    )
     let cpuContext = BLAKE3.Context()
     let cpuContextAuto = runRawBenchmark(
         backend: "cpu",
@@ -2221,7 +2235,7 @@ for size in requestedSizes {
     }
     #endif
 
-    var results = [scalar, single, parallel, cpuContextAuto, defaultAuto]
+    var results = [scalar, single, parallel, officialC, cpuContextAuto, defaultAuto]
     results.append(contentsOf: fileResults)
     #if canImport(Metal)
     if let metalAuto {

@@ -22,6 +22,11 @@ public extension BLAKE3 {
             }
         }
 
+        @_spi(Benchmark)
+        public init(benchmarkBytes bytes: [UInt8]) {
+            self.init(bytes)
+        }
+
         init(_ bytes: UnsafeRawBufferPointer) {
             precondition(bytes.count == Self.byteCount)
             self.storage = Self.storage(from: bytes)

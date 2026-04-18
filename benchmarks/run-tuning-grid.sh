@@ -13,10 +13,12 @@ METAL_TILE_SIZES="${METAL_TILE_SIZES:-}"
 OUT_DIR="${OUT_DIR:-benchmarks/results/$(date -u +%Y%m%dT%H%M%SZ)-tuning}"
 
 mkdir -p "$OUT_DIR"
+swift build -c release --product blake3-bench
+BENCHMARK_BIN="${BENCHMARK_BIN:-$ROOT_DIR/.build/release/blake3-bench}"
 
 for workers in $CPU_WORKER_COUNTS; do
   COMMAND=(
-    swift run -c release blake3-bench
+    "$BENCHMARK_BIN"
     --sizes "$SIZES"
     --iterations "$ITERATIONS"
     --metal-modes none
@@ -31,7 +33,7 @@ for workers in $CPU_WORKER_COUNTS; do
     COMMAND+=(--memory-stats)
   fi
   "${COMMAND[@]}" | tee "$OUT_DIR/cpu-workers-$workers.md"
-  swift run -c release blake3-bench --validate-json "$OUT_DIR/cpu-workers-$workers.json"
+  "$BENCHMARK_BIN" --validate-json "$OUT_DIR/cpu-workers-$workers.json"
 done
 
 for modes in $METAL_MODE_SETS; do
@@ -39,7 +41,7 @@ for modes in $METAL_MODE_SETS; do
     safe_modes="${modes//,/-}"
     safe_gate="${gate_bytes//[^A-Za-z0-9]/-}"
     COMMAND=(
-      swift run -c release blake3-bench
+      "$BENCHMARK_BIN"
       --sizes "$SIZES"
       --iterations "$ITERATIONS"
       --metal-modes "$modes"
@@ -54,14 +56,14 @@ for modes in $METAL_MODE_SETS; do
       COMMAND+=(--memory-stats)
     fi
     "${COMMAND[@]}" | tee "$OUT_DIR/metal-$safe_modes-gate-$safe_gate.md"
-    swift run -c release blake3-bench --validate-json "$OUT_DIR/metal-$safe_modes-gate-$safe_gate.json"
+    "$BENCHMARK_BIN" --validate-json "$OUT_DIR/metal-$safe_modes-gate-$safe_gate.json"
   done
 done
 
 for tile_size in $METAL_TILE_SIZES; do
   safe_tile="${tile_size//[^A-Za-z0-9]/-}"
   COMMAND=(
-    swift run -c release blake3-bench
+    "$BENCHMARK_BIN"
     --sizes "$SIZES"
     --iterations "$ITERATIONS"
     --metal-modes none
@@ -76,7 +78,7 @@ for tile_size in $METAL_TILE_SIZES; do
     COMMAND+=(--memory-stats)
   fi
   "${COMMAND[@]}" | tee "$OUT_DIR/metal-tiled-file-tile-$safe_tile.md"
-  swift run -c release blake3-bench --validate-json "$OUT_DIR/metal-tiled-file-tile-$safe_tile.json"
+  "$BENCHMARK_BIN" --validate-json "$OUT_DIR/metal-tiled-file-tile-$safe_tile.json"
 done
 
 echo "Wrote tuning grid artifacts to $OUT_DIR"

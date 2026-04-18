@@ -12,6 +12,8 @@ SUSTAINED_POLICY="${SUSTAINED_POLICY:-gpu}"
 OUT_DIR="${OUT_DIR:-benchmarks/results/$(date -u +%Y%m%dT%H%M%SZ)-sustained}"
 
 mkdir -p "$OUT_DIR"
+swift build -c release --product blake3-bench
+BENCHMARK_BIN="${BENCHMARK_BIN:-$ROOT_DIR/.build/release/blake3-bench}"
 
 {
   echo "date_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -29,7 +31,7 @@ mkdir -p "$OUT_DIR"
 } | tee "$OUT_DIR/environment.txt"
 
 COMMAND=(
-  swift run -c release blake3-bench
+  "$BENCHMARK_BIN"
   --sizes "$SIZES"
   --iterations "$ITERATIONS"
   --metal-modes "$SUSTAINED_MODE"
@@ -52,6 +54,6 @@ if [[ "${MEMORY_STATS:-0}" == "1" ]]; then
 fi
 
 "${COMMAND[@]}" | tee "$OUT_DIR/sustained-$SUSTAINED_MODE.md"
-swift run -c release blake3-bench --validate-json "$OUT_DIR/sustained-$SUSTAINED_MODE.json"
+"$BENCHMARK_BIN" --validate-json "$OUT_DIR/sustained-$SUSTAINED_MODE.json"
 
 echo "Wrote sustained benchmark artifacts to $OUT_DIR"

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
 SIZES="${SIZES:-${AUTOTUNE_SIZES:-16m,64m}}"
 ITERATIONS="${ITERATIONS:-${AUTOTUNE_ITERATIONS:-3}}"
 AUTOTUNE_GATES="${AUTOTUNE_GATES:-1m,4m,16m,64m}"
@@ -9,6 +12,8 @@ AUTOTUNE_TILE_SIZES="${AUTOTUNE_TILE_SIZES:-8m,16m,32m,64m}"
 OUT_DIR="${OUT_DIR:-benchmarks/results/$(date -u +%Y%m%dT%H%M%SZ)-autotune}"
 
 mkdir -p "$OUT_DIR"
+swift build -c release --product blake3-bench
+BENCHMARK_BIN="${BENCHMARK_BIN:-$ROOT_DIR/.build/release/blake3-bench}"
 
 {
   echo "date_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -28,7 +33,7 @@ mkdir -p "$OUT_DIR"
 } > "$OUT_DIR/environment.txt"
 
 COMMAND=(
-  swift run -c release blake3-bench
+  "$BENCHMARK_BIN"
   --autotune-metal
   --autotune-sizes "$SIZES"
   --autotune-iterations "$ITERATIONS"
@@ -46,6 +51,6 @@ if [[ "${AUTOTUNE_FILE_TILES:-0}" == "1" ]]; then
 fi
 
 "${COMMAND[@]}" | tee "$OUT_DIR/autotune-metal.md"
-swift run -c release blake3-bench --validate-autotune-json "$OUT_DIR/autotune-metal.json"
+"$BENCHMARK_BIN" --validate-autotune-json "$OUT_DIR/autotune-metal.json"
 
 echo "Wrote autotune artifacts to $OUT_DIR"

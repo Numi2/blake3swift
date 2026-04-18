@@ -16,7 +16,9 @@ enum BLAKE3Core {
     static let serialArrayMinBytes = 16 * 1_024
     static let parallelMinBytes = 96 * 1_024
     static let parallelParentMinCount = 4_096
+    static let persistentSchedulerMinBytes = 16 * 1_024 * 1_024
     static let defaultParallelWorkerCount = detectedDefaultParallelWorkerCount()
+    static let defaultParallelScheduler = ParallelScheduler(workerCount: defaultParallelWorkerCount)
 
     static let chunkStart: UInt32 = 1 << 0
     static let chunkEnd: UInt32 = 1 << 1

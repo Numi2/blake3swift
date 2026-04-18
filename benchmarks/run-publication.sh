@@ -9,6 +9,8 @@ ITERATIONS="${ITERATIONS:-8}"
 OUT_DIR="${OUT_DIR:-benchmarks/results/$(date -u +%Y%m%dT%H%M%SZ)}"
 
 mkdir -p "$OUT_DIR"
+swift build -c release --product blake3-bench
+BENCHMARK_BIN="${BENCHMARK_BIN:-$ROOT_DIR/.build/release/blake3-bench}"
 
 {
   echo "date_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -29,7 +31,7 @@ mkdir -p "$OUT_DIR"
 } | tee "$OUT_DIR/environment.txt"
 
 CPU_METAL_COMMAND=(
-  swift run -c release blake3-bench
+  "$BENCHMARK_BIN"
   --sizes "$SIZES"
   --iterations "$ITERATIONS"
   --metal-modes resident,e2e
@@ -38,7 +40,7 @@ CPU_METAL_COMMAND=(
 )
 
 FILE_COMMAND=(
-  swift run -c release blake3-bench
+  "$BENCHMARK_BIN"
   --sizes "$SIZES"
   --iterations "$ITERATIONS"
   --metal-modes none
@@ -71,9 +73,9 @@ if [[ "${MEMORY_STATS:-0}" == "1" ]]; then
 fi
 
 "${CPU_METAL_COMMAND[@]}" | tee "$OUT_DIR/cpu-metal-publication.md"
-swift run -c release blake3-bench --validate-json "$OUT_DIR/cpu-metal-publication.json"
+"$BENCHMARK_BIN" --validate-json "$OUT_DIR/cpu-metal-publication.json"
 
 "${FILE_COMMAND[@]}" | tee "$OUT_DIR/file-publication.md"
-swift run -c release blake3-bench --validate-json "$OUT_DIR/file-publication.json"
+"$BENCHMARK_BIN" --validate-json "$OUT_DIR/file-publication.json"
 
 echo "Wrote benchmark artifacts to $OUT_DIR"

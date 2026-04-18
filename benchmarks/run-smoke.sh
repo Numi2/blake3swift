@@ -4,13 +4,16 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+swift build -c release --product blake3-bench
+BENCHMARK_BIN="${BENCHMARK_BIN:-$ROOT_DIR/.build/release/blake3-bench}"
+
 SIZES="${SIZES:-1m,16m}"
 ITERATIONS="${ITERATIONS:-2}"
 METAL_MODES="${METAL_MODES:-resident,e2e}"
 FILE_MODES="${FILE_MODES:-none}"
 
 COMMAND=(
-  swift run -c release blake3-bench
+  "$BENCHMARK_BIN"
   --sizes "$SIZES"
   --iterations "$ITERATIONS"
   --metal-modes "$METAL_MODES"
@@ -40,5 +43,5 @@ fi
 "${COMMAND[@]}"
 
 if [[ -n "${JSON_OUTPUT:-}" && "${JSON_OUTPUT:-}" != "0" ]]; then
-  swift run -c release blake3-bench --validate-json "$JSON_OUTPUT"
+  "$BENCHMARK_BIN" --validate-json "$JSON_OUTPUT"
 fi

@@ -211,11 +211,15 @@ public enum BLAKE3 {
         maxWorkers: Int? = nil
     ) -> Digest {
         var workspace = BLAKE3Core.Workspace()
+        let scheduler = maxWorkers == nil && input.count >= BLAKE3Core.persistentSchedulerMinBytes
+            ? BLAKE3Core.defaultParallelScheduler
+            : nil
         return Digest(output: BLAKE3Core.rootOutputParallel(
             input,
             key: BLAKE3Core.iv,
             flags: 0,
             maxWorkers: maxWorkers,
+            scheduler: scheduler,
             workspace: &workspace
         ))
     }
