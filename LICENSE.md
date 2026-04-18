@@ -6,7 +6,9 @@ This license is not an open source license. The source code is published only fo
 
 ## 1. Definitions
 
-"Software" means the BLAKE3Swift source code, Metal kernels, documentation, benchmark tools, examples, tests, and related files in this repository.
+"Software" means the BLAKE3Swift source code, Metal kernels, documentation, benchmark tools, examples, tests, and related files in this repository, except for third-party components identified in `THIRD_PARTY_NOTICES.md`.
+
+"Third-Party Components" means source code, test vectors, documentation, or other materials that are identified in `THIRD_PARTY_NOTICES.md` and remain governed by their upstream license terms.
 
 "Licensor" means the copyright holder identified above.
 
@@ -27,6 +29,8 @@ Subject to this license, Licensor grants You a limited, revocable, non-exclusive
 5. Publish benchmark results produced from an unmodified copy of the Software, provided You identify the exact commit, hardware, operating system, Swift version, command line, timing class, and any local thermal or power constraints.
 
 These permissions are for Evaluation Use only. No ownership, commercial license, patent license, trademark license, or production right is granted.
+
+This license does not supersede third-party license terms. Third-Party Components remain under their upstream licenses and are included only for the purposes described in `THIRD_PARTY_NOTICES.md`.
 
 ## 3. Commercial License Required
 

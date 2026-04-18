@@ -6,19 +6,19 @@ The project is performance-focused, but correctness comes first: the Swift imple
 
 ## Latest Results
 
-Local release benchmarks on Apple M4 show the Swift and Metal paths outperforming the benchmark-only official C reference by a wide margin. These numbers are from `benchmarks/results/20260418T213322Z-head-publication` at commit `294e344`, with JSON validation enabled. Resident and private Metal rows time command encoding, GPU execution, wait, and digest read, but exclude input upload/setup.
+Local release benchmarks on Apple M4 are used to tune the Swift CPU and Metal backends and to keep correctness checks attached to every timing row. These numbers are from `benchmarks/results/20260418T213322Z-head-publication` at commit `294e344`, with JSON validation enabled.
 
-| Input | Official C one-shot | Swift CPU parallel | Default `BLAKE3.hash` | Best Metal row |
-| --- | ---: | ---: | ---: | ---: |
-| 16 MiB | 2.10 GiB/s | 5.04 GiB/s | 9.86 GiB/s | 25.21 GiB/s |
-| 64 MiB | 2.01 GiB/s | 5.53 GiB/s | 24.56 GiB/s | 45.12 GiB/s |
-| 256 MiB | 1.40 GiB/s | 8.26 GiB/s | 14.11 GiB/s | 57.81 GiB/s |
-| 512 MiB | 2.03 GiB/s | 7.55 GiB/s | 30.47 GiB/s | 65.12 GiB/s |
-| 1 GiB | 1.99 GiB/s | 9.16 GiB/s | 33.78 GiB/s | 67.43 GiB/s |
+The official C row is a vendored benchmark comparison point, not a claim about every upstream BLAKE3 configuration. Metal timing classes are reported separately: end-to-end rows include Swift-owned input buffer allocation/copy plus hashing, while resident/private rows start after input is already in Metal-accessible storage and are useful for GPU pipeline analysis.
 
-At 1 GiB, the default Swift API is about 17.0x faster than the benchmark-only official C one-shot path, and the best Metal row is about 33.9x faster. The current best Metal row at 1 GiB is the resident GPU timing class.
+| Input | Official C one-shot | Swift CPU parallel | Default `BLAKE3.hash` | Metal end-to-end GPU | Best resident/private Metal row |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 16 MiB | 2.10 GiB/s | 5.04 GiB/s | 9.86 GiB/s | 7.92 GiB/s | 25.21 GiB/s |
+| 64 MiB | 2.01 GiB/s | 5.53 GiB/s | 24.56 GiB/s | 8.41 GiB/s | 45.12 GiB/s |
+| 256 MiB | 1.40 GiB/s | 8.26 GiB/s | 14.11 GiB/s | 8.61 GiB/s | 57.81 GiB/s |
+| 512 MiB | 2.03 GiB/s | 7.55 GiB/s | 30.47 GiB/s | 10.28 GiB/s | 65.12 GiB/s |
+| 1 GiB | 1.99 GiB/s | 9.16 GiB/s | 33.78 GiB/s | 9.57 GiB/s | 67.43 GiB/s |
 
-The automatic path uses Swift CPU hashing below the Metal crossover and Metal for larger unkeyed inputs. The current default crossover is 16 MiB, which keeps small buffers on the more stable CPU path while letting larger buffers use the GPU.
+The automatic path uses Swift CPU hashing below the Metal crossover and Metal for larger unkeyed inputs. The current default crossover is 16 MiB, which keeps small buffers on the CPU path while letting larger buffers use the GPU when that is beneficial for the selected timing class.
 
 Large-file tiled Metal hashing now reduces complete non-final tiles to subtree chaining values on the GPU before merging them into the canonical Swift CV stack.
 
@@ -30,7 +30,7 @@ Large-file tiled Metal hashing now reduces complete non-final tiles to subtree c
 
 ## Features
 
-- Native Swift BLAKE3 library target; vendored official C code is isolated to benchmark support.
+- Native Swift BLAKE3 library target; vendored official C code remains under its upstream license and is isolated to benchmark support.
 - One-shot, keyed, derived-key, streaming, XOF, and reusable context APIs.
 - Keyed and derive-key one-shot APIs use CPU tree parallelism for large inputs.
 - Reusable CPU contexts with persistent parallel worker pools for repeated hashes.
@@ -358,6 +358,7 @@ Useful docs:
 - [API stability notes](docs/api-stability.md)
 - [Release process](docs/release-process.md)
 - [Security review notes](docs/security-review.md)
+- [Third-party notices](THIRD_PARTY_NOTICES.md)
 
 ## Status
 
@@ -366,3 +367,5 @@ This repository is an active performance engineering project. The Swift and Meta
 ## License
 
 This repository is **not open source**. It is proprietary source-available software for evaluation, audit, verification, and benchmark review only. Production, commercial, hosted, redistributed, or revenue-connected use requires a separate commercial license. See [LICENSE.md](LICENSE.md).
+
+Vendored upstream BLAKE3 materials remain under their upstream license terms. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
