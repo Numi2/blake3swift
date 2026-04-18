@@ -6,19 +6,17 @@ The project is performance-focused, but correctness comes first: the Swift imple
 
 ## Latest Results
 
-Local release benchmarks on Apple M4 show the Swift and Metal paths outperforming the benchmark-only official C reference by a wide margin. These numbers are from `benchmarks/run-smoke.sh` with JSON validation enabled; resident Metal rows time command encoding, GPU execution, wait, and digest read, but exclude input upload/setup.
+Local release benchmarks on Apple M4 show the Swift and Metal paths outperforming the benchmark-only official C reference by a wide margin. These numbers are from the full benchmark suite in `benchmarks/results/20260418T192002Z-full-suite`, with JSON validation enabled. Resident Metal rows time command encoding, GPU execution, wait, and digest read, but exclude input upload/setup.
 
-| Input | Default `BLAKE3.hash` | Swift CPU parallel | Official C one-shot | Best Metal row |
+| Input | Official C one-shot | Swift CPU parallel | Default `BLAKE3.hash` | Metal resident GPU |
 | --- | ---: | ---: | ---: | ---: |
-| 16 MiB | 8.57 GiB/s | 8.83 GiB/s | 2.16 GiB/s | 12.60 GiB/s |
-| 32 MiB | 11.22 GiB/s | 9.31 GiB/s | 2.16 GiB/s | 25.25 GiB/s |
-| 64 MiB | 19.53 GiB/s | 10.03 GiB/s | 2.17 GiB/s | 52.11 GiB/s |
+| 64 MiB | 2.19 GiB/s | 10.08 GiB/s | 12.63 GiB/s | 42.95 GiB/s |
+| 512 MiB | 2.18 GiB/s | 10.83 GiB/s | 28.53 GiB/s | 62.98 GiB/s |
+| 1 GiB | 2.18 GiB/s | 11.28 GiB/s | 30.28 GiB/s | 66.69 GiB/s |
 
-The automatic path uses Swift CPU hashing below the Metal crossover and Metal for larger unkeyed inputs. The current default crossover is 32 MiB, which keeps 16 MiB on the more stable CPU path while letting larger buffers use the GPU.
+At 1 GiB, the default Swift API is about 13.9x faster than the benchmark-only official C one-shot path, and the Metal resident GPU path is about 30.6x faster. Sustained 30-second Metal resident runs held 64.26 GiB/s average at 1 GiB with a 64.17 GiB/s median.
 
-## License
-
-This repository is **not open source**. It is proprietary source-available software for evaluation, audit, verification, and benchmark review only. Production, commercial, hosted, redistributed, or revenue-connected use requires a separate commercial license. See [LICENSE.md](LICENSE.md).
+The automatic path uses Swift CPU hashing below the Metal crossover and Metal for larger unkeyed inputs. The current default crossover is 32 MiB, which keeps smaller buffers on the more stable CPU path while letting larger buffers use the GPU.
 
 ## Features
 
@@ -351,3 +349,7 @@ Useful docs:
 ## Status
 
 This repository is an active performance engineering project. The Swift and Metal APIs are intended to be explicit about ownership, buffering, timing, and concurrency, but APIs may evolve as benchmarks and hardware tuning improve. See [docs/api-stability.md](docs/api-stability.md) before pinning an integration.
+
+## License
+
+This repository is **not open source**. It is proprietary source-available software for evaluation, audit, verification, and benchmark review only. Production, commercial, hosted, redistributed, or revenue-connected use requires a separate commercial license. See [LICENSE.md](LICENSE.md).
