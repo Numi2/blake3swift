@@ -21,6 +21,8 @@ struct BLAKE3MetalPipelines {
     let chunkCVs: MTLComputePipelineState
     let chunkFullCVs: MTLComputePipelineState
     let chunkFullAlignedCVs: MTLComputePipelineState
+    let chunkTile256CVs: MTLComputePipelineState
+    let chunkTile512CVs: MTLComputePipelineState
     let parentCVs: MTLComputePipelineState
     let parent4ExactCVs: MTLComputePipelineState
     let parent4CVs: MTLComputePipelineState
@@ -63,6 +65,8 @@ final class BLAKE3MetalPipelineCache: @unchecked Sendable {
         guard let chunkFunction = library.makeFunction(name: "blake3_chunk_cvs"),
               let chunkFullFunction = library.makeFunction(name: "blake3_chunk_full_cvs"),
               let chunkFullAlignedFunction = library.makeFunction(name: "blake3_chunk_full_aligned_cvs"),
+              let chunkTile256Function = library.makeFunction(name: "blake3_chunk_tile256_cvs"),
+              let chunkTile512Function = library.makeFunction(name: "blake3_chunk_tile512_cvs"),
               let parentFunction = library.makeFunction(name: "blake3_parent_cvs"),
               let parent4ExactFunction = library.makeFunction(name: "blake3_parent4_exact_cvs"),
               let parent4Function = library.makeFunction(name: "blake3_parent4_cvs"),
@@ -78,6 +82,8 @@ final class BLAKE3MetalPipelineCache: @unchecked Sendable {
             chunkCVs: try device.makeComputePipelineState(function: chunkFunction),
             chunkFullCVs: try device.makeComputePipelineState(function: chunkFullFunction),
             chunkFullAlignedCVs: try device.makeComputePipelineState(function: chunkFullAlignedFunction),
+            chunkTile256CVs: try device.makeComputePipelineState(function: chunkTile256Function),
+            chunkTile512CVs: try device.makeComputePipelineState(function: chunkTile512Function),
             parentCVs: try device.makeComputePipelineState(function: parentFunction),
             parent4ExactCVs: try device.makeComputePipelineState(function: parent4ExactFunction),
             parent4CVs: try device.makeComputePipelineState(function: parent4Function),
@@ -285,6 +291,40 @@ enum BLAKE3MetalKernelSource {
         }
     }
 
+    static inline void chunk_full_aligned_cv(device const uchar *chunk,
+                                             ulong chunkCounter,
+                                             thread uint cv[8]) {
+        device const uint *chunkWords32 = reinterpret_cast<device const uint *>(chunk);
+
+        cv[0] = IV[0];
+        cv[1] = IV[1];
+        cv[2] = IV[2];
+        cv[3] = IV[3];
+        cv[4] = IV[4];
+        cv[5] = IV[5];
+        cv[6] = IV[6];
+        cv[7] = IV[7];
+
+        uint blockWords[16];
+        for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+            blockWords[wordIndex] = load32_aligned(chunkWords32, wordIndex);
+        }
+        compress_in_place(cv, blockWords, 64u, chunkCounter, 1u);
+
+        for (uint blockIndex = 1u; blockIndex < 15u; blockIndex++) {
+            uint wordBase = blockIndex * 16u;
+            for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+                blockWords[wordIndex] = load32_aligned(chunkWords32, wordBase + wordIndex);
+            }
+            compress_in_place(cv, blockWords, 64u, chunkCounter, 0u);
+        }
+
+        for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+            blockWords[wordIndex] = load32_aligned(chunkWords32, 240u + wordIndex);
+        }
+        compress_in_place(cv, blockWords, 64u, chunkCounter, 2u);
+    }
+
     static inline void chunk_cv(device const uchar *input,
                                 constant BLAKE3ChunkParams &params,
                                 uint chunkIndex,
@@ -451,37 +491,91 @@ enum BLAKE3MetalKernelSource {
                                               constant BLAKE3ChunkParams &params [[buffer(2)]],
                                               uint gid [[thread_position_in_grid]]) {
         device const uchar *chunk = input + params.inputOffset + ulong(gid) * 1024UL;
-        device const uint *chunkWords32 = reinterpret_cast<device const uint *>(chunk);
         ulong chunkCounter = params.baseChunkCounter + ulong(gid);
 
-        uint cv[8] = {
-            IV[0], IV[1], IV[2], IV[3],
-            IV[4], IV[5], IV[6], IV[7]
-        };
-
-        uint blockWords[16];
-        for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
-            blockWords[wordIndex] = load32_aligned(chunkWords32, wordIndex);
-        }
-        compress_in_place(cv, blockWords, 64u, chunkCounter, 1u);
-
-        for (uint blockIndex = 1u; blockIndex < 15u; blockIndex++) {
-            uint wordBase = blockIndex * 16u;
-            for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
-                blockWords[wordIndex] = load32_aligned(chunkWords32, wordBase + wordIndex);
-            }
-            compress_in_place(cv, blockWords, 64u, chunkCounter, 0u);
-        }
-
-        for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
-            blockWords[wordIndex] = load32_aligned(chunkWords32, 240u + wordIndex);
-        }
-        compress_in_place(cv, blockWords, 64u, chunkCounter, 2u);
+        uint cv[8];
+        chunk_full_aligned_cv(chunk, chunkCounter, cv);
 
         device uint *out = reinterpret_cast<device uint *>(chunkCVs + ulong(gid) * 32UL);
         for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
             store32_aligned(out, wordIndex, cv[wordIndex]);
         }
+    }
+
+    static inline void tile_reduce_exact(threadgroup uint *tileScratch,
+                                         uint tileChunkCount,
+                                         uint tid) {
+        for (uint activeCount = tileChunkCount; activeCount > 1u; activeCount >>= 1u) {
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            uint parentCount = activeCount >> 1u;
+            if (tid < parentCount) {
+                uint leftWordBase = tid * 16u;
+                uint outWordBase = tid * 8u;
+                uint blockWords[16];
+                for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+                    blockWords[wordIndex] = tileScratch[leftWordBase + wordIndex];
+                }
+
+                uint cv[8];
+                parent_cv(cv, blockWords);
+                for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                    tileScratch[outWordBase + wordIndex] = cv[wordIndex];
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    static inline void chunk_tile_cvs(device const uchar *input,
+                                      device uchar *tileCVs,
+                                      constant BLAKE3ChunkParams &params,
+                                      threadgroup uint *tileScratch,
+                                      uint tileChunkCount,
+                                      uint tid,
+                                      uint gid,
+                                      uint tgid) {
+        if (gid >= params.chunkCount) {
+            return;
+        }
+
+        device const uchar *chunk = input + params.inputOffset + ulong(gid) * 1024UL;
+        ulong chunkCounter = params.baseChunkCounter + ulong(gid);
+        uint cv[8];
+        chunk_full_aligned_cv(chunk, chunkCounter, cv);
+
+        uint scratchBase = tid * 8u;
+        for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+            tileScratch[scratchBase + wordIndex] = cv[wordIndex];
+        }
+
+        tile_reduce_exact(tileScratch, tileChunkCount, tid);
+
+        if (tid == 0u) {
+            device uint *out = reinterpret_cast<device uint *>(tileCVs + ulong(tgid) * 32UL);
+            for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                store32_aligned(out, wordIndex, tileScratch[wordIndex]);
+            }
+        }
+    }
+
+    kernel void blake3_chunk_tile256_cvs(device const uchar *input [[buffer(0)]],
+                                         device uchar *tileCVs [[buffer(1)]],
+                                         constant BLAKE3ChunkParams &params [[buffer(2)]],
+                                         threadgroup uint *tileScratch [[threadgroup(0)]],
+                                         uint tid [[thread_position_in_threadgroup]],
+                                         uint gid [[thread_position_in_grid]],
+                                         uint tgid [[threadgroup_position_in_grid]]) {
+        chunk_tile_cvs(input, tileCVs, params, tileScratch, 256u, tid, gid, tgid);
+    }
+
+    kernel void blake3_chunk_tile512_cvs(device const uchar *input [[buffer(0)]],
+                                         device uchar *tileCVs [[buffer(1)]],
+                                         constant BLAKE3ChunkParams &params [[buffer(2)]],
+                                         threadgroup uint *tileScratch [[threadgroup(0)]],
+                                         uint tid [[thread_position_in_threadgroup]],
+                                         uint gid [[thread_position_in_grid]],
+                                         uint tgid [[threadgroup_position_in_grid]]) {
+        chunk_tile_cvs(input, tileCVs, params, tileScratch, 512u, tid, gid, tgid);
     }
 
     kernel void blake3_parent_cvs(device const uchar *inputCVs [[buffer(0)]],

@@ -15,10 +15,12 @@ This repository is **not open source**. It is proprietary source-available softw
 - Reusable CPU contexts with persistent parallel worker pools for repeated hashes.
 - SIMD4 chunk and parent reduction paths for CPU throughput.
 - CPU parallel hashing defaults to the active processor count, with explicit worker overrides for reproducible benchmarks.
-- One-shot CPU hashing uses the SIMD chunk/parent reducer from 16 KiB and parallel hashing from 96 KiB.
+- Default one-shot hashing uses CPU parallelism for CPU-visible work and no-copy Metal for large unkeyed inputs when available.
+- Explicit `hashSerial`, `hashCPU`, and `hashParallel` APIs keep CPU-only benchmarking and backend selection reproducible.
 - Bounded-memory CV stack for streaming and multi-GB file hashing.
 - CPU file strategies for buffered reads and memory-mapped hashing.
 - Metal resident-buffer, no-copy Swift input, staged-buffer, tuned private-staged, async pipeline, and tiled file hashing APIs.
+- Fused Metal tile reduction for aligned full-chunk shared-memory inputs.
 - Runtime Metal compilation fallback plus precompiled `.metallib` loading for production startup control.
 - Benchmark harness with separate resident, end-to-end, CPU, file, and sustained-run modes.
 
@@ -61,6 +63,8 @@ let input = Data("hello".utf8)
 let digest = BLAKE3.hash(input)
 print(digest)
 ```
+
+`BLAKE3.hash` is the default automatic path. It uses CPU parallel hashing below the Metal threshold and, on Metal-capable Apple Silicon, wraps large unkeyed inputs without copying. Use `BLAKE3.hashCPU(input)` or `BLAKE3.hashSerial(input)` when a CPU-only path is required.
 
 Streaming:
 
@@ -288,6 +292,17 @@ Set `MINIMUM_GPU_BYTES=16m` to tune the `.automatic` Metal CPU/GPU gate, and `ME
 Run `benchmarks/run-autotune.sh` to measure Metal gate and mode candidates and emit validated recommendation JSON. Set `AUTOTUNE_FILE_TILES=1` when tiled file tile-size recommendations are needed.
 
 Publication and tuning fixtures write and validate machine-readable JSON reports next to their Markdown tables. For ad hoc runs, pass `--json-output /path/to/report.json` to preserve per-sample timings and environment metadata, then `--validate-json /path/to/report.json` before publishing.
+
+Runtime backend overrides:
+
+```bash
+BLAKE3_SWIFT_BACKEND=cpu             # force default BLAKE3.hash to CPU
+BLAKE3_SWIFT_BACKEND=metal           # prefer Metal above the threshold, with CPU fallback
+BLAKE3_SWIFT_METAL_MIN_BYTES=16777216
+BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS=0|256|512
+```
+
+`BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS=512` is the default on this branch. It is used for exact full-chunk shared-memory inputs and skipped for private buffers, where the previous reduction path is faster on the local M4 measurements.
 
 ## Examples
 

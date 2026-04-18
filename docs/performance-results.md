@@ -11,6 +11,28 @@ This file records candidate public performance data after sustained measurements
 - Record whether Metal rows used `runtime-source` or a packaged `.metallib`.
 - Do not present a single best sample as sustained throughput.
 
+## April 18, 2026 Default Dispatcher Check
+
+Development check after enabling automatic large-input Metal dispatch for `BLAKE3.hash` and adding the 512-chunk fused shared-memory tile kernel:
+
+```sh
+swift run -c release blake3-bench \
+  --sizes 16m,64m,256m \
+  --iterations 5 \
+  --metal-modes resident,wrapped,private \
+  --file-modes none
+```
+
+This is a focused engineering check, not a publication run. The table reports median GiB/s.
+
+| Size | CPU serial SIMD | CPU parallel | CPU context | `BLAKE3.hash` default | Metal wrapped GPU | Metal resident GPU | Metal private GPU |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 MiB | 1.73 | 8.11 | 7.87 | 9.16 | 13.20 | 13.94 | 8.08 |
+| 64 MiB | 1.72 | 8.79 | 9.20 | 21.74 | 24.45 | 31.84 | 41.32 |
+| 256 MiB | 1.75 | 9.82 | 10.30 | 34.00 | 35.81 | 58.15 | 58.08 |
+
+Interpretation: default one-shot hashing now tracks the no-copy Metal path for large unkeyed inputs and remains correct against the scalar digest. Private buffers skip the fused tile kernel by default because local M4 measurements favored the previous reduction path for private resident inputs.
+
 ## Apple M4 Candidate Sweep
 
 Measured April 17, 2026 on Apple M4 from:

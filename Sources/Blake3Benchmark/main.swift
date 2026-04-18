@@ -362,7 +362,7 @@ private func hashScalarForBenchmark(_ input: [UInt8]) -> BLAKE3.Digest {
 
 @inline(never)
 private func hashSingleForBenchmark(_ input: [UInt8]) -> BLAKE3.Digest {
-    BLAKE3.hash(input)
+    BLAKE3.hashSerial(input)
 }
 
 @inline(never)
@@ -566,6 +566,8 @@ private struct BenchmarkEnvironment: Codable {
     let parallelSIMDDegree: Int
     let defaultParallelWorkers: Int
     let hasherBytes: Int
+    let defaultBackendPolicy: String
+    let defaultMetalMinimumByteCount: Int
     let metalDevice: String?
     let metalLibrary: String?
     let metalMinimumGPUByteCount: Int?
@@ -581,6 +583,8 @@ private struct BenchmarkEnvironment: Codable {
         case parallelSIMDDegree = "parallel_simd_degree"
         case defaultParallelWorkers = "default_parallel_workers"
         case hasherBytes = "hasher_bytes"
+        case defaultBackendPolicy = "default_backend_policy"
+        case defaultMetalMinimumByteCount = "default_metal_minimum_byte_count"
         case metalDevice = "metal_device"
         case metalLibrary = "metal_library"
         case metalMinimumGPUByteCount = "metal_minimum_gpu_byte_count"
@@ -1799,7 +1803,14 @@ if let validationPath = jsonValidationPath() {
 }
 
 print("BLAKE3 Swift benchmark")
-print("backend=\(BLAKE3.activeBackend.rawValue) simdDegree=\(BLAKE3.simdDegree) parallelSIMDDegree=\(BLAKE3.parallelSIMDDegree) defaultParallelWorkers=\(BLAKE3.defaultParallelWorkerCount) hasherBytes=\(BLAKE3.nativeHasherByteCount)")
+print(
+    "backend=\(BLAKE3.activeBackend.rawValue) simdDegree=\(BLAKE3.simdDegree) " +
+        "parallelSIMDDegree=\(BLAKE3.parallelSIMDDegree) " +
+        "defaultParallelWorkers=\(BLAKE3.defaultParallelWorkerCount) " +
+        "hasherBytes=\(BLAKE3.nativeHasherByteCount) " +
+        "defaultBackendPolicy=\(BLAKE3.defaultBackendPolicy.rawValue) " +
+        "defaultMetalMinimumBytes=\(BLAKE3.defaultMetalMinimumByteCount)"
+)
 private let requestedSizes = benchmarkSizes()
 private let requestedIterationsOverride = iterationsOverride()
 private let requestedJSONOutputPath = jsonOutputPath()
@@ -1924,6 +1935,14 @@ for size in requestedSizes {
         iterations: iterations
     ) { bytes in
         cpuContext.hash(bytes, mode: .automatic)
+    }
+    let defaultAuto = runBenchmark(
+        backend: "blake3",
+        mode: "default-auto",
+        input: input,
+        iterations: iterations
+    ) { bytes in
+        BLAKE3.hash(bytes)
     }
 
     var fileResults = [BenchmarkResult]()
@@ -2152,7 +2171,7 @@ for size in requestedSizes {
     }
     #endif
 
-    var results = [scalar, single, parallel, cpuContextAuto]
+    var results = [scalar, single, parallel, cpuContextAuto, defaultAuto]
     results.append(contentsOf: fileResults)
     #if canImport(Metal)
     if let metalAuto {
@@ -2350,6 +2369,8 @@ if let requestedJSONOutputPath {
             parallelSIMDDegree: BLAKE3.parallelSIMDDegree,
             defaultParallelWorkers: BLAKE3.defaultParallelWorkerCount,
             hasherBytes: BLAKE3.nativeHasherByteCount,
+            defaultBackendPolicy: BLAKE3.defaultBackendPolicy.rawValue,
+            defaultMetalMinimumByteCount: BLAKE3.defaultMetalMinimumByteCount,
             metalDevice: reportMetalDevice,
             metalLibrary: reportMetalLibrary,
             metalMinimumGPUByteCount: reportMetalMinimumGPUByteCount,

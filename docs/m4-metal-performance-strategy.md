@@ -125,6 +125,8 @@ path for the input:
 - file hashing: mmap, then CPU parallel or Metal depending on autotuned size;
 - existing `MTLBuffer`: Metal-first, because the data is already GPU-visible.
 
+Implementation note, April 18, 2026: `BLAKE3.hash` now uses an automatic unkeyed one-shot dispatcher. It chooses CPU-only hashing below `BLAKE3_SWIFT_METAL_MIN_BYTES` and uses the synchronous no-copy Metal wrapper above that threshold when Metal is available, falling back to CPU on failure. `BLAKE3_SWIFT_BACKEND=cpu|metal|auto` controls the default policy at process start.
+
 ## Metal API Surface
 
 Add an explicit Metal product rather than hiding it:
@@ -245,6 +247,8 @@ Initial tile candidates:
 
 Autotune tile size. Do not assume 1024 is fastest. It may reduce dispatch count
 but hurt occupancy.
+
+Implementation note, April 18, 2026: 256- and 512-chunk fused tile kernels exist. The default is `BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS=512`, and the fused path is limited to exact full-chunk shared-memory inputs. Private buffers intentionally keep the prior global-CV reduction path on this M4 because the measured private-resident path was faster without fused tiles.
 
 ### Kernel 5: Final CV Reduction
 

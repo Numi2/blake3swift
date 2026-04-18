@@ -248,6 +248,20 @@ final class BLAKE3Tests: XCTestCase {
         }
     }
 
+    func testDefaultOneShotMatchesExplicitCPUForLargeInputs() {
+        let sizes = [
+            16 * 1_024 * 1_024,
+            16 * 1_024 * 1_024 + 333
+        ]
+
+        for size in sizes {
+            let input = deterministicInput(byteCount: size)
+            let expected = BLAKE3.hashCPU(input)
+            XCTAssertEqual(BLAKE3.hash(input), expected, "default hash mismatch for byteCount=\(size)")
+            XCTAssertEqual(BLAKE3.hashSerial(input), expected, "serial hash mismatch for byteCount=\(size)")
+        }
+    }
+
     func testDifferentialWeirdBoundariesAndStreamingSplits() throws {
         let key = Array("whats the Elvish word for friend".utf8)
         let contextString = "BLAKE3 2019-12-27 16:29:52 test vectors context"
@@ -656,6 +670,8 @@ final class BLAKE3Tests: XCTestCase {
     func testMetalKernelSourceIsExportable() {
         XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_chunk_cvs"))
         XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_chunk_full_aligned_cvs"))
+        XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_chunk_tile256_cvs"))
+        XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_chunk_tile512_cvs"))
         XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_root_digest"))
     }
 
@@ -689,6 +705,8 @@ final class BLAKE3Tests: XCTestCase {
             16 * 1_024,
             17 * 1_024,
             300 * 1_024 + 17,
+            1 * 1_024 * 1_024,
+            2 * 1_024 * 1_024,
             3 * 1_024 * 1_024 + 777
         ]
 

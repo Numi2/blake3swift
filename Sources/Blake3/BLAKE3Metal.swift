@@ -38,6 +38,7 @@ public enum BLAKE3Metal {
     private static let largeGridThreadThreshold = 1024 * 1024
     private static let smallGridSIMDGroupsPerThreadgroup = 8
     private static let largeGridSIMDGroupsPerThreadgroup = 4
+    private static let fusedTileChunkCount = configuredFusedTileChunkCount()
 
     private static let defaultDevice = MTLCreateSystemDefaultDevice()
     private static let contextCache = BLAKE3MetalContextCache()
@@ -110,6 +111,19 @@ public enum BLAKE3Metal {
     /// for the whole Metal command lifetime. Use staging or private-buffer APIs when work must outlive this call.
     public static func hash(
         input: some ContiguousBytes,
+        policy: ExecutionPolicy = .automatic
+    ) throws -> BLAKE3.Digest {
+        try input.withUnsafeBytes { raw in
+            try hash(input: raw, policy: policy)
+        }
+    }
+
+    /// Hashes Swift-owned raw input by temporarily wrapping it in a shared Metal buffer.
+    ///
+    /// The synchronous call waits for GPU completion before returning, so the wrapped pointer remains valid
+    /// for the whole Metal command lifetime.
+    public static func hash(
+        input: UnsafeRawBufferPointer,
         policy: ExecutionPolicy = .automatic
     ) throws -> BLAKE3.Digest {
         guard let device = defaultDevice else {
@@ -2001,30 +2015,58 @@ public enum BLAKE3Metal {
             chunkCount: UInt32(chunkCount)
         )
         copyParameter(params, into: parameterBuffer, slot: 0)
-        let chunkPipeline = if range.count.isMultiple(of: BLAKE3.chunkByteCount) {
-            range.count <= alignedFullChunkKernelMaxBytes
-                && range.lowerBound.isMultiple(of: MemoryLayout<UInt32>.stride)
-                ? pipelines.chunkFullAlignedCVs
-                : pipelines.chunkFullCVs
-        } else {
-            pipelines.chunkCVs
-        }
-
-        encoder.setComputePipelineState(chunkPipeline)
-        encoder.setBuffer(buffer, offset: 0, index: 0)
-        encoder.setBuffer(cvBuffer, offset: 0, index: 1)
-        encoder.setBuffer(parameterBuffer, offset: 0, index: 2)
-
-        dispatchThreads(
-            count: chunkCount,
-            pipeline: chunkPipeline,
-            encoder: encoder
+        let tileChunkCount = fusedTileChunkCount
+        let tileByteCount = tileChunkCount * BLAKE3.chunkByteCount
+        let tilePipeline = fusedTilePipeline(
+            tileChunkCount: tileChunkCount,
+            pipelines: pipelines
         )
+        let canUseFusedTile = tileChunkCount > 0
+            && buffer.storageMode != .private
+            && range.count.isMultiple(of: tileByteCount)
+            && range.lowerBound.isMultiple(of: MemoryLayout<UInt32>.stride)
+            && chunkCount >= tileChunkCount * 2
+            && tilePipeline.map { tileChunkCount <= $0.maxTotalThreadsPerThreadgroup } == true
+            && tilePipeline.map { tileChunkCount.isMultiple(of: max(1, $0.threadExecutionWidth)) } == true
 
         var currentBuffer = cvBuffer
         var nextBuffer = scratchBuffer
-        var currentCount = chunkCount
+        var currentCount: Int
         var parameterSlot = 1
+
+        if canUseFusedTile, let tilePipeline {
+            encoder.setComputePipelineState(tilePipeline)
+            encoder.setBuffer(buffer, offset: 0, index: 0)
+            encoder.setBuffer(cvBuffer, offset: 0, index: 1)
+            encoder.setBuffer(parameterBuffer, offset: 0, index: 2)
+            encoder.setThreadgroupMemoryLength(tileChunkCount * BLAKE3.digestByteCount, index: 0)
+            encoder.dispatchThreadgroups(
+                MTLSize(width: chunkCount / tileChunkCount, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: tileChunkCount, height: 1, depth: 1)
+            )
+            currentCount = chunkCount / tileChunkCount
+        } else {
+            let chunkPipeline = if range.count.isMultiple(of: BLAKE3.chunkByteCount) {
+                range.count <= alignedFullChunkKernelMaxBytes
+                    && range.lowerBound.isMultiple(of: MemoryLayout<UInt32>.stride)
+                    ? pipelines.chunkFullAlignedCVs
+                    : pipelines.chunkFullCVs
+            } else {
+                pipelines.chunkCVs
+            }
+
+            encoder.setComputePipelineState(chunkPipeline)
+            encoder.setBuffer(buffer, offset: 0, index: 0)
+            encoder.setBuffer(cvBuffer, offset: 0, index: 1)
+            encoder.setBuffer(parameterBuffer, offset: 0, index: 2)
+
+            dispatchThreads(
+                count: chunkCount,
+                pipeline: chunkPipeline,
+                encoder: encoder
+            )
+            currentCount = chunkCount
+        }
 
         while currentCount > 4 {
             let parentParams = BLAKE3MetalParentParams(inputCount: UInt32(currentCount))
@@ -2146,6 +2188,37 @@ public enum BLAKE3Metal {
             buffer.contents()
                 .advanced(by: parameterOffset(for: slot))
                 .copyMemory(from: raw.baseAddress!, byteCount: raw.count)
+        }
+    }
+
+    private static func fusedTilePipeline(
+        tileChunkCount: Int,
+        pipelines: BLAKE3MetalPipelines
+    ) -> MTLComputePipelineState? {
+        switch tileChunkCount {
+        case 256:
+            pipelines.chunkTile256CVs
+        case 512:
+            pipelines.chunkTile512CVs
+        default:
+            nil
+        }
+    }
+
+    private static func configuredFusedTileChunkCount() -> Int {
+        guard let rawValue = ProcessInfo.processInfo.environment["BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS"] else {
+            return 512
+        }
+
+        switch rawValue.lowercased() {
+        case "0", "off", "false", "disabled", "none":
+            return 0
+        case "256":
+            return 256
+        case "512":
+            return 512
+        default:
+            return 512
         }
     }
 

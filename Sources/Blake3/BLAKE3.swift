@@ -5,6 +5,16 @@ import Foundation
 /// The default one-shot path uses the fastest enabled Swift CPU implementation for the current input size.
 /// Use ``Context`` when hashing many inputs and you want to reuse CPU work buffers across calls.
 public enum BLAKE3 {
+    /// Default backend policy used by ``hash(_:)``.
+    public enum BackendPolicy: String, Sendable {
+        /// Chooses the fastest built-in path for the input and host.
+        case automatic
+        /// Uses CPU implementations only.
+        case cpu
+        /// Uses Metal for large inputs when available, with CPU fallback on failure.
+        case metal
+    }
+
     /// Number of bytes in a standard BLAKE3 digest.
     public static let digestByteCount = BLAKE3Core.outLen
 
@@ -20,6 +30,20 @@ public enum BLAKE3 {
     /// The CPU backend selected by the default one-shot API.
     public static var activeBackend: BackendKind {
         .swiftSIMD4
+    }
+
+    /// Backend policy used by the default one-shot API.
+    ///
+    /// Override with `BLAKE3_SWIFT_BACKEND=cpu|metal|auto` before process start.
+    public static var defaultBackendPolicy: BackendPolicy {
+        defaultHashConfiguration.backendPolicy
+    }
+
+    /// Minimum input size where the default one-shot API may use Metal.
+    ///
+    /// Override with `BLAKE3_SWIFT_METAL_MIN_BYTES=<byte-count>` before process start.
+    public static var defaultMetalMinimumByteCount: Int {
+        defaultHashConfiguration.metalMinimumByteCount
     }
 
     /// SIMD degree used by the current Swift SIMD implementation.
@@ -56,7 +80,65 @@ public enum BLAKE3 {
     ///
     /// The buffer only needs to remain valid for the duration of this call.
     public static func hash(_ input: UnsafeRawBufferPointer) -> Digest {
-        Digest(output: BLAKE3Core.rootOutputDefault(input))
+        switch defaultHashConfiguration.backendPolicy {
+        case .cpu:
+            return hashCPU(input)
+        case .automatic, .metal:
+            #if canImport(Metal)
+            if shouldUseMetalForDefaultHash(byteCount: input.count) {
+                do {
+                    return try BLAKE3Metal.hash(input: input, policy: .gpu)
+                } catch {
+                    return hashCPU(input)
+                }
+            }
+            #endif
+            return hashCPU(input)
+        }
+    }
+
+    /// Hashes contiguous input using the fastest CPU-only one-shot path.
+    ///
+    /// This bypasses the default Metal dispatcher and is useful for benchmark baselines and hosts where
+    /// callers want CPU scheduling to be explicit.
+    public static func hashCPU(_ input: some ContiguousBytes) -> Digest {
+        input.withUnsafeBytes { raw in
+            hashCPU(raw)
+        }
+    }
+
+    /// Hashes raw input using the fastest CPU-only one-shot path.
+    ///
+    /// The buffer only needs to remain valid for the duration of this call.
+    public static func hashCPU(_ input: UnsafeRawBufferPointer) -> Digest {
+        var workspace = BLAKE3Core.Workspace()
+        return Digest(output: BLAKE3Core.rootOutputParallel(
+            input,
+            key: BLAKE3Core.iv,
+            flags: 0,
+            maxWorkers: nil,
+            workspace: &workspace
+        ))
+    }
+
+    /// Hashes contiguous input using the serial CPU implementation with SIMD where available.
+    public static func hashSerial(_ input: some ContiguousBytes) -> Digest {
+        input.withUnsafeBytes { raw in
+            hashSerial(raw)
+        }
+    }
+
+    /// Hashes raw input using the serial CPU implementation with SIMD where available.
+    ///
+    /// The buffer only needs to remain valid for the duration of this call.
+    public static func hashSerial(_ input: UnsafeRawBufferPointer) -> Digest {
+        var workspace = BLAKE3Core.Workspace()
+        return Digest(output: BLAKE3Core.rootOutputSerial(
+            input,
+            key: BLAKE3Core.iv,
+            flags: 0,
+            workspace: &workspace
+        ))
     }
 
     /// Hashes contiguous input with the scalar CPU implementation.
@@ -218,5 +300,60 @@ public enum BLAKE3 {
         case swiftSIMD4 = "swift-simd4"
         case swiftParallel = "swift-parallel"
         case metal = "metal"
+    }
+}
+
+private struct BLAKE3DefaultHashConfiguration: Sendable {
+    let backendPolicy: BLAKE3.BackendPolicy
+    let metalMinimumByteCount: Int
+
+    static func fromEnvironment() -> Self {
+        let environment = ProcessInfo.processInfo.environment
+        let backendPolicy = parseBackendPolicy(environment["BLAKE3_SWIFT_BACKEND"])
+        let metalMinimumByteCount = environment["BLAKE3_SWIFT_METAL_MIN_BYTES"]
+            .flatMap { Int($0) }
+            .map { max(0, $0) }
+            ?? (16 * 1024 * 1024)
+
+        return Self(
+            backendPolicy: backendPolicy,
+            metalMinimumByteCount: metalMinimumByteCount
+        )
+    }
+
+    private static func parseBackendPolicy(_ rawValue: String?) -> BLAKE3.BackendPolicy {
+        switch rawValue?.lowercased() {
+        case "cpu", "swift":
+            return .cpu
+        case "metal", "gpu":
+            return .metal
+        case "auto", "automatic", nil:
+            return .automatic
+        default:
+            return .automatic
+        }
+    }
+}
+
+private extension BLAKE3 {
+    static let defaultHashConfiguration = BLAKE3DefaultHashConfiguration.fromEnvironment()
+
+    static func shouldUseMetalForDefaultHash(byteCount: Int) -> Bool {
+        #if canImport(Metal)
+        guard BLAKE3Metal.isAvailable,
+              byteCount >= defaultHashConfiguration.metalMinimumByteCount
+        else {
+            return false
+        }
+
+        switch defaultHashConfiguration.backendPolicy {
+        case .cpu:
+            return false
+        case .automatic, .metal:
+            return true
+        }
+        #else
+        false
+        #endif
     }
 }

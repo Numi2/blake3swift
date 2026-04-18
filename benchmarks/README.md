@@ -54,6 +54,9 @@ Runs measured Metal gate and mode sweeps and writes validated recommendation JSO
 - `METAL_LIBRARY`: optional path to a precompiled `BLAKE3Metal.metallib`.
 - `MINIMUM_GPU_BYTES`: optional `.automatic` Metal CPU/GPU gate for benchmark contexts.
 - `METAL_TILE_SIZE`: optional tiled Metal file benchmark tile size.
+- `BLAKE3_SWIFT_BACKEND`: optional default `BLAKE3.hash` backend policy: `auto`, `cpu`, or `metal`.
+- `BLAKE3_SWIFT_METAL_MIN_BYTES`: optional byte threshold where default `BLAKE3.hash` may use Metal.
+- `BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS`: optional fused Metal tile setting: `0`, `256`, or `512`.
 - `AUTOTUNE_GATES`: comma-separated Metal automatic gate candidates for `run-autotune.sh`.
 - `AUTOTUNE_MODES`: comma-separated Metal mode candidates for `run-autotune.sh`.
 - `AUTOTUNE_FILE_TILES`: set to `1` to include tiled Metal file tile-size sweeps in `run-autotune.sh`.
