@@ -349,29 +349,50 @@ private func metalLibraryDescription(_ source: BLAKE3Metal.LibrarySource) -> Str
 }
 #endif
 
+private let deterministicFillBlock: [UInt8] = {
+    (0..<16_384).map { UInt8(truncatingIfNeeded: ($0 &* 31) &+ 17) }
+}()
+
 private func fillDeterministically(_ bytes: inout [UInt8]) {
-    for index in bytes.indices {
-        bytes[index] = UInt8(truncatingIfNeeded: (index &* 31) &+ 17)
+    guard !bytes.isEmpty else {
+        return
+    }
+
+    deterministicFillBlock.withUnsafeBytes { pattern in
+        bytes.withUnsafeMutableBytes { destination in
+            guard let patternBase = pattern.baseAddress,
+                  let destinationBase = destination.baseAddress
+            else {
+                return
+            }
+
+            var offset = 0
+            while offset < destination.count {
+                let byteCount = min(pattern.count, destination.count - offset)
+                memcpy(destinationBase.advanced(by: offset), patternBase, byteCount)
+                offset += byteCount
+            }
+        }
     }
 }
 
 @inline(never)
-private func hashScalarForBenchmark(_ input: [UInt8]) -> BLAKE3.Digest {
+private func hashScalarForBenchmark(_ input: UnsafeRawBufferPointer) -> BLAKE3.Digest {
     BLAKE3.hashScalar(input)
 }
 
 @inline(never)
-private func hashSingleForBenchmark(_ input: [UInt8]) -> BLAKE3.Digest {
+private func hashSingleForBenchmark(_ input: UnsafeRawBufferPointer) -> BLAKE3.Digest {
     BLAKE3.hashSerial(input)
 }
 
 @inline(never)
-private func hashParallelForBenchmark(_ input: [UInt8]) -> BLAKE3.Digest {
+private func hashParallelForBenchmark(_ input: UnsafeRawBufferPointer) -> BLAKE3.Digest {
     BLAKE3.hashParallel(input)
 }
 
 @inline(never)
-private func hashParallelForBenchmark(_ input: [UInt8], maxWorkers: Int?) -> BLAKE3.Digest {
+private func hashParallelForBenchmark(_ input: UnsafeRawBufferPointer, maxWorkers: Int?) -> BLAKE3.Digest {
     BLAKE3.hashParallel(input, maxWorkers: maxWorkers)
 }
 
@@ -430,6 +451,35 @@ private func runBenchmark(
         sampleNanoseconds: sampleNanoseconds,
         digest: finalDigest
     )
+}
+
+private func runRawBenchmark(
+    backend: String,
+    mode: String,
+    input: [UInt8],
+    iterations: Int,
+    operation: (UnsafeRawBufferPointer) -> BLAKE3.Digest
+) -> BenchmarkResult {
+    input.withUnsafeBytes { rawInput in
+        var sampleNanoseconds = [UInt64]()
+        sampleNanoseconds.reserveCapacity(iterations)
+        var finalDigest = operation(rawInput)
+
+        for _ in 0..<iterations {
+            let started = DispatchTime.now().uptimeNanoseconds
+            finalDigest = operation(rawInput)
+            let elapsed = DispatchTime.now().uptimeNanoseconds - started
+            sampleNanoseconds.append(elapsed)
+        }
+
+        return BenchmarkResult(
+            backend: backend,
+            mode: mode,
+            byteCount: rawInput.count,
+            sampleNanoseconds: sampleNanoseconds,
+            digest: finalDigest
+        )
+    }
 }
 
 private func runThrowingBenchmark(
@@ -1484,15 +1534,15 @@ private func runMetalAutotune() throws {
         let label = formatBytes(size)
         var input = [UInt8](repeating: 0, count: size)
         fillDeterministically(&input)
-        let expectedDigest = hashScalarForBenchmark(input)
+        let expectedDigest = input.withUnsafeBytes { hashScalarForBenchmark($0) }
         let cpuContext = BLAKE3.Context()
-        let cpuBaseline = runBenchmark(
+        let cpuBaseline = runRawBenchmark(
             backend: "cpu",
             mode: "context-auto",
             input: input,
             iterations: iterations
-        ) { bytes in
-            cpuContext.hash(bytes, mode: .automatic)
+        ) { rawInput in
+            cpuContext.hash(rawInput, mode: .automatic)
         }
         let cpuMeasurement = makeAutotuneMeasurement(
             category: "cpu-baseline",
@@ -1905,44 +1955,44 @@ for size in requestedSizes {
     fillDeterministically(&input)
     recordMemoryStats(size: label, phase: "after-input", into: &memorySamples)
 
-    let scalar = runBenchmark(
+    let scalar = runRawBenchmark(
         backend: "cpu",
         mode: "scalar",
         input: input,
         iterations: iterations,
         operation: hashScalarForBenchmark
     )
-    let single = runBenchmark(
+    let single = runRawBenchmark(
         backend: "cpu",
         mode: "single-simd",
         input: input,
         iterations: iterations,
         operation: hashSingleForBenchmark
     )
-    let parallel = runBenchmark(
+    let parallel = runRawBenchmark(
         backend: "cpu",
         mode: cpuWorkers.map { "parallel-\($0)" } ?? "parallel",
         input: input,
         iterations: iterations,
-    ) { bytes in
-        hashParallelForBenchmark(bytes, maxWorkers: cpuWorkers)
+    ) { rawInput in
+        hashParallelForBenchmark(rawInput, maxWorkers: cpuWorkers)
     }
     let cpuContext = BLAKE3.Context()
-    let cpuContextAuto = runBenchmark(
+    let cpuContextAuto = runRawBenchmark(
         backend: "cpu",
         mode: "context-auto",
         input: input,
         iterations: iterations
-    ) { bytes in
-        cpuContext.hash(bytes, mode: .automatic)
+    ) { rawInput in
+        cpuContext.hash(rawInput, mode: .automatic)
     }
-    let defaultAuto = runBenchmark(
+    let defaultAuto = runRawBenchmark(
         backend: "blake3",
         mode: "default-auto",
         input: input,
         iterations: iterations
-    ) { bytes in
-        BLAKE3.hash(bytes)
+    ) { rawInput in
+        BLAKE3.hash(rawInput)
     }
 
     var fileResults = [BenchmarkResult]()
