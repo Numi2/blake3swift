@@ -407,7 +407,7 @@ private struct BLAKE3DefaultHashConfiguration: Sendable {
         let metalMinimumByteCount = environment["BLAKE3_SWIFT_METAL_MIN_BYTES"]
             .flatMap { Int($0) }
             .map { max(0, $0) }
-            ?? (32 * 1024 * 1024)
+            ?? (16 * 1024 * 1024)
 
         return Self(
             backendPolicy: backendPolicy,

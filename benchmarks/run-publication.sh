@@ -6,6 +6,7 @@ cd "$ROOT_DIR"
 
 SIZES="${SIZES:-16m,64m,256m,512m,1g}"
 ITERATIONS="${ITERATIONS:-8}"
+METAL_MODES="${METAL_MODES:-resident,private,e2e}"
 OUT_DIR="${OUT_DIR:-benchmarks/results/$(date -u +%Y%m%dT%H%M%SZ)}"
 
 mkdir -p "$OUT_DIR"
@@ -28,13 +29,14 @@ BENCHMARK_BIN="${BENCHMARK_BIN:-$ROOT_DIR/.build/release/blake3-bench}"
   fi
   echo "minimum_gpu_bytes=${MINIMUM_GPU_BYTES:-default}"
   echo "metal_tile_size=${METAL_TILE_SIZE:-default}"
+  echo "metal_modes=$METAL_MODES"
 } | tee "$OUT_DIR/environment.txt"
 
 CPU_METAL_COMMAND=(
   "$BENCHMARK_BIN"
   --sizes "$SIZES"
   --iterations "$ITERATIONS"
-  --metal-modes resident,e2e
+  --metal-modes "$METAL_MODES"
   --file-modes none
   --json-output "$OUT_DIR/cpu-metal-publication.json"
 )

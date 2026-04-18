@@ -228,6 +228,20 @@ enum BLAKE3Core {
             finalizedChunkCount &+= 1
         }
 
+        mutating func pushSubtreeCV(_ cv: ChainingValue, chunkCount: UInt64, key: ChainingValue, flags: UInt32) {
+            precondition(chunkCount > 0 && chunkCount.nonzeroBitCount == 1)
+            var entry = Entry(cv: cv, chunkCount: chunkCount)
+            while let last = entries.last, last.chunkCount == entry.chunkCount {
+                entries.removeLast()
+                entry = Entry(
+                    cv: BLAKE3Core.parentCV(left: last.cv, right: entry.cv, key: key, flags: flags),
+                    chunkCount: last.chunkCount + entry.chunkCount
+                )
+            }
+            entries.append(entry)
+            finalizedChunkCount &+= chunkCount
+        }
+
         func rootOutput(
             currentChunkOutput: Output,
             key: ChainingValue,

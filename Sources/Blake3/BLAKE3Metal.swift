@@ -19,7 +19,7 @@ public enum BLAKE3Metal {
     }
 
     /// Default byte threshold for automatic GPU selection.
-    public static let defaultMinimumGPUByteCount = 32 * 1024 * 1024
+    public static let defaultMinimumGPUByteCount = 16 * 1024 * 1024
 
     /// Default number of pooled resources used by async Metal helpers.
     public static let defaultAsyncInflightCommandCount = 3
@@ -786,6 +786,137 @@ public enum BLAKE3Metal {
             }
         }
 
+        func chunkSubtreeChainingValue(
+            buffer: MTLBuffer,
+            range: Range<Int>,
+            baseChunkCounter: UInt64
+        ) throws -> BLAKE3Core.ChainingValue {
+            guard buffer.device.registryID == device.registryID else {
+                throw BLAKE3Error.metalCommandFailed("Buffer belongs to a different Metal device.")
+            }
+            guard range.lowerBound >= 0,
+                  range.upperBound <= buffer.length,
+                  range.lowerBound <= range.upperBound
+            else {
+                throw BLAKE3Error.invalidBufferRange
+            }
+            guard range.count.isMultiple(of: BLAKE3.chunkByteCount) else {
+                throw BLAKE3Error.metalCommandFailed("Subtree chaining value ranges must contain only complete BLAKE3 chunks.")
+            }
+
+            let chunkCount = range.count / BLAKE3.chunkByteCount
+            guard chunkCount > 0, chunkCount.nonzeroBitCount == 1 else {
+                throw BLAKE3Error.metalCommandFailed("Subtree chaining value ranges must contain a power-of-two chunk count.")
+            }
+
+            return try withWorkspace(chunkCount: chunkCount) { cvBuffer, scratchBuffer, digestBuffer, parameterBuffer in
+                let commandBuffer = try BLAKE3Metal.makeSubtreeChainingValueCommandBuffer(
+                    buffer: buffer,
+                    range: range,
+                    chunkCount: chunkCount,
+                    baseChunkCounter: baseChunkCounter,
+                    pipelines: pipelines,
+                    commandQueue: commandQueue,
+                    retainsReferences: false,
+                    cvBuffer: cvBuffer,
+                    scratchBuffer: scratchBuffer,
+                    digestBuffer: digestBuffer,
+                    parameterBuffer: parameterBuffer
+                )
+                commandBuffer.commit()
+                commandBuffer.waitUntilCompleted()
+
+                if let error = commandBuffer.error {
+                    throw BLAKE3Error.metalCommandFailed(error.localizedDescription)
+                }
+
+                return BLAKE3Core.chainingValue(
+                    from: UnsafeRawBufferPointer(
+                        start: digestBuffer.contents(),
+                        count: BLAKE3.digestByteCount
+                    )
+                )
+            }
+        }
+
+        func chunkSubtreeChainingValueAsync(
+            buffer: MTLBuffer,
+            range: Range<Int>,
+            baseChunkCounter: UInt64
+        ) async throws -> BLAKE3Core.ChainingValue {
+            try Task.checkCancellation()
+            guard buffer.device.registryID == device.registryID else {
+                throw BLAKE3Error.metalCommandFailed("Buffer belongs to a different Metal device.")
+            }
+            guard range.lowerBound >= 0,
+                  range.upperBound <= buffer.length,
+                  range.lowerBound <= range.upperBound
+            else {
+                throw BLAKE3Error.invalidBufferRange
+            }
+            guard range.count.isMultiple(of: BLAKE3.chunkByteCount) else {
+                throw BLAKE3Error.metalCommandFailed("Subtree chaining value ranges must contain only complete BLAKE3 chunks.")
+            }
+
+            let chunkCount = range.count / BLAKE3.chunkByteCount
+            guard chunkCount > 0, chunkCount.nonzeroBitCount == 1 else {
+                throw BLAKE3Error.metalCommandFailed("Subtree chaining value ranges must contain a power-of-two chunk count.")
+            }
+
+            let lease = try defaultAsyncWorkspace.lease(chunkCount: chunkCount)
+            let buffers: AsyncHashBuffers
+            do {
+                buffers = try lease.resources.buffers()
+            } catch {
+                defaultAsyncWorkspace.release(lease)
+                throw error
+            }
+
+            let commandBuffer: MTLCommandBuffer
+            do {
+                commandBuffer = try BLAKE3Metal.makeSubtreeChainingValueCommandBuffer(
+                    buffer: buffer,
+                    range: range,
+                    chunkCount: chunkCount,
+                    baseChunkCounter: baseChunkCounter,
+                    pipelines: pipelines,
+                    commandQueue: commandQueue,
+                    retainsReferences: true,
+                    cvBuffer: buffers.chunkCVBuffer,
+                    scratchBuffer: buffers.parentCVBuffer,
+                    digestBuffer: buffers.digestBuffer,
+                    parameterBuffer: buffers.parameterBuffer
+                )
+            } catch {
+                defaultAsyncWorkspace.release(lease)
+                throw error
+            }
+
+            let cv = try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<BLAKE3Core.ChainingValue, Error>) in
+                commandBuffer.addCompletedHandler { completedBuffer in
+                    defer {
+                        self.defaultAsyncWorkspace.release(lease)
+                    }
+                    if let error = completedBuffer.error {
+                        continuation.resume(throwing: BLAKE3Error.metalCommandFailed(error.localizedDescription))
+                        return
+                    }
+                    continuation.resume(
+                        returning: BLAKE3Core.chainingValue(
+                            from: UnsafeRawBufferPointer(
+                                start: buffers.digestBuffer.contents(),
+                                count: BLAKE3.digestByteCount
+                            )
+                        )
+                    )
+                }
+                commandBuffer.commit()
+            }
+            try Task.checkCancellation()
+            return cv
+        }
+
         /// Asynchronously writes chaining values using the context's default async workspace.
         @discardableResult
         public func writeChunkChainingValuesAsync(
@@ -1271,7 +1402,7 @@ public enum BLAKE3Metal {
         fileprivate static func parentReductionStepCount(for chunkCount: Int) -> Int {
             var count = chunkCount
             var steps = 0
-            while count > 4 {
+            while count > 1 {
                 if count >= BLAKE3Metal.wideParentReductionThreshold {
                     count = (count + 15) / 16
                 } else if count >= BLAKE3Metal.quadParentReductionThreshold {
@@ -2176,6 +2307,136 @@ public enum BLAKE3Metal {
         encoder.endEncoding()
 
         return commandBuffer
+    }
+
+    private static func makeSubtreeChainingValueCommandBuffer(
+        buffer: MTLBuffer,
+        range: Range<Int>,
+        chunkCount: Int,
+        baseChunkCounter: UInt64,
+        pipelines: BLAKE3MetalPipelines,
+        commandQueue: MTLCommandQueue,
+        retainsReferences: Bool,
+        cvBuffer: MTLBuffer,
+        scratchBuffer: MTLBuffer,
+        digestBuffer: MTLBuffer,
+        parameterBuffer: MTLBuffer
+    ) throws -> MTLCommandBuffer {
+        let commandBuffer = retainsReferences
+            ? commandQueue.makeCommandBuffer()
+            : commandQueue.makeCommandBufferWithUnretainedReferences()
+        guard let commandBuffer,
+              let encoder = commandBuffer.makeComputeCommandEncoder()
+        else {
+            throw BLAKE3Error.metalCommandFailed("Unable to create subtree chaining value command buffer.")
+        }
+
+        let finalBuffer = try encodeSubtreeChainingValueCommands(
+            buffer: buffer,
+            range: range,
+            chunkCount: chunkCount,
+            baseChunkCounter: baseChunkCounter,
+            pipelines: pipelines,
+            cvBuffer: cvBuffer,
+            scratchBuffer: scratchBuffer,
+            parameterBuffer: parameterBuffer,
+            encoder: encoder
+        )
+
+        guard let blitEncoder = commandBuffer.makeBlitCommandEncoder() else {
+            throw BLAKE3Error.metalCommandFailed("Unable to create subtree chaining value readback encoder.")
+        }
+        blitEncoder.copy(
+            from: finalBuffer,
+            sourceOffset: 0,
+            to: digestBuffer,
+            destinationOffset: 0,
+            size: BLAKE3.digestByteCount
+        )
+        blitEncoder.endEncoding()
+
+        return commandBuffer
+    }
+
+    private static func encodeSubtreeChainingValueCommands(
+        buffer: MTLBuffer,
+        range: Range<Int>,
+        chunkCount: Int,
+        baseChunkCounter: UInt64,
+        pipelines: BLAKE3MetalPipelines,
+        cvBuffer: MTLBuffer,
+        scratchBuffer: MTLBuffer,
+        parameterBuffer: MTLBuffer,
+        encoder: MTLComputeCommandEncoder
+    ) throws -> MTLBuffer {
+        let params = BLAKE3MetalChunkParams(
+            inputOffset: UInt64(range.lowerBound),
+            inputLength: UInt64(range.count),
+            baseChunkCounter: baseChunkCounter,
+            chunkCount: UInt32(chunkCount)
+        )
+        copyParameter(params, into: parameterBuffer, slot: 0)
+        let chunkPipeline = range.count <= alignedFullChunkKernelMaxBytes
+            && range.lowerBound.isMultiple(of: MemoryLayout<UInt32>.stride)
+            ? pipelines.chunkFullAlignedCVs
+            : pipelines.chunkFullCVs
+
+        encoder.setComputePipelineState(chunkPipeline)
+        encoder.setBuffer(buffer, offset: 0, index: 0)
+        encoder.setBuffer(cvBuffer, offset: 0, index: 1)
+        encoder.setBuffer(parameterBuffer, offset: 0, index: 2)
+        dispatchThreads(
+            count: chunkCount,
+            pipeline: chunkPipeline,
+            encoder: encoder
+        )
+
+        var currentBuffer = cvBuffer
+        var nextBuffer = scratchBuffer
+        var currentCount = chunkCount
+        var parameterSlot = 1
+
+        while currentCount > 1 {
+            let parentParams = BLAKE3MetalParentParams(inputCount: UInt32(currentCount))
+            copyParameter(parentParams, into: parameterBuffer, slot: parameterSlot)
+            let useWideReduction = currentCount >= wideParentReductionThreshold
+            let useQuadReduction = !useWideReduction
+                && currentCount >= quadParentReductionThreshold
+            let pipeline = if useWideReduction {
+                currentCount.isMultiple(of: 16)
+                    ? pipelines.parent16CVs
+                    : pipelines.parent16TailCVs
+            } else if useQuadReduction {
+                currentCount.isMultiple(of: 4)
+                    ? pipelines.parent4ExactCVs
+                    : pipelines.parent4CVs
+            } else {
+                pipelines.parentCVs
+            }
+            let nextCount = if useWideReduction {
+                (currentCount + 15) / 16
+            } else if useQuadReduction {
+                (currentCount + 3) / 4
+            } else {
+                (currentCount + 1) / 2
+            }
+            encoder.setComputePipelineState(pipeline)
+            encoder.setBuffer(currentBuffer, offset: 0, index: 0)
+            encoder.setBuffer(nextBuffer, offset: 0, index: 1)
+            encoder.setBuffer(parameterBuffer, offset: parameterOffset(for: parameterSlot), index: 2)
+            dispatchThreads(
+                count: nextCount,
+                pipeline: pipeline,
+                encoder: encoder
+            )
+
+            swap(&currentBuffer, &nextBuffer)
+            currentCount = nextCount
+            parameterSlot += 1
+        }
+
+        encoder.endEncoding()
+        return currentBuffer
     }
 
     private static func parameterOffset(for slot: Int) -> Int {

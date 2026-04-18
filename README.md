@@ -6,17 +6,27 @@ The project is performance-focused, but correctness comes first: the Swift imple
 
 ## Latest Results
 
-Local release benchmarks on Apple M4 show the Swift and Metal paths outperforming the benchmark-only official C reference by a wide margin. These numbers are from the full benchmark suite in `benchmarks/results/20260418T192002Z-full-suite`, with JSON validation enabled. Resident Metal rows time command encoding, GPU execution, wait, and digest read, but exclude input upload/setup.
+Local release benchmarks on Apple M4 show the Swift and Metal paths outperforming the benchmark-only official C reference by a wide margin. These numbers are from `benchmarks/results/20260418T203340Z-chosen-publication`, with JSON validation enabled. Resident and private Metal rows time command encoding, GPU execution, wait, and digest read, but exclude input upload/setup.
 
-| Input | Official C one-shot | Swift CPU parallel | Default `BLAKE3.hash` | Metal resident GPU |
+| Input | Official C one-shot | Swift CPU parallel | Default `BLAKE3.hash` | Best Metal row |
 | --- | ---: | ---: | ---: | ---: |
-| 64 MiB | 2.19 GiB/s | 10.08 GiB/s | 12.63 GiB/s | 42.95 GiB/s |
-| 512 MiB | 2.18 GiB/s | 10.83 GiB/s | 28.53 GiB/s | 62.98 GiB/s |
-| 1 GiB | 2.18 GiB/s | 11.28 GiB/s | 30.28 GiB/s | 66.69 GiB/s |
+| 16 MiB | 2.16 GiB/s | 8.71 GiB/s | 8.32 GiB/s | 20.68 GiB/s |
+| 64 MiB | 2.17 GiB/s | 9.37 GiB/s | 25.90 GiB/s | 35.16 GiB/s |
+| 256 MiB | 2.12 GiB/s | 9.18 GiB/s | 30.87 GiB/s | 51.07 GiB/s |
+| 512 MiB | 2.16 GiB/s | 10.41 GiB/s | 30.37 GiB/s | 60.74 GiB/s |
+| 1 GiB | 2.15 GiB/s | 10.01 GiB/s | 34.81 GiB/s | 73.71 GiB/s |
 
-At 1 GiB, the default Swift API is about 13.9x faster than the benchmark-only official C one-shot path, and the Metal resident GPU path is about 30.6x faster. Sustained 30-second Metal resident runs held 64.26 GiB/s average at 1 GiB with a 64.17 GiB/s median.
+At 1 GiB, the default Swift API is about 16.2x faster than the benchmark-only official C one-shot path, and the best Metal row is about 34.3x faster. The current best Metal row at 1 GiB is the private resident timing class.
 
-The automatic path uses Swift CPU hashing below the Metal crossover and Metal for larger unkeyed inputs. The current default crossover is 32 MiB, which keeps smaller buffers on the more stable CPU path while letting larger buffers use the GPU.
+The automatic path uses Swift CPU hashing below the Metal crossover and Metal for larger unkeyed inputs. The current default crossover is 16 MiB, which keeps small buffers on the more stable CPU path while letting larger buffers use the GPU.
+
+Large-file tiled Metal hashing now reduces complete non-final tiles to subtree chaining values on the GPU before merging them into the canonical Swift CV stack.
+
+| File input | CPU mmap parallel | Metal mmap GPU | Metal tiled mmap GPU |
+| --- | ---: | ---: | ---: |
+| 256 MiB | 5.72 GiB/s | 7.63 GiB/s | 5.50 GiB/s |
+| 512 MiB | 5.73 GiB/s | 7.16 GiB/s | 6.08 GiB/s |
+| 1 GiB | 5.66 GiB/s | 7.74 GiB/s | 6.88 GiB/s |
 
 ## Features
 
@@ -32,6 +42,7 @@ The automatic path uses Swift CPU hashing below the Metal crossover and Metal fo
 - CPU file strategies for buffered reads and memory-mapped hashing.
 - Metal resident-buffer, no-copy Swift input, staged-buffer, tuned private-staged, async pipeline, and tiled file hashing APIs.
 - Fused Metal tile reduction for aligned full-chunk shared-memory inputs.
+- Tiled Metal file hashing reduces complete non-final tiles to GPU subtree chaining values before CPU stack merge.
 - Runtime Metal compilation fallback plus precompiled `.metallib` loading for production startup control.
 - Benchmark harness with separate resident, end-to-end, CPU, file, and sustained-run modes.
 
@@ -155,6 +166,8 @@ let digest = try await BLAKE3File.hashAsync(
 )
 print(digest)
 ```
+
+The default tiled Metal file tile is 64 MiB on this branch. CPU mapped file hashing keeps its smaller 16 MiB tile default.
 
 ## Metal Resident Hashing
 
@@ -309,7 +322,7 @@ Runtime backend overrides:
 ```bash
 BLAKE3_SWIFT_BACKEND=cpu             # force default BLAKE3.hash to CPU
 BLAKE3_SWIFT_BACKEND=metal           # prefer Metal above the threshold, with CPU fallback
-BLAKE3_SWIFT_METAL_MIN_BYTES=33554432
+BLAKE3_SWIFT_METAL_MIN_BYTES=16777216
 BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS=0|256|512
 ```
 

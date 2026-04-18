@@ -326,7 +326,7 @@ private func metalTileByteCount() -> Int {
     guard let rawValue = argumentValue(named: "--metal-tile-size") ?? argumentValue(named: "--tile-size"),
           let parsed = parseByteCount(Substring(rawValue))
     else {
-        return BLAKE3File.mappedTileByteCount
+        return BLAKE3File.metalMappedTileByteCount
     }
     return max(BLAKE3.chunkByteCount, parsed)
 }

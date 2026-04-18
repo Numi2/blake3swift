@@ -12,8 +12,11 @@ import Metal
 /// CPU strategies work without Metal. Metal strategies fall back to CPU by default unless their
 /// `fallbackToCPU` parameter is set to `false`.
 public enum BLAKE3File {
-    /// Default tile size used by mapped CPU and tiled Metal file paths.
+    /// Default tile size used by mapped CPU file paths.
     public static let mappedTileByteCount = 16 * 1024 * 1024
+
+    /// Default tile size used by tiled Metal file paths.
+    public static let metalMappedTileByteCount = 64 * 1024 * 1024
 
     /// File hashing strategy.
     public enum Strategy: Equatable, Sendable {
@@ -38,7 +41,7 @@ public enum BLAKE3File {
         ///
         /// Pass `librarySource` to use a precompiled `.metallib` instead of runtime source compilation.
         case metalTiledMemoryMapped(
-            tileByteCount: Int = BLAKE3File.mappedTileByteCount,
+            tileByteCount: Int = BLAKE3File.metalMappedTileByteCount,
             fallbackToCPU: Bool = true,
             librarySource: BLAKE3Metal.LibrarySource = .runtimeSource
         )
@@ -345,18 +348,37 @@ public enum BLAKE3File {
                     }
 
                     if completeChunkByteCount > 0 {
-                        let chunkCount = try await context.writeChunkChainingValuesAsync(
-                            buffer: fileBuffer,
-                            range: offset..<(offset + completeChunkByteCount),
-                            baseChunkCounter: stack.finalizedChunkCount,
-                            into: chunkCVBuffer
-                        )
-                        try Task.checkCancellation()
-                        try pushChunkChainingValues(
-                            chunkCVBuffer,
-                            chunkCount: chunkCount,
-                            into: &stack
-                        )
+                        let chunkRange = offset..<(offset + completeChunkByteCount)
+                        let completeChunkCount = completeChunkByteCount / BLAKE3.chunkByteCount
+                        if !isFinalTile,
+                           completeChunkByteCount == alignedTileByteCount,
+                           completeChunkCount.nonzeroBitCount == 1 {
+                            let cv = try await context.chunkSubtreeChainingValueAsync(
+                                buffer: fileBuffer,
+                                range: chunkRange,
+                                baseChunkCounter: stack.finalizedChunkCount
+                            )
+                            try Task.checkCancellation()
+                            stack.pushSubtreeCV(
+                                cv,
+                                chunkCount: UInt64(completeChunkCount),
+                                key: BLAKE3Core.iv,
+                                flags: 0
+                            )
+                        } else {
+                            let chunkCount = try await context.writeChunkChainingValuesAsync(
+                                buffer: fileBuffer,
+                                range: chunkRange,
+                                baseChunkCounter: stack.finalizedChunkCount,
+                                into: chunkCVBuffer
+                            )
+                            try Task.checkCancellation()
+                            try pushChunkChainingValues(
+                                chunkCVBuffer,
+                                chunkCount: chunkCount,
+                                into: &stack
+                            )
+                        }
                         offset += completeChunkByteCount
                     }
 
@@ -449,17 +471,35 @@ public enum BLAKE3File {
                     }
 
                     if completeChunkByteCount > 0 {
-                        let chunkCount = try context.writeChunkChainingValues(
-                            buffer: fileBuffer,
-                            range: offset..<(offset + completeChunkByteCount),
-                            baseChunkCounter: stack.finalizedChunkCount,
-                            into: chunkCVBuffer
-                        )
-                        try pushChunkChainingValues(
-                            chunkCVBuffer,
-                            chunkCount: chunkCount,
-                            into: &stack
-                        )
+                        let chunkRange = offset..<(offset + completeChunkByteCount)
+                        let completeChunkCount = completeChunkByteCount / BLAKE3.chunkByteCount
+                        if !isFinalTile,
+                           completeChunkByteCount == alignedTileByteCount,
+                           completeChunkCount.nonzeroBitCount == 1 {
+                            let cv = try context.chunkSubtreeChainingValue(
+                                buffer: fileBuffer,
+                                range: chunkRange,
+                                baseChunkCounter: stack.finalizedChunkCount
+                            )
+                            stack.pushSubtreeCV(
+                                cv,
+                                chunkCount: UInt64(completeChunkCount),
+                                key: BLAKE3Core.iv,
+                                flags: 0
+                            )
+                        } else {
+                            let chunkCount = try context.writeChunkChainingValues(
+                                buffer: fileBuffer,
+                                range: chunkRange,
+                                baseChunkCounter: stack.finalizedChunkCount,
+                                into: chunkCVBuffer
+                            )
+                            try pushChunkChainingValues(
+                                chunkCVBuffer,
+                                chunkCount: chunkCount,
+                                into: &stack
+                            )
+                        }
                         offset += completeChunkByteCount
                     }
 
