@@ -1,0 +1,16 @@
+date_utc=2026-04-18T11:59:25Z
+commit=f1f8d1d6aa97b5d6ac4dd9f3477e2b11786b6f6a
+working_tree=1 changed entries
+swift=Apple Swift version 6.3 (swiftlang-6.3.0.123.5 clang-2100.0.123.102) Target: arm64-apple-macosx26.0 
+ProductName:		macOS
+ProductVersion:		26.5
+BuildVersion:		25F5042g
+Apple M4
+Mac16,12
+performance_cores=4
+active_cpus=10
+benchmark_kind=after-optimize-cpu-metal
+sizes=16m,64m,256m
+iterations=8
+metal_modes=resident,e2e
+file_modes=none

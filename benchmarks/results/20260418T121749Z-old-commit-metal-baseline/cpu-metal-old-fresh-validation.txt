@@ -1,0 +1,1 @@
+jsonValidation=ok path=/Users/home/MetalCryptography/blake3swift/benchmarks/results/20260418T121749Z-old-commit-metal-baseline/cpu-metal-old-fresh.json

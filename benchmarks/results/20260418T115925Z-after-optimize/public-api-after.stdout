@@ -1,0 +1,18 @@
+| Size | Operation | Median GiB/s | Min GiB/s | P95 GiB/s | Max GiB/s | Correct |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| 1.0 MiB | hash-xof-64 | 4.34 | 3.29 | 5.78 | 5.84 | ok |
+| 1.0 MiB | keyed-digest | 1.74 | 1.72 | 1.74 | 1.74 | ok |
+| 1.0 MiB | keyed-xof-64 | 1.73 | 1.38 | 1.74 | 1.74 | ok |
+| 1.0 MiB | derive-key-64 | 1.73 | 1.70 | 1.74 | 1.74 | ok |
+| 1.0 MiB | cryptokit-hashfunction | 1.05 | 0.93 | 1.07 | 1.07 | ok |
+| 16.0 MiB | hash-xof-64 | 7.64 | 6.74 | 7.70 | 7.72 | ok |
+| 16.0 MiB | keyed-digest | 1.70 | 1.68 | 1.74 | 1.75 | ok |
+| 16.0 MiB | keyed-xof-64 | 1.70 | 1.69 | 1.74 | 1.74 | ok |
+| 16.0 MiB | derive-key-64 | 1.70 | 1.67 | 1.74 | 1.75 | ok |
+| 16.0 MiB | cryptokit-hashfunction | 1.02 | 0.96 | 1.03 | 1.04 | ok |
+| 64.0 MiB | hash-xof-64 | 7.90 | 7.23 | 8.27 | 8.34 | ok |
+| 64.0 MiB | keyed-digest | 1.71 | 1.58 | 1.72 | 1.72 | ok |
+| 64.0 MiB | keyed-xof-64 | 1.70 | 1.62 | 1.72 | 1.72 | ok |
+| 64.0 MiB | derive-key-64 | 1.72 | 1.71 | 1.72 | 1.73 | ok |
+| 64.0 MiB | cryptokit-hashfunction | 1.01 | 0.93 | 1.03 | 1.03 | ok |
+sink=2

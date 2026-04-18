@@ -2207,7 +2207,7 @@ public enum BLAKE3Metal {
 
     private static func configuredFusedTileChunkCount() -> Int {
         guard let rawValue = ProcessInfo.processInfo.environment["BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS"] else {
-            return 512
+            return 0
         }
 
         switch rawValue.lowercased() {
@@ -2218,7 +2218,7 @@ public enum BLAKE3Metal {
         case "512":
             return 512
         default:
-            return 512
+            return 0
         }
     }
 

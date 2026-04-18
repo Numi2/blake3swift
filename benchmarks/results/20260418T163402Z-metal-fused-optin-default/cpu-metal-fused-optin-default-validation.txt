@@ -1,0 +1,1 @@
+jsonValidation=ok path=/Users/home/MetalCryptography/blake3swift/benchmarks/results/20260418T163402Z-metal-fused-optin-default/cpu-metal-fused-optin-default.json

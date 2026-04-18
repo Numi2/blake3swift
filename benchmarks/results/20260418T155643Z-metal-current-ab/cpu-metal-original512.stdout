@@ -1,0 +1,41 @@
+BLAKE3 Swift benchmark
+backend=swift-simd4 simdDegree=4 parallelSIMDDegree=4 defaultParallelWorkers=10 hasherBytes=8 defaultBackendPolicy=automatic defaultMetalMinimumBytes=16777216
+metalDevice=Apple M4
+metalLibrary=runtime-source
+metalMinimumGPUByteCount=16777216
+metalTileByteCount=16777216
+metalModes=resident,e2e
+metal-resident includes: pre-created shared MTLBuffer; timed hash includes command encoding, GPU execution, wait, digest read
+metal-e2e includes: timed shared MTLBuffer allocation/copy from Swift bytes plus hash
+sizes=16.0 MiB, 64.0 MiB, 256.0 MiB
+
+| Size | Backend | Mode | Median GiB/s | Min GiB/s | P95 GiB/s | Max GiB/s | Correct |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- |
+| 16.0 MiB | cpu | scalar | 1.10 | 1.05 | 1.11 | 1.11 | ok |
+| 16.0 MiB | cpu | single-simd | 1.85 | 1.83 | 1.89 | 1.89 | ok |
+| 16.0 MiB | cpu | parallel | 8.82 | 7.83 | 9.21 | 9.21 | ok |
+| 16.0 MiB | cpu | context-auto | 8.36 | 7.76 | 9.23 | 9.23 | ok |
+| 16.0 MiB | blake3 | default-auto | 8.40 | 1.79 | 9.50 | 9.50 | ok |
+| 16.0 MiB | metal | resident-auto | 10.29 | 2.19 | 16.25 | 16.25 | ok |
+| 16.0 MiB | metal | resident-gpu | 12.01 | 3.95 | 15.74 | 15.74 | ok |
+| 16.0 MiB | metal | e2e-auto | 5.15 | 2.83 | 6.49 | 6.49 | ok |
+| 16.0 MiB | metal | e2e-gpu | 5.25 | 2.75 | 5.99 | 5.99 | ok |
+| 64.0 MiB | cpu | scalar | 1.10 | 1.09 | 1.12 | 1.12 | ok |
+| 64.0 MiB | cpu | single-simd | 1.84 | 1.83 | 1.85 | 1.85 | ok |
+| 64.0 MiB | cpu | parallel | 10.02 | 8.67 | 10.21 | 10.21 | ok |
+| 64.0 MiB | cpu | context-auto | 8.72 | 8.20 | 9.94 | 9.94 | ok |
+| 64.0 MiB | blake3 | default-auto | 28.36 | 14.50 | 29.55 | 29.55 | ok |
+| 64.0 MiB | metal | resident-auto | 30.95 | 23.83 | 43.05 | 43.05 | ok |
+| 64.0 MiB | metal | resident-gpu | 34.33 | 26.50 | 42.64 | 42.64 | ok |
+| 64.0 MiB | metal | e2e-auto | 9.28 | 6.98 | 10.54 | 10.54 | ok |
+| 64.0 MiB | metal | e2e-gpu | 9.56 | 7.54 | 10.11 | 10.11 | ok |
+| 256.0 MiB | cpu | scalar | 1.08 | 0.97 | 1.10 | 1.10 | ok |
+| 256.0 MiB | cpu | single-simd | 1.72 | 1.43 | 1.78 | 1.78 | ok |
+| 256.0 MiB | cpu | parallel | 10.12 | 8.20 | 10.55 | 10.55 | ok |
+| 256.0 MiB | cpu | context-auto | 10.24 | 9.46 | 10.49 | 10.49 | ok |
+| 256.0 MiB | blake3 | default-auto | 21.89 | 17.77 | 27.06 | 27.06 | ok |
+| 256.0 MiB | metal | resident-auto | 33.20 | 25.32 | 41.11 | 41.11 | ok |
+| 256.0 MiB | metal | resident-gpu | 48.66 | 38.70 | 60.57 | 60.57 | ok |
+| 256.0 MiB | metal | e2e-auto | 9.21 | 5.93 | 9.99 | 9.99 | ok |
+| 256.0 MiB | metal | e2e-gpu | 9.56 | 9.30 | 9.87 | 9.87 | ok |
+jsonOutput=/Users/home/MetalCryptography/blake3swift/benchmarks/results/20260418T155643Z-metal-current-ab/cpu-metal-original512.json
