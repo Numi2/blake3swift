@@ -6,17 +6,17 @@ The project is performance-focused, but correctness comes first: the Swift imple
 
 ## Latest Results
 
-Local release benchmarks on Apple M4 show the Swift and Metal paths outperforming the benchmark-only official C reference by a wide margin. These numbers are from `benchmarks/results/20260418T203340Z-chosen-publication`, with JSON validation enabled. Resident and private Metal rows time command encoding, GPU execution, wait, and digest read, but exclude input upload/setup.
+Local release benchmarks on Apple M4 show the Swift and Metal paths outperforming the benchmark-only official C reference by a wide margin. These numbers are from `benchmarks/results/20260418T213322Z-head-publication` at commit `294e344`, with JSON validation enabled. Resident and private Metal rows time command encoding, GPU execution, wait, and digest read, but exclude input upload/setup.
 
 | Input | Official C one-shot | Swift CPU parallel | Default `BLAKE3.hash` | Best Metal row |
 | --- | ---: | ---: | ---: | ---: |
-| 16 MiB | 2.16 GiB/s | 8.71 GiB/s | 8.32 GiB/s | 20.68 GiB/s |
-| 64 MiB | 2.17 GiB/s | 9.37 GiB/s | 25.90 GiB/s | 35.16 GiB/s |
-| 256 MiB | 2.12 GiB/s | 9.18 GiB/s | 30.87 GiB/s | 51.07 GiB/s |
-| 512 MiB | 2.16 GiB/s | 10.41 GiB/s | 30.37 GiB/s | 60.74 GiB/s |
-| 1 GiB | 2.15 GiB/s | 10.01 GiB/s | 34.81 GiB/s | 73.71 GiB/s |
+| 16 MiB | 2.10 GiB/s | 5.04 GiB/s | 9.86 GiB/s | 25.21 GiB/s |
+| 64 MiB | 2.01 GiB/s | 5.53 GiB/s | 24.56 GiB/s | 45.12 GiB/s |
+| 256 MiB | 1.40 GiB/s | 8.26 GiB/s | 14.11 GiB/s | 57.81 GiB/s |
+| 512 MiB | 2.03 GiB/s | 7.55 GiB/s | 30.47 GiB/s | 65.12 GiB/s |
+| 1 GiB | 1.99 GiB/s | 9.16 GiB/s | 33.78 GiB/s | 67.43 GiB/s |
 
-At 1 GiB, the default Swift API is about 16.2x faster than the benchmark-only official C one-shot path, and the best Metal row is about 34.3x faster. The current best Metal row at 1 GiB is the private resident timing class.
+At 1 GiB, the default Swift API is about 17.0x faster than the benchmark-only official C one-shot path, and the best Metal row is about 33.9x faster. The current best Metal row at 1 GiB is the resident GPU timing class.
 
 The automatic path uses Swift CPU hashing below the Metal crossover and Metal for larger unkeyed inputs. The current default crossover is 16 MiB, which keeps small buffers on the more stable CPU path while letting larger buffers use the GPU.
 
@@ -24,13 +24,13 @@ Large-file tiled Metal hashing now reduces complete non-final tiles to subtree c
 
 | File input | CPU mmap parallel | Metal mmap GPU | Metal tiled mmap GPU |
 | --- | ---: | ---: | ---: |
-| 256 MiB | 5.72 GiB/s | 7.63 GiB/s | 5.50 GiB/s |
-| 512 MiB | 5.73 GiB/s | 7.16 GiB/s | 6.08 GiB/s |
-| 1 GiB | 5.66 GiB/s | 7.74 GiB/s | 6.88 GiB/s |
+| 256 MiB | 2.49 GiB/s | 6.72 GiB/s | 4.76 GiB/s |
+| 512 MiB | 4.47 GiB/s | 7.12 GiB/s | 6.03 GiB/s |
+| 1 GiB | 4.24 GiB/s | 7.53 GiB/s | 6.60 GiB/s |
 
 ## Features
 
-- Native Swift BLAKE3 core with no vendored C target.
+- Native Swift BLAKE3 library target; vendored official C code is isolated to benchmark support.
 - One-shot, keyed, derived-key, streaming, XOF, and reusable context APIs.
 - Keyed and derive-key one-shot APIs use CPU tree parallelism for large inputs.
 - Reusable CPU contexts with persistent parallel worker pools for repeated hashes.
@@ -326,7 +326,7 @@ BLAKE3_SWIFT_METAL_MIN_BYTES=16777216
 BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS=0|256|512
 ```
 
-`BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS=512` is the default on this branch. It is used for exact full-chunk shared-memory inputs and skipped for private buffers, where the previous reduction path is faster on the local M4 measurements.
+`BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS=0` is the default on this branch. Set `256` or `512` to opt in for exact full-chunk shared-memory inputs. The fused path is skipped for private buffers, where the previous reduction path is faster on the local M4 measurements.
 
 ## Examples
 
