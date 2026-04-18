@@ -10,6 +10,8 @@ This is a repository-grounded review checklist for cryptographic integration ris
 - Streaming finalization does not consume the hasher, so callers can derive fixed digests and XOF output from the same state intentionally.
 - File mappings are scoped to the hash operation and are unmapped after CPU or Metal work completes.
 - Metal file strategies fall back to CPU by default unless the caller disables fallback.
+- Synchronous no-copy Metal hashing keeps Swift-owned input alive until GPU completion before returning.
+- Synchronous private-staged Metal hashing keeps staging and private buffers locked until upload and hash completion.
 - Tests cover official vectors, keyed hash, key derivation, XOF, streaming boundaries, file paths, and Metal-vs-CPU parity where Metal is available.
 
 ## Residual Risks To Review Before `1.0.0`

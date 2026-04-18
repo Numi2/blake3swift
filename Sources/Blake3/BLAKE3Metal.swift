@@ -33,6 +33,8 @@ public enum BLAKE3Metal {
     }
     private static let wideParentReductionThreshold = 512 * 1024
     private static let quadParentReductionThreshold = 32 * 1024
+    private static let alignedFullChunkKernelMaxBytes = 64 * 1024 * 1024
+    private static let combinedPrivateStagedMaxBytes = 16 * 1024 * 1024
     private static let largeGridThreadThreshold = 1024 * 1024
     private static let smallGridSIMDGroupsPerThreadgroup = 8
     private static let largeGridSIMDGroupsPerThreadgroup = 4
@@ -100,6 +102,20 @@ public enum BLAKE3Metal {
             range: range,
             policy: policy
         )
+    }
+
+    /// Hashes Swift-owned contiguous input by temporarily wrapping it in a shared Metal buffer.
+    ///
+    /// The synchronous call waits for GPU completion before returning, so the wrapped pointer remains valid
+    /// for the whole Metal command lifetime. Use staging or private-buffer APIs when work must outlive this call.
+    public static func hash(
+        input: some ContiguousBytes,
+        policy: ExecutionPolicy = .automatic
+    ) throws -> BLAKE3.Digest {
+        guard let device = defaultDevice else {
+            throw BLAKE3Error.metalUnavailable
+        }
+        return try contextCache.context(device: device).hash(input: input, policy: policy)
     }
 
     /// Asynchronously hashes a resident Metal buffer.
@@ -431,6 +447,116 @@ public enum BLAKE3Metal {
             privateBuffer.length = input.count
         }
 
+        /// Copies raw input through a staging buffer into private storage, then hashes it.
+        ///
+        /// This repeated-call path uses a tuned synchronous flow: smaller inputs combine upload and hashing in
+        /// one command buffer, while larger inputs keep the faster split upload-then-hash sequence.
+        public func hash(
+            input: some ContiguousBytes,
+            using stagingBuffer: StagingBuffer,
+            privateBuffer: PrivateBuffer,
+            policy: ExecutionPolicy = .gpu
+        ) throws -> BLAKE3.Digest {
+            try input.withUnsafeBytes { raw in
+                try hash(input: raw, using: stagingBuffer, privateBuffer: privateBuffer, policy: policy)
+            }
+        }
+
+        /// Copies raw input through a staging buffer into private storage, then hashes it.
+        ///
+        /// The input buffer only needs to remain valid for the duration of this synchronous call.
+        public func hash(
+            input: UnsafeRawBufferPointer,
+            using stagingBuffer: StagingBuffer,
+            privateBuffer: PrivateBuffer,
+            policy: ExecutionPolicy = .gpu
+        ) throws -> BLAKE3.Digest {
+            guard policy != .cpu,
+                  input.count > BLAKE3.chunkByteCount
+            else {
+                return BLAKE3.hash(input)
+            }
+            guard privateBuffer.buffer.device.registryID == device.registryID else {
+                throw BLAKE3Error.metalCommandFailed("Private buffer belongs to a different Metal device.")
+            }
+            guard stagingBuffer.buffer.device.registryID == device.registryID else {
+                throw BLAKE3Error.metalCommandFailed("Staging buffer belongs to a different Metal device.")
+            }
+            guard input.count <= privateBuffer.capacity else {
+                throw BLAKE3Error.metalCommandFailed(
+                    "Input length \(input.count) exceeds private buffer capacity \(privateBuffer.capacity)."
+                )
+            }
+            guard input.count <= stagingBuffer.capacity else {
+                throw BLAKE3Error.metalCommandFailed(
+                    "Input length \(input.count) exceeds staging buffer capacity \(stagingBuffer.capacity)."
+                )
+            }
+            guard let baseAddress = input.baseAddress else {
+                throw BLAKE3Error.metalCommandFailed("Input bytes are unavailable.")
+            }
+            guard input.count <= BLAKE3Metal.combinedPrivateStagedMaxBytes else {
+                try replaceContents(of: privateBuffer, with: input, using: stagingBuffer)
+                return try hash(privateBuffer: privateBuffer, policy: policy)
+            }
+
+            stagingBuffer.lock.lock()
+            privateBuffer.lock.lock()
+            defer {
+                privateBuffer.lock.unlock()
+                stagingBuffer.lock.unlock()
+            }
+
+            stagingBuffer.buffer.contents().copyMemory(from: baseAddress, byteCount: input.count)
+            let chunkCount = (input.count + BLAKE3.chunkByteCount - 1) / BLAKE3.chunkByteCount
+            return try withWorkspace(chunkCount: chunkCount) { cvBuffer, scratchBuffer, digestBuffer, parameterBuffer in
+                guard let commandBuffer = commandQueue.makeCommandBufferWithUnretainedReferences(),
+                      let blitEncoder = commandBuffer.makeBlitCommandEncoder()
+                else {
+                    throw BLAKE3Error.metalCommandFailed("Unable to create private staged hash command buffer.")
+                }
+
+                blitEncoder.copy(
+                    from: stagingBuffer.buffer,
+                    sourceOffset: 0,
+                    to: privateBuffer.buffer,
+                    destinationOffset: 0,
+                    size: input.count
+                )
+                blitEncoder.endEncoding()
+
+                guard let computeEncoder = commandBuffer.makeComputeCommandEncoder() else {
+                    throw BLAKE3Error.metalCommandFailed("Unable to create private staged hash encoder.")
+                }
+                try BLAKE3Metal.encodeHashCommands(
+                    buffer: privateBuffer.buffer,
+                    range: 0..<input.count,
+                    chunkCount: chunkCount,
+                    pipelines: pipelines,
+                    cvBuffer: cvBuffer,
+                    scratchBuffer: scratchBuffer,
+                    digestBuffer: digestBuffer,
+                    parameterBuffer: parameterBuffer,
+                    encoder: computeEncoder
+                )
+
+                commandBuffer.commit()
+                commandBuffer.waitUntilCompleted()
+
+                if let error = commandBuffer.error {
+                    throw BLAKE3Error.metalCommandFailed(error.localizedDescription)
+                }
+
+                privateBuffer.length = input.count
+                return BLAKE3.Digest(
+                    UnsafeRawBufferPointer(
+                        start: digestBuffer.contents(),
+                        count: BLAKE3.digestByteCount
+                    )
+                )
+            }
+        }
+
         /// Asynchronously uploads new private-buffer contents through a staging buffer.
         ///
         /// The staging and private buffers are locked until the blit command completes.
@@ -541,6 +667,42 @@ public enum BLAKE3Metal {
                 commandQueue: commandQueue,
                 workspace: self
             )
+        }
+
+        /// Hashes Swift-owned contiguous input by temporarily wrapping it in a shared Metal buffer.
+        ///
+        /// This is a synchronous no-copy path for unified-memory systems. The input buffer only needs to
+        /// remain valid for this call because the method waits for Metal completion before returning.
+        public func hash(
+            input: some ContiguousBytes,
+            policy: ExecutionPolicy = .automatic
+        ) throws -> BLAKE3.Digest {
+            try input.withUnsafeBytes { raw in
+                try hash(input: raw, policy: policy)
+            }
+        }
+
+        /// Hashes raw Swift-owned input by temporarily wrapping it in a shared Metal buffer.
+        ///
+        /// The buffer only needs to remain valid for this synchronous call.
+        public func hash(
+            input: UnsafeRawBufferPointer,
+            policy: ExecutionPolicy = .automatic
+        ) throws -> BLAKE3.Digest {
+            guard input.count > 0 else {
+                return BLAKE3.hash(input)
+            }
+            guard let baseAddress = input.baseAddress,
+                  let buffer = device.makeBuffer(
+                    bytesNoCopy: UnsafeMutableRawPointer(mutating: baseAddress),
+                    length: input.count,
+                    options: .storageModeShared,
+                    deallocator: nil
+                  )
+            else {
+                throw BLAKE3Error.metalCommandFailed("Unable to wrap Swift input in a Metal buffer.")
+            }
+            return try hash(buffer: buffer, length: input.count, policy: policy)
         }
 
         /// Writes chaining values for complete BLAKE3 chunks in a resident buffer.
@@ -1806,6 +1968,32 @@ public enum BLAKE3Metal {
             throw BLAKE3Error.metalCommandFailed("Unable to create command buffer or encoder.")
         }
 
+        try encodeHashCommands(
+            buffer: buffer,
+            range: range,
+            chunkCount: chunkCount,
+            pipelines: pipelines,
+            cvBuffer: cvBuffer,
+            scratchBuffer: scratchBuffer,
+            digestBuffer: digestBuffer,
+            parameterBuffer: parameterBuffer,
+            encoder: encoder
+        )
+
+        return commandBuffer
+    }
+
+    private static func encodeHashCommands(
+        buffer: MTLBuffer,
+        range: Range<Int>,
+        chunkCount: Int,
+        pipelines: BLAKE3MetalPipelines,
+        cvBuffer: MTLBuffer,
+        scratchBuffer: MTLBuffer,
+        digestBuffer: MTLBuffer,
+        parameterBuffer: MTLBuffer,
+        encoder: MTLComputeCommandEncoder
+    ) throws {
         let params = BLAKE3MetalChunkParams(
             inputOffset: UInt64(range.lowerBound),
             inputLength: UInt64(range.count),
@@ -1813,9 +2001,14 @@ public enum BLAKE3Metal {
             chunkCount: UInt32(chunkCount)
         )
         copyParameter(params, into: parameterBuffer, slot: 0)
-        let chunkPipeline = range.count.isMultiple(of: BLAKE3.chunkByteCount)
-            ? pipelines.chunkFullCVs
-            : pipelines.chunkCVs
+        let chunkPipeline = if range.count.isMultiple(of: BLAKE3.chunkByteCount) {
+            range.count <= alignedFullChunkKernelMaxBytes
+                && range.lowerBound.isMultiple(of: MemoryLayout<UInt32>.stride)
+                ? pipelines.chunkFullAlignedCVs
+                : pipelines.chunkFullCVs
+        } else {
+            pipelines.chunkCVs
+        }
 
         encoder.setComputePipelineState(chunkPipeline)
         encoder.setBuffer(buffer, offset: 0, index: 0)
@@ -1844,7 +2037,9 @@ public enum BLAKE3Metal {
                     ? pipelines.parent16CVs
                     : pipelines.parent16TailCVs
             } else if useQuadReduction {
-                pipelines.parent4CVs
+                currentCount.isMultiple(of: 4)
+                    ? pipelines.parent4ExactCVs
+                    : pipelines.parent4CVs
             } else {
                 pipelines.parentCVs
             }
@@ -1893,8 +2088,6 @@ public enum BLAKE3Metal {
             encoder: encoder
         )
         encoder.endEncoding()
-
-        return commandBuffer
     }
 
     private static func makeChunkChainingValuesCommandBuffer(
@@ -1924,13 +2117,18 @@ public enum BLAKE3Metal {
             chunkCount: UInt32(chunkCount)
         )
         copyParameter(params, into: parameterBuffer, slot: 0)
-        encoder.setComputePipelineState(pipelines.chunkFullCVs)
+        let pipeline = range.count <= alignedFullChunkKernelMaxBytes
+            && range.lowerBound.isMultiple(of: MemoryLayout<UInt32>.stride)
+            ? pipelines.chunkFullAlignedCVs
+            : pipelines.chunkFullCVs
+
+        encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(buffer, offset: 0, index: 0)
         encoder.setBuffer(outputBuffer, offset: 0, index: 1)
         encoder.setBuffer(parameterBuffer, offset: 0, index: 2)
         dispatchThreads(
             count: chunkCount,
-            pipeline: pipelines.chunkFullCVs,
+            pipeline: pipeline,
             encoder: encoder
         )
         encoder.endEncoding()

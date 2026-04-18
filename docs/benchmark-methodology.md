@@ -65,12 +65,12 @@ Private-resident numbers should not be presented as full Swift-bytes-to-digest t
 
 Private-staged timings measure hashing from an existing Swift byte array through reusable upload resources into private GPU storage.
 
-The timer starts immediately before copying Swift bytes into a pre-created shared staging buffer, then includes a blit into a pre-created private `MTLBuffer`, the private-buffer hash, both command-buffer waits, and digest extraction. This is not a resident benchmark; it is a repeated-call application path for callers that want private-storage hashing without per-call buffer allocation.
+The timer starts immediately before copying Swift bytes into a pre-created shared staging buffer, then includes a blit into a pre-created private `MTLBuffer`, the private-buffer hash, command-buffer completion, and digest extraction. The synchronous helper uses a single combined upload+hash command buffer for tuned 16 MiB inputs and the faster split upload-then-hash sequence for larger inputs. This is not a resident benchmark; it is a repeated-call application path for callers that want private-storage hashing without per-call buffer allocation.
 
 Included in each timed iteration:
 
 - copying the Swift byte array into a reusable shared staging buffer
-- blit command buffer creation, encoding, execution, and wait
+- blit command encoding, execution, and completion
 - all work included in the private-resident hash path
 
 Excluded from each timed iteration:
@@ -155,7 +155,7 @@ This mode follows Apple's Metal guidance to create persistent objects early and 
 
 ## `metal-wrapped-*`
 
-Wrapped timings measure hashing from an existing Swift byte array through `makeBuffer(bytesNoCopy:length:options:deallocator:)`.
+Wrapped timings measure hashing from an existing Swift byte array through `BLAKE3Metal.Context.hash(input:policy:)`, which uses `makeBuffer(bytesNoCopy:length:options:deallocator:)` for the synchronous call.
 
 The timer starts immediately before creating the no-copy `MTLBuffer` wrapper and stops after the digest has been read and returned to Swift. This mode estimates a Swift-owned, no-copy application path on Apple Silicon unified memory.
 
@@ -173,7 +173,7 @@ Excluded from each timed iteration:
 - Metal library and pipeline compilation
 - first-use reusable scratch-buffer allocation
 
-The wrapped mode is only valid while the Swift storage stays alive and immobile for the full GPU operation. The benchmark keeps the Swift array alive and `BLAKE3Metal.Context.hash(...)` waits for GPU completion before the `withUnsafeBytes` scope ends. This mode is useful for estimating an existing-memory no-copy path on Apple Silicon, but it is distinct from both resident Metal-owned buffers and copy-based end-to-end setup.
+The wrapped mode is only valid while the Swift storage stays alive and immobile for the full GPU operation. The public synchronous no-copy API keeps the Swift storage alive and waits for GPU completion before the `withUnsafeBytes` scope ends. This mode is useful for estimating an existing-memory no-copy path on Apple Silicon, but it is distinct from both resident Metal-owned buffers and copy-based end-to-end setup.
 
 ## Commands
 
@@ -395,10 +395,12 @@ A 4-CV parent reducer was added as a middle tier between binary parent reduction
 
 A separate tail-aware 16-CV reducer was added for large tree levels that are not multiples of 16. Exact multiples still use the original `parent16` kernel. Non-multiple large levels use the tail-aware variant, which reduces each full 16-CV group and reduces the remaining 1-15 CV tail inside one thread, matching four binary parent passes. This targets file-like sizes such as 512 MiB + 3 KiB or 1 GiB + 3 KiB without risking the exact 512 MiB/1 GiB hot path.
 
-Two additional speculative optimizations were tested and rejected:
+Speculative optimizations tested:
 
 - `root8`/`root16` tail-fusion kernels: promising in some focused samples, but median behavior was inconsistent and could drag down 64-256 MiB runs.
-- a dedicated aligned full-chunk kernel: correctness passed, but benchmark samples did not show a stable win over the existing full-chunk kernel.
+- an exact 8-CV parent reducer: correct, but rejected after a same-session control showed it regressed the important 64-512 MiB resident/private cases versus the existing 4-CV/16-CV reducer mix.
+- a dedicated aligned full-chunk kernel: retained for aligned full-chunk ranges up to 64 MiB, where it improves medium resident/private samples; larger ranges continue using the generic full-chunk kernel because large resident sweeps were less stable with the specialized variant.
+- a combined private-staged upload+hash command buffer: retained through 16 MiB, where it beat the split path in same-session checks; 64 MiB and larger inputs keep the split upload-then-hash sequence because it measured faster on the M4 validation host.
 - a fused chunk-pair first parent pass: it produced correct tree-shaped output, but making each GPU thread hash two chunks plus one parent reduced occupancy enough that the unfused path remained better at 256 MiB and 1 GiB in the same-session control run.
 
 The benchmark size formatter now preserves close tail sizes, for example `32 MiB + 3 KiB` and `1 GiB + 3 KiB`, instead of collapsing them into the same rounded MiB/GiB label. Use exact byte sizes when benchmarking tail behavior.

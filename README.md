@@ -18,7 +18,7 @@ This repository is **not open source**. It is proprietary source-available softw
 - One-shot CPU hashing uses the SIMD chunk/parent reducer from 16 KiB and parallel hashing from 96 KiB.
 - Bounded-memory CV stack for streaming and multi-GB file hashing.
 - CPU file strategies for buffered reads and memory-mapped hashing.
-- Metal resident-buffer, staged-buffer, private-buffer, async pipeline, and tiled file hashing APIs.
+- Metal resident-buffer, no-copy Swift input, staged-buffer, tuned private-staged, async pipeline, and tiled file hashing APIs.
 - Runtime Metal compilation fallback plus precompiled `.metallib` loading for production startup control.
 - Benchmark harness with separate resident, end-to-end, CPU, file, and sustained-run modes.
 
@@ -167,6 +167,25 @@ let digest = try context.hash(
     policy: .gpu
 )
 print(digest)
+```
+
+For synchronous Swift-owned input on Apple Silicon unified memory, use the no-copy wrapper path:
+
+```swift
+let digest = try context.hash(input: input, policy: .gpu)
+```
+
+For repeated Swift-owned uploads into reusable private GPU storage:
+
+```swift
+let privateBuffer = try context.makePrivateBuffer(capacity: input.count)
+let stagingBuffer = try context.makeStagingBuffer(capacity: input.count)
+let digest = try context.hash(
+    input: input,
+    using: stagingBuffer,
+    privateBuffer: privateBuffer,
+    policy: .gpu
+)
 ```
 
 Production integrations can avoid runtime Metal compilation by precompiling the bundled kernel source and loading a `.metallib`:

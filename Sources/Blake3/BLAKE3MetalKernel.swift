@@ -20,7 +20,9 @@ struct BLAKE3MetalParentParams {
 struct BLAKE3MetalPipelines {
     let chunkCVs: MTLComputePipelineState
     let chunkFullCVs: MTLComputePipelineState
+    let chunkFullAlignedCVs: MTLComputePipelineState
     let parentCVs: MTLComputePipelineState
+    let parent4ExactCVs: MTLComputePipelineState
     let parent4CVs: MTLComputePipelineState
     let parent16CVs: MTLComputePipelineState
     let parent16TailCVs: MTLComputePipelineState
@@ -60,7 +62,9 @@ final class BLAKE3MetalPipelineCache: @unchecked Sendable {
         let library = try librarySource.makeLibrary(device: device)
         guard let chunkFunction = library.makeFunction(name: "blake3_chunk_cvs"),
               let chunkFullFunction = library.makeFunction(name: "blake3_chunk_full_cvs"),
+              let chunkFullAlignedFunction = library.makeFunction(name: "blake3_chunk_full_aligned_cvs"),
               let parentFunction = library.makeFunction(name: "blake3_parent_cvs"),
+              let parent4ExactFunction = library.makeFunction(name: "blake3_parent4_exact_cvs"),
               let parent4Function = library.makeFunction(name: "blake3_parent4_cvs"),
               let parent16Function = library.makeFunction(name: "blake3_parent16_cvs"),
               let parent16TailFunction = library.makeFunction(name: "blake3_parent16_tail_cvs"),
@@ -73,7 +77,9 @@ final class BLAKE3MetalPipelineCache: @unchecked Sendable {
         let pipelines = BLAKE3MetalPipelines(
             chunkCVs: try device.makeComputePipelineState(function: chunkFunction),
             chunkFullCVs: try device.makeComputePipelineState(function: chunkFullFunction),
+            chunkFullAlignedCVs: try device.makeComputePipelineState(function: chunkFullAlignedFunction),
             parentCVs: try device.makeComputePipelineState(function: parentFunction),
+            parent4ExactCVs: try device.makeComputePipelineState(function: parent4ExactFunction),
             parent4CVs: try device.makeComputePipelineState(function: parent4Function),
             parent16CVs: try device.makeComputePipelineState(function: parent16Function),
             parent16TailCVs: try device.makeComputePipelineState(function: parent16TailFunction),
@@ -440,6 +446,44 @@ enum BLAKE3MetalKernelSource {
         }
     }
 
+    kernel void blake3_chunk_full_aligned_cvs(device const uchar *input [[buffer(0)]],
+                                              device uchar *chunkCVs [[buffer(1)]],
+                                              constant BLAKE3ChunkParams &params [[buffer(2)]],
+                                              uint gid [[thread_position_in_grid]]) {
+        device const uchar *chunk = input + params.inputOffset + ulong(gid) * 1024UL;
+        device const uint *chunkWords32 = reinterpret_cast<device const uint *>(chunk);
+        ulong chunkCounter = params.baseChunkCounter + ulong(gid);
+
+        uint cv[8] = {
+            IV[0], IV[1], IV[2], IV[3],
+            IV[4], IV[5], IV[6], IV[7]
+        };
+
+        uint blockWords[16];
+        for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+            blockWords[wordIndex] = load32_aligned(chunkWords32, wordIndex);
+        }
+        compress_in_place(cv, blockWords, 64u, chunkCounter, 1u);
+
+        for (uint blockIndex = 1u; blockIndex < 15u; blockIndex++) {
+            uint wordBase = blockIndex * 16u;
+            for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+                blockWords[wordIndex] = load32_aligned(chunkWords32, wordBase + wordIndex);
+            }
+            compress_in_place(cv, blockWords, 64u, chunkCounter, 0u);
+        }
+
+        for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+            blockWords[wordIndex] = load32_aligned(chunkWords32, 240u + wordIndex);
+        }
+        compress_in_place(cv, blockWords, 64u, chunkCounter, 2u);
+
+        device uint *out = reinterpret_cast<device uint *>(chunkCVs + ulong(gid) * 32UL);
+        for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+            store32_aligned(out, wordIndex, cv[wordIndex]);
+        }
+    }
+
     kernel void blake3_parent_cvs(device const uchar *inputCVs [[buffer(0)]],
                                   device uchar *parentCVs [[buffer(1)]],
                                   constant BLAKE3ParentParams &params [[buffer(2)]],
@@ -473,6 +517,40 @@ enum BLAKE3MetalKernelSource {
             for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
                 store32_aligned(out, wordIndex, load32_aligned(last, wordIndex));
             }
+        }
+    }
+
+    kernel void blake3_parent4_exact_cvs(device const uchar *inputCVs [[buffer(0)]],
+                                         device uchar *parentCVs [[buffer(1)]],
+                                         constant BLAKE3ParentParams &params [[buffer(2)]],
+                                         uint gid [[thread_position_in_grid]]) {
+        uint outputCount = params.inputCount / 4u;
+        if (gid >= outputCount) {
+            return;
+        }
+
+        device const uint *inputWords = reinterpret_cast<device const uint *>(inputCVs + ulong(gid) * 128UL);
+        uint cvs[2][8];
+
+        for (uint pairIndex = 0u; pairIndex < 2u; pairIndex++) {
+            uint blockWords[16];
+            uint wordBase = pairIndex * 16u;
+            for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+                blockWords[wordIndex] = load32_aligned(inputWords, wordBase + wordIndex);
+            }
+            parent_cv(cvs[pairIndex], blockWords);
+        }
+
+        uint blockWords[16];
+        for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+            blockWords[wordIndex] = cvs[0][wordIndex];
+            blockWords[wordIndex + 8u] = cvs[1][wordIndex];
+        }
+        parent_cv(cvs[0], blockWords);
+
+        device uint *out = reinterpret_cast<device uint *>(parentCVs + ulong(gid) * 32UL);
+        for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+            store32_aligned(out, wordIndex, cvs[0][wordIndex]);
         }
     }
 

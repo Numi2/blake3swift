@@ -22,6 +22,8 @@ BLAKE3Swift is pre-`1.0.0`. Public APIs are usable for evaluation, benchmarking,
 - `BLAKE3.Context` and `BLAKE3Metal.Context` are shareable, but protect reusable workspace with internal synchronization. Use separate contexts for independent callers that must execute concurrently.
 - `BLAKE3.Context(maxWorkers:)` pins the reusable CPU scheduler worker pool for repeated hashes and benchmark reproducibility.
 - Raw buffer inputs only need to live for the duration of synchronous calls.
+- Synchronous no-copy Metal input APIs keep the Swift buffer scope open until GPU completion.
+- Synchronous private-staged Metal input APIs keep staging and private buffers locked until the selected upload/hash flow completes.
 - Async Metal calls require buffers to remain valid until the async call completes.
 - File async APIs keep memory mappings alive until CPU or GPU work has completed.
 

@@ -655,6 +655,7 @@ final class BLAKE3Tests: XCTestCase {
     #if canImport(Metal)
     func testMetalKernelSourceIsExportable() {
         XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_chunk_cvs"))
+        XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_chunk_full_aligned_cvs"))
         XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_root_digest"))
     }
 
@@ -972,6 +973,40 @@ final class BLAKE3Tests: XCTestCase {
         )
     }
 
+    func testMetalNoCopyHashesSwiftOwnedInput() throws {
+        guard BLAKE3Metal.isAvailable else {
+            throw XCTSkip("Metal is not available on this host.")
+        }
+        let context = try BLAKE3Metal.makeContext()
+        let sizes = [
+            0,
+            1,
+            BLAKE3.chunkByteCount,
+            BLAKE3.chunkByteCount + 1,
+            2 * 1_024 * 1_024 + 333
+        ]
+
+        for size in sizes {
+            let input = deterministicInput(byteCount: size)
+            let expected = BLAKE3.hash(input)
+            XCTAssertEqual(
+                try BLAKE3Metal.hash(input: input, policy: .automatic),
+                expected,
+                "static no-copy automatic mismatch for byteCount=\(size)"
+            )
+            XCTAssertEqual(
+                try context.hash(input: input, policy: .automatic),
+                expected,
+                "context no-copy automatic mismatch for byteCount=\(size)"
+            )
+            XCTAssertEqual(
+                try context.hash(input: input, policy: .gpu),
+                expected,
+                "context no-copy GPU mismatch for byteCount=\(size)"
+            )
+        }
+    }
+
     func testMetalAsyncHashMatchesSynchronousPaths() async throws {
         guard BLAKE3Metal.isAvailable else {
             throw XCTSkip("Metal is not available on this host.")
@@ -1143,8 +1178,45 @@ final class BLAKE3Tests: XCTestCase {
             BLAKE3.hash(first)
         )
 
+        let combinedDigest = try context.hash(
+            input: second,
+            using: stagingBuffer,
+            privateBuffer: privateBuffer,
+            policy: .gpu
+        )
+        XCTAssertEqual(combinedDigest, BLAKE3.hash(second))
+        XCTAssertEqual(privateBuffer.byteCount, second.count)
+        XCTAssertEqual(
+            try context.hash(privateBuffer: privateBuffer),
+            BLAKE3.hash(second)
+        )
+
+        let large = deterministicInput(byteCount: 17 * 1_024 * 1_024 + 17)
+        let largeStagingBuffer = try context.makeStagingBuffer(capacity: large.count)
+        let largePrivateBuffer = try context.makePrivateBuffer(capacity: large.count)
+        let splitDigest = try context.hash(
+            input: large,
+            using: largeStagingBuffer,
+            privateBuffer: largePrivateBuffer,
+            policy: .gpu
+        )
+        XCTAssertEqual(splitDigest, BLAKE3.hash(large))
+        XCTAssertEqual(largePrivateBuffer.byteCount, large.count)
+        XCTAssertEqual(
+            try context.hash(privateBuffer: largePrivateBuffer),
+            BLAKE3.hash(large)
+        )
+
         let tooLarge = deterministicInput(byteCount: first.count + 1)
         XCTAssertThrowsError(try context.replaceContents(of: privateBuffer, with: tooLarge))
+        XCTAssertThrowsError(
+            try context.hash(
+                input: tooLarge,
+                using: stagingBuffer,
+                privateBuffer: privateBuffer,
+                policy: .gpu
+            )
+        )
     }
     #endif
 }

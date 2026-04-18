@@ -38,7 +38,7 @@ private enum MetalTimingMode: String {
         case .privateResident:
             return "pre-created private MTLBuffer; setup copy excluded; timed hash includes command encoding, GPU execution, wait, digest read"
         case .privateStaged:
-            return "pre-created shared staging and private MTLBuffers; timed Swift-byte copy into staging, blit into private storage, private hash, waits, digest read"
+            return "pre-created shared staging and private MTLBuffers; timed Swift-byte copy into staging, private upload/hash command completion, digest read"
         case .staged:
             return "pre-created shared staging MTLBuffer; timed Swift-byte copy into staging buffer plus hash"
         case .wrapped:
@@ -402,58 +402,6 @@ private func makeMetalBuffer(device: MTLDevice, input: [UInt8]) -> MTLBuffer? {
             return nil
         }
         return device.makeBuffer(bytes: baseAddress, length: input.count, options: .storageModeShared)
-    }
-}
-
-private func withNoCopyMetalBuffer<R>(
-    device: MTLDevice,
-    input: [UInt8],
-    _ body: (MTLBuffer) -> R
-) -> R? {
-    guard !input.isEmpty else {
-        guard let buffer = device.makeBuffer(length: 1, options: .storageModeShared) else {
-            return nil
-        }
-        return body(buffer)
-    }
-    return input.withUnsafeBytes { raw -> R? in
-        guard let baseAddress = raw.baseAddress,
-              let buffer = device.makeBuffer(
-                bytesNoCopy: UnsafeMutableRawPointer(mutating: baseAddress),
-                length: raw.count,
-                options: .storageModeShared,
-                deallocator: nil
-              )
-        else {
-            return nil
-        }
-        return body(buffer)
-    }
-}
-
-private func withNoCopyMetalBufferThrowing<R>(
-    device: MTLDevice,
-    input: [UInt8],
-    _ body: (MTLBuffer) throws -> R
-) throws -> R? {
-    guard !input.isEmpty else {
-        guard let buffer = device.makeBuffer(length: 1, options: .storageModeShared) else {
-            return nil
-        }
-        return try body(buffer)
-    }
-    return try input.withUnsafeBytes { raw -> R? in
-        guard let baseAddress = raw.baseAddress,
-              let buffer = device.makeBuffer(
-                bytesNoCopy: UnsafeMutableRawPointer(mutating: baseAddress),
-                length: raw.count,
-                options: .storageModeShared,
-                deallocator: nil
-              )
-        else {
-            return nil
-        }
-        return try body(buffer)
     }
 }
 
@@ -1632,8 +1580,12 @@ private func runMetalAutotune() throws {
                     input: input,
                     iterations: iterations
                 ) { bytes in
-                    try modeContext.replaceContents(of: privateBuffer, with: bytes, using: stagingBuffer)
-                    return try modeContext.hash(privateBuffer: privateBuffer, policy: .gpu)
+                    try modeContext.hash(
+                        input: bytes,
+                        using: stagingBuffer,
+                        privateBuffer: privateBuffer,
+                        policy: .gpu
+                    )
                 }
             case .staged:
                 let stagingBuffer = try modeContext.makeStagingBuffer(capacity: size)
@@ -1652,12 +1604,7 @@ private func runMetalAutotune() throws {
                     input: input,
                     iterations: iterations
                 ) { bytes in
-                    guard let digest = try withNoCopyMetalBufferThrowing(device: device, input: bytes, { buffer in
-                        try modeContext.hash(buffer: buffer, length: size, policy: .gpu)
-                    }) else {
-                        throw BLAKE3Error.metalCommandFailed("Unable to wrap autotune input buffer.")
-                    }
-                    return digest
+                    try modeContext.hash(input: bytes, policy: .gpu)
                 }
             case .endToEnd:
                 result = try runThrowingBenchmark(
@@ -2124,7 +2071,7 @@ for size in requestedSizes {
                 input: input,
                 iterations: iterations
             ) { _ in
-                try! metalContext.hash(privateBuffer: privateBuffer, policy: .gpu)
+                return try! metalContext.hash(privateBuffer: privateBuffer, policy: .gpu)
             }
         }
         if requestedMetalTimingModes.contains(.privateStaged),
@@ -2137,12 +2084,12 @@ for size in requestedSizes {
                 input: input,
                 iterations: iterations
             ) { bytes in
-                try! metalContext.replaceContents(
-                    of: privateBuffer,
-                    with: bytes,
-                    using: privateStagingBuffer
+                try! metalContext.hash(
+                    input: bytes,
+                    using: privateStagingBuffer,
+                    privateBuffer: privateBuffer,
+                    policy: .gpu
                 )
-                return try! metalContext.hash(privateBuffer: privateBuffer, policy: .gpu)
             }
         }
         if requestedMetalTimingModes.contains(.staged),
@@ -2171,9 +2118,7 @@ for size in requestedSizes {
                 input: input,
                 iterations: iterations
             ) { bytes in
-                withNoCopyMetalBuffer(device: metalDevice, input: bytes) { buffer in
-                    hashMetalAutoForBenchmark(context: metalContext, buffer: buffer, length: size)
-                }!
+                try! metalContext.hash(input: bytes, policy: .automatic)
             }
             metalWrappedGPU = runBenchmark(
                 backend: "metal",
@@ -2181,9 +2126,7 @@ for size in requestedSizes {
                 input: input,
                 iterations: iterations
             ) { bytes in
-                withNoCopyMetalBuffer(device: metalDevice, input: bytes) { buffer in
-                    hashMetalGPUForBenchmark(context: metalContext, buffer: buffer, length: size)
-                }!
+                try! metalContext.hash(input: bytes, policy: .gpu)
             }
         }
         if requestedMetalTimingModes.contains(.endToEnd) {
@@ -2319,18 +2262,16 @@ for size in requestedSizes {
             case .privateResident:
                 return try! metalContext.hash(privateBuffer: privateResidentBuffer!, policy: .gpu)
             case .privateStaged:
-                try! metalContext.replaceContents(
-                    of: privateStagedBuffer!,
-                    with: input,
-                    using: privateStagedUploadBuffer!
+                return try! metalContext.hash(
+                    input: input,
+                    using: privateStagedUploadBuffer!,
+                    privateBuffer: privateStagedBuffer!,
+                    policy: .gpu
                 )
-                return try! metalContext.hash(privateBuffer: privateStagedBuffer!, policy: .gpu)
             case .staged:
                 return try! metalContext.hash(input: input, using: stagedBuffer!, policy: policy)
             case .wrapped:
-                return withNoCopyMetalBuffer(device: metalDevice, input: input) { buffer in
-                    try! metalContext.hash(buffer: buffer, length: size, policy: policy)
-                }!
+                return try! metalContext.hash(input: input, policy: policy)
             case .endToEnd:
                 let buffer = makeMetalBuffer(device: metalDevice, input: input)!
                 return try! metalContext.hash(buffer: buffer, length: size, policy: policy)
