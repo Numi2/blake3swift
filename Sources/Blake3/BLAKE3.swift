@@ -236,7 +236,7 @@ public enum BLAKE3 {
                         inputBytes,
                         key: keyWords,
                         flags: BLAKE3Core.keyedHash,
-                        mode: .serial,
+                        mode: .parallel(maxWorkers: nil),
                         wipingWorkspace: true
                     )
                 }
@@ -261,7 +261,7 @@ public enum BLAKE3 {
                         inputBytes,
                         key: keyWords,
                         flags: BLAKE3Core.keyedHash,
-                        mode: .serial,
+                        mode: .parallel(maxWorkers: nil),
                         outputByteCount: outputByteCount,
                         wipingWorkspace: true
                     )
@@ -341,7 +341,7 @@ public enum BLAKE3 {
                     materialRaw,
                     key: contextKey,
                     flags: BLAKE3Core.deriveKeyMaterial,
-                    mode: .serial,
+                    mode: .parallel(maxWorkers: nil),
                     outputByteCount: outputByteCount,
                     wipingWorkspace: true
                 )

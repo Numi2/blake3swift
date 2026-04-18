@@ -4,6 +4,18 @@ BLAKE3Swift is a dependency-free Swift implementation of BLAKE3 for Apple platfo
 
 The project is performance-focused, but correctness comes first: the Swift implementation is tested against the official BLAKE3 vectors, keyed hashing, key derivation, extended output, streaming updates, file hashing, and Metal/CPU parity.
 
+## Latest Results
+
+Local release benchmarks on Apple M4 show the Swift and Metal paths outperforming the benchmark-only official C reference by a wide margin. These numbers are from `benchmarks/run-smoke.sh` with JSON validation enabled; resident Metal rows time command encoding, GPU execution, wait, and digest read, but exclude input upload/setup.
+
+| Input | Default `BLAKE3.hash` | Swift CPU parallel | Official C one-shot | Best Metal row |
+| --- | ---: | ---: | ---: | ---: |
+| 16 MiB | 8.57 GiB/s | 8.83 GiB/s | 2.16 GiB/s | 12.60 GiB/s |
+| 32 MiB | 11.22 GiB/s | 9.31 GiB/s | 2.16 GiB/s | 25.25 GiB/s |
+| 64 MiB | 19.53 GiB/s | 10.03 GiB/s | 2.17 GiB/s | 52.11 GiB/s |
+
+The automatic path uses Swift CPU hashing below the Metal crossover and Metal for larger unkeyed inputs. The current default crossover is 32 MiB, which keeps 16 MiB on the more stable CPU path while letting larger buffers use the GPU.
+
 ## License
 
 This repository is **not open source**. It is proprietary source-available software for evaluation, audit, verification, and benchmark review only. Production, commercial, hosted, redistributed, or revenue-connected use requires a separate commercial license. See [LICENSE.md](LICENSE.md).
@@ -12,6 +24,7 @@ This repository is **not open source**. It is proprietary source-available softw
 
 - Native Swift BLAKE3 core with no vendored C target.
 - One-shot, keyed, derived-key, streaming, XOF, and reusable context APIs.
+- Keyed and derive-key one-shot APIs use CPU tree parallelism for large inputs.
 - Reusable CPU contexts with persistent parallel worker pools for repeated hashes.
 - SIMD4 chunk and parent reduction paths for CPU throughput.
 - CPU parallel hashing defaults to the active processor count, with explicit worker overrides for reproducible benchmarks.
