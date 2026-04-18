@@ -821,17 +821,14 @@ final class BLAKE3Tests: XCTestCase {
         XCTAssertEqual(outputBuffer.chunkCount, 4)
 
         let expected = input.withUnsafeBytes { raw in
-            BLAKE3Core.withMessageSchedule { schedule in
-                (0..<4).map { chunkIndex in
-                    BLAKE3Core.blake3ProcessFullChunk(
-                        baseAddress: raw.baseAddress!,
-                        chunkByteOffset: chunkIndex * BLAKE3.chunkByteCount,
-                        chunkCounter: baseChunkCounter + UInt64(chunkIndex),
-                        key: BLAKE3Core.iv,
-                        flags: 0,
-                        schedule: schedule
-                    )
-                }
+            (0..<4).map { chunkIndex in
+                BLAKE3Core.blake3ProcessFullChunk(
+                    baseAddress: raw.baseAddress!,
+                    chunkByteOffset: chunkIndex * BLAKE3.chunkByteCount,
+                    chunkCounter: baseChunkCounter + UInt64(chunkIndex),
+                    key: BLAKE3Core.iv,
+                    flags: 0
+                )
             }
         }
 
@@ -868,17 +865,14 @@ final class BLAKE3Tests: XCTestCase {
         XCTAssertEqual(outputBuffer.chunkCount, 6)
 
         let expected = input.withUnsafeBytes { raw in
-            BLAKE3Core.withMessageSchedule { schedule in
-                (0..<6).map { chunkIndex in
-                    BLAKE3Core.blake3ProcessFullChunk(
-                        baseAddress: raw.baseAddress!,
-                        chunkByteOffset: chunkIndex * BLAKE3.chunkByteCount,
-                        chunkCounter: baseChunkCounter + UInt64(chunkIndex),
-                        key: BLAKE3Core.iv,
-                        flags: 0,
-                        schedule: schedule
-                    )
-                }
+            (0..<6).map { chunkIndex in
+                BLAKE3Core.blake3ProcessFullChunk(
+                    baseAddress: raw.baseAddress!,
+                    chunkByteOffset: chunkIndex * BLAKE3.chunkByteCount,
+                    chunkCounter: baseChunkCounter + UInt64(chunkIndex),
+                    key: BLAKE3Core.iv,
+                    flags: 0
+                )
             }
         }
 

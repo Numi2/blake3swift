@@ -287,7 +287,7 @@ Set `MEMORY_STATS=1` on the fixture scripts, or pass `--memory-stats` to `blake3
 
 Set `METAL_LIBRARY=/path/to/BLAKE3Metal.metallib` on the fixture scripts, or pass `--metal-library /path/to/BLAKE3Metal.metallib`, to benchmark precompiled Metal library loading instead of runtime source compilation.
 
-Set `MINIMUM_GPU_BYTES=16m` to tune the `.automatic` Metal CPU/GPU gate, and `METAL_TILE_SIZE=64m` to tune tiled Metal file benchmarking. The emitted JSON records both values.
+Set `MINIMUM_GPU_BYTES=32m` to tune the `.automatic` Metal CPU/GPU gate, and `METAL_TILE_SIZE=64m` to tune tiled Metal file benchmarking. The emitted JSON records both values.
 
 Run `benchmarks/run-autotune.sh` to measure Metal gate and mode candidates and emit validated recommendation JSON. Set `AUTOTUNE_FILE_TILES=1` when tiled file tile-size recommendations are needed.
 
@@ -298,7 +298,7 @@ Runtime backend overrides:
 ```bash
 BLAKE3_SWIFT_BACKEND=cpu             # force default BLAKE3.hash to CPU
 BLAKE3_SWIFT_BACKEND=metal           # prefer Metal above the threshold, with CPU fallback
-BLAKE3_SWIFT_METAL_MIN_BYTES=16777216
+BLAKE3_SWIFT_METAL_MIN_BYTES=33554432
 BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS=0|256|512
 ```
 

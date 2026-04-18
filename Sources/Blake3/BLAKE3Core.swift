@@ -28,16 +28,6 @@ enum BLAKE3Core {
     static let deriveKeyContext: UInt32 = 1 << 5
     static let deriveKeyMaterial: UInt32 = 1 << 6
 
-    private static let messageSchedule: [UInt8] = [
-        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
-        2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8,
-        3, 4, 10, 12, 13, 2, 7, 14, 6, 5, 9, 0, 11, 15, 8, 1,
-        10, 7, 12, 9, 14, 3, 13, 15, 4, 0, 11, 2, 5, 8, 1, 6,
-        12, 13, 9, 11, 15, 10, 14, 8, 7, 2, 5, 3, 0, 1, 6, 4,
-        9, 14, 11, 5, 8, 12, 15, 1, 13, 3, 0, 10, 2, 6, 4, 7,
-        11, 15, 5, 0, 1, 9, 8, 6, 14, 10, 2, 12, 3, 4, 7, 13
-    ]
-
     static let iv = ChainingValue(
         0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
         0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19
@@ -69,17 +59,6 @@ enum BLAKE3Core {
         }
     }
 
-    struct SendableMessageSchedule: @unchecked Sendable {
-        let baseAddress: UnsafePointer<UInt8>
-    }
-
-    @inline(__always)
-    static func withMessageSchedule<R>(_ body: (SendableMessageSchedule) -> R) -> R {
-        messageSchedule.withUnsafeBufferPointer { schedule in
-            body(SendableMessageSchedule(baseAddress: schedule.baseAddress!))
-        }
-    }
-
     struct Workspace {
         var chunkCVs: [ChainingValue] = []
         var scratchCVs: [ChainingValue] = []
@@ -95,7 +74,6 @@ enum BLAKE3Core {
     }
 
     private final class ParallelSchedulerState: @unchecked Sendable {
-        let workerCount: Int
         let startSemaphore = DispatchSemaphore(value: 0)
         let doneSemaphore = DispatchSemaphore(value: 0)
         let stateLock = NSLock()
@@ -104,10 +82,6 @@ enum BLAKE3Core {
         var nextIndex = 0
         var body: (@Sendable (Int) -> Void)?
         var shutdown = false
-
-        init(workerCount: Int) {
-            self.workerCount = workerCount
-        }
     }
 
     final class ParallelScheduler: @unchecked Sendable {
@@ -117,9 +91,9 @@ enum BLAKE3Core {
 
         init(workerCount: Int) {
             self.workerCount = max(1, workerCount)
-            self.state = ParallelSchedulerState(workerCount: self.workerCount)
+            self.state = ParallelSchedulerState()
             if self.workerCount > 1 {
-                self.workers = (0..<self.workerCount).map { workerIndex in
+                self.workers = (0..<(self.workerCount - 1)).map { workerIndex in
                     let thread = Thread { [state] in
                         Self.workerLoop(state: state, workerIndex: workerIndex)
                     }
@@ -157,6 +131,7 @@ enum BLAKE3Core {
             }
 
             let activeWorkers = min(iterations, workerCount)
+            let backgroundWorkers = min(workers.count, activeWorkers - 1)
             state.performLock.lock()
 
             state.stateLock.lock()
@@ -165,10 +140,13 @@ enum BLAKE3Core {
             state.body = body
             state.stateLock.unlock()
 
-            for _ in 0..<activeWorkers {
+            for _ in 0..<backgroundWorkers {
                 state.startSemaphore.signal()
             }
-            for _ in 0..<activeWorkers {
+
+            Self.runAvailableWork(state: state)
+
+            for _ in 0..<backgroundWorkers {
                 state.doneSemaphore.wait()
             }
 
@@ -181,26 +159,33 @@ enum BLAKE3Core {
             state.performLock.unlock()
         }
 
+        private static func runAvailableWork(state: ParallelSchedulerState) {
+            while true {
+                state.stateLock.lock()
+                guard let body = state.body, state.nextIndex < state.iterations else {
+                    state.stateLock.unlock()
+                    return
+                }
+                let index = state.nextIndex
+                state.nextIndex += 1
+                state.stateLock.unlock()
+
+                body(index)
+            }
+        }
+
         private static func workerLoop(state: ParallelSchedulerState, workerIndex _: Int) {
             while true {
                 state.startSemaphore.wait()
 
-                while true {
-                    state.stateLock.lock()
-                    if state.shutdown {
-                        state.stateLock.unlock()
-                        return
-                    }
-                    guard let body = state.body, state.nextIndex < state.iterations else {
-                        state.stateLock.unlock()
-                        break
-                    }
-                    let index = state.nextIndex
-                    state.nextIndex += 1
+                state.stateLock.lock()
+                if state.shutdown {
                     state.stateLock.unlock()
-
-                    body(index)
+                    return
                 }
+                state.stateLock.unlock()
+
+                runAvailableWork(state: state)
 
                 state.doneSemaphore.signal()
             }
@@ -574,28 +559,25 @@ enum BLAKE3Core {
         let chunkCount = (input.count + chunkLen - 1) / chunkLen
         var cvs = [ChainingValue]()
         cvs.reserveCapacity(chunkCount)
-        withMessageSchedule { schedule in
-            for chunkIndex in 0..<chunkCount {
-                let offset = chunkIndex * chunkLen
-                let length = min(chunkLen, input.count - offset)
-                if length == chunkLen {
-                    cvs.append(
-                        blake3ProcessFullChunk(
-                            baseAddress: baseAddress,
-                            chunkByteOffset: offset,
-                            chunkCounter: UInt64(chunkIndex),
-                            key: key,
-                            flags: flags,
-                            schedule: schedule
-                        )
+        for chunkIndex in 0..<chunkCount {
+            let offset = chunkIndex * chunkLen
+            let length = min(chunkLen, input.count - offset)
+            if length == chunkLen {
+                cvs.append(
+                    blake3ProcessFullChunk(
+                        baseAddress: baseAddress,
+                        chunkByteOffset: offset,
+                        chunkCounter: UInt64(chunkIndex),
+                        key: key,
+                        flags: flags
                     )
-                } else {
-                    let chunk = UnsafeRawBufferPointer(start: baseAddress.advanced(by: offset), count: length)
-                    cvs.append(
-                        chunkOutput(chunk, chunkCounter: UInt64(chunkIndex), key: key, flags: flags)
-                            .chainingValue()
-                    )
-                }
+                )
+            } else {
+                let chunk = UnsafeRawBufferPointer(start: baseAddress.advanced(by: offset), count: length)
+                cvs.append(
+                    chunkOutput(chunk, chunkCounter: UInt64(chunkIndex), key: key, flags: flags)
+                        .chainingValue()
+                )
             }
         }
         return rootOutput(fromChunkCVs: cvs, key: key, flags: flags)
@@ -701,22 +683,19 @@ enum BLAKE3Core {
         }
 
         if chunkIndex < chunksToFinalize {
-            withMessageSchedule { schedule in
-                while chunkIndex < chunksToFinalize {
-                    stack.pushChunkCV(
-                        blake3ProcessFullChunk(
-                            baseAddress: baseAddress,
-                            chunkByteOffset: chunkIndex * chunkLen,
-                            chunkCounter: UInt64(chunkIndex),
-                            key: key,
-                            flags: flags,
-                            schedule: schedule
-                        ),
+            while chunkIndex < chunksToFinalize {
+                stack.pushChunkCV(
+                    blake3ProcessFullChunk(
+                        baseAddress: baseAddress,
+                        chunkByteOffset: chunkIndex * chunkLen,
+                        chunkCounter: UInt64(chunkIndex),
                         key: key,
                         flags: flags
-                    )
-                    chunkIndex += 1
-                }
+                    ),
+                    key: key,
+                    flags: flags
+                )
+                chunkIndex += 1
             }
         }
 
@@ -741,6 +720,15 @@ enum BLAKE3Core {
         flags: UInt32
     ) -> Output {
         precondition(input.count <= chunkLen)
+        if input.count == chunkLen, let baseAddress = input.baseAddress {
+            return fullChunkOutput(
+                baseAddress: baseAddress,
+                chunkCounter: chunkCounter,
+                key: key,
+                flags: flags
+            )
+        }
+
         var cv = key
         let blockCount = max(1, (input.count + blockLen - 1) / blockLen)
 
@@ -776,13 +764,49 @@ enum BLAKE3Core {
     }
 
     @inline(__always)
+    private static func fullChunkOutput(
+        baseAddress: UnsafeRawPointer,
+        chunkCounter: UInt64,
+        key: ChainingValue,
+        flags: UInt32
+    ) -> Output {
+        var cv = key
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress,
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags | chunkStart
+        )
+
+        var blockIndex = 1
+        while blockIndex < 15 {
+            cv = blake3CompressWithPerm(
+                cv: cv,
+                blockBaseAddress: baseAddress.advanced(by: blockIndex * blockLen),
+                blockLength: UInt32(blockLen),
+                counter: chunkCounter,
+                flags: flags
+            )
+            blockIndex += 1
+        }
+
+        return Output(
+            inputCV: cv,
+            blockWords: loadFullBlockWords(baseAddress: baseAddress.advanced(by: 15 * blockLen)),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags | chunkEnd
+        )
+    }
+
+    @inline(__always)
     static func blake3ProcessFullChunk(
         baseAddress: UnsafeRawPointer,
         chunkByteOffset: Int,
         chunkCounter: UInt64,
         key: ChainingValue,
-        flags: UInt32,
-        schedule: SendableMessageSchedule
+        flags: UInt32
     ) -> ChainingValue {
         var cv = key
         cv = blake3CompressWithPerm(
@@ -790,8 +814,7 @@ enum BLAKE3Core {
             blockBaseAddress: baseAddress.advanced(by: chunkByteOffset),
             blockLength: UInt32(blockLen),
             counter: chunkCounter,
-            flags: flags | chunkStart,
-            schedule: schedule
+            flags: flags | chunkStart
         )
 
         var blockIndex = 1
@@ -801,8 +824,7 @@ enum BLAKE3Core {
                 blockBaseAddress: baseAddress.advanced(by: chunkByteOffset + blockIndex * blockLen),
                 blockLength: UInt32(blockLen),
                 counter: chunkCounter,
-                flags: flags,
-                schedule: schedule
+                flags: flags
             )
             blockIndex += 1
         }
@@ -811,8 +833,7 @@ enum BLAKE3Core {
             blockBaseAddress: baseAddress.advanced(by: chunkByteOffset + 15 * blockLen),
             blockLength: UInt32(blockLen),
             counter: chunkCounter,
-            flags: flags | chunkEnd,
-            schedule: schedule
+            flags: flags | chunkEnd
         )
         return cv
     }
@@ -875,40 +896,36 @@ enum BLAKE3Core {
         let fullChunkCount = input.count / chunkLen
         let inputBytes = SendableRawBuffer(baseAddress: baseAddress, count: input.count)
 
-        withMessageSchedule { schedule in
-            output.withUnsafeMutableBufferPointer { outputBuffer in
-                let outputStorage = SendableCVStorage(baseAddress: outputBuffer.baseAddress!)
-                if workerCount == 1 {
+        output.withUnsafeMutableBufferPointer { outputBuffer in
+            let outputStorage = SendableCVStorage(baseAddress: outputBuffer.baseAddress!)
+            if workerCount == 1 {
+                writeChunkChainingValueRange(
+                    start: 0,
+                    end: chunkCount,
+                    fullChunkCount: fullChunkCount,
+                    baseChunkCounter: baseChunkCounter,
+                    inputBytes: inputBytes,
+                    key: key,
+                    flags: flags,
+                    output: outputStorage
+                )
+            } else {
+                parallelPerform(iterations: workerCount, scheduler: scheduler) { workerIndex in
+                    let start = workerIndex * chunksPerWorker
+                    let end = min(chunkCount, start + chunksPerWorker)
+                    guard start < end else {
+                        return
+                    }
                     writeChunkChainingValueRange(
-                        start: 0,
-                        end: chunkCount,
+                        start: start,
+                        end: end,
                         fullChunkCount: fullChunkCount,
                         baseChunkCounter: baseChunkCounter,
                         inputBytes: inputBytes,
                         key: key,
                         flags: flags,
-                        schedule: schedule,
                         output: outputStorage
                     )
-                } else {
-                    parallelPerform(iterations: workerCount, scheduler: scheduler) { workerIndex in
-                        let start = workerIndex * chunksPerWorker
-                        let end = min(chunkCount, start + chunksPerWorker)
-                        guard start < end else {
-                            return
-                        }
-                        writeChunkChainingValueRange(
-                            start: start,
-                            end: end,
-                            fullChunkCount: fullChunkCount,
-                            baseChunkCounter: baseChunkCounter,
-                            inputBytes: inputBytes,
-                            key: key,
-                            flags: flags,
-                            schedule: schedule,
-                            output: outputStorage
-                        )
-                    }
                 }
             }
         }
@@ -922,7 +939,6 @@ enum BLAKE3Core {
         inputBytes: SendableRawBuffer,
         key: ChainingValue,
         flags: UInt32,
-        schedule: SendableMessageSchedule,
         output: SendableCVStorage
     ) {
         var chunkIndex = start
@@ -947,8 +963,7 @@ enum BLAKE3Core {
                             chunkByteOffset: offset,
                             chunkCounter: UInt64(baseChunkCounter + chunkIndex),
                             key: key,
-                            flags: flags,
-                            schedule: schedule
+                            flags: flags
                         ),
                         at: chunkIndex
                     )
@@ -1107,6 +1122,12 @@ enum BLAKE3Core {
         return max(1, min(workers, workItems))
     }
 
+    static func defaultScheduler(forByteCount byteCount: Int, maxWorkers: Int?) -> ParallelScheduler? {
+        maxWorkers == nil && byteCount >= persistentSchedulerMinBytes
+            ? defaultParallelScheduler
+            : nil
+    }
+
     static func normalizedParallelWorkerCount(_ requested: Int?) -> Int {
         max(1, requested ?? defaultParallelWorkerCount)
     }
@@ -1237,11 +1258,8 @@ enum BLAKE3Core {
         blockBaseAddress: UnsafeRawPointer,
         blockLength: UInt32,
         counter: UInt64,
-        flags: UInt32,
-        schedule: SendableMessageSchedule
+        flags: UInt32
     ) -> ChainingValue {
-        // Pointer-indexed scheduling benchmarks slower in Swift; keep the hoisted handle without giving up unrolled rounds.
-        _ = schedule
         let state = compressedState(
             cv: cv,
             blockWords: loadFullBlockWords(baseAddress: blockBaseAddress),

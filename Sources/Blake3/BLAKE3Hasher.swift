@@ -64,20 +64,17 @@ private final class BLAKE3HasherStorage: @unchecked Sendable {
         }
 
         if input.count - offset > BLAKE3Core.chunkLen {
-            BLAKE3Core.withMessageSchedule { schedule in
-                while input.count - offset > BLAKE3Core.chunkLen {
-                    appendChunkCV(
-                        BLAKE3Core.blake3ProcessFullChunk(
-                            baseAddress: baseAddress,
-                            chunkByteOffset: offset,
-                            chunkCounter: cvStack.finalizedChunkCount,
-                            key: key,
-                            flags: flags,
-                            schedule: schedule
-                        )
+            while input.count - offset > BLAKE3Core.chunkLen {
+                appendChunkCV(
+                    BLAKE3Core.blake3ProcessFullChunk(
+                        baseAddress: baseAddress,
+                        chunkByteOffset: offset,
+                        chunkCounter: cvStack.finalizedChunkCount,
+                        key: key,
+                        flags: flags
                     )
-                    offset += BLAKE3Core.chunkLen
-                }
+                )
+                offset += BLAKE3Core.chunkLen
             }
         }
 
@@ -182,16 +179,13 @@ private final class BLAKE3HasherStorage: @unchecked Sendable {
     private func appendCurrentChunkCV() {
         precondition(chunkBuffer.count == BLAKE3Core.chunkLen)
         let cv = chunkBuffer.withUnsafeBytes { raw in
-            BLAKE3Core.withMessageSchedule { schedule in
-                BLAKE3Core.blake3ProcessFullChunk(
-                    baseAddress: raw.baseAddress!,
-                    chunkByteOffset: 0,
-                    chunkCounter: cvStack.finalizedChunkCount,
-                    key: key,
-                    flags: flags,
-                    schedule: schedule
-                )
-            }
+            BLAKE3Core.blake3ProcessFullChunk(
+                baseAddress: raw.baseAddress!,
+                chunkByteOffset: 0,
+                chunkCounter: cvStack.finalizedChunkCount,
+                key: key,
+                flags: flags
+            )
         }
         appendChunkCV(cv)
         chunkBuffer.removeAll(keepingCapacity: true)

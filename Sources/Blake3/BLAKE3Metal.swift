@@ -19,7 +19,7 @@ public enum BLAKE3Metal {
     }
 
     /// Default byte threshold for automatic GPU selection.
-    public static let defaultMinimumGPUByteCount = 16 * 1024 * 1024
+    public static let defaultMinimumGPUByteCount = 32 * 1024 * 1024
 
     /// Default number of pooled resources used by async Metal helpers.
     public static let defaultAsyncInflightCommandCount = 3

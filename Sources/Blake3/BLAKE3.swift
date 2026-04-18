@@ -211,9 +211,7 @@ public enum BLAKE3 {
         maxWorkers: Int? = nil
     ) -> Digest {
         var workspace = BLAKE3Core.Workspace()
-        let scheduler = maxWorkers == nil && input.count >= BLAKE3Core.persistentSchedulerMinBytes
-            ? BLAKE3Core.defaultParallelScheduler
-            : nil
+        let scheduler = BLAKE3Core.defaultScheduler(forByteCount: input.count, maxWorkers: maxWorkers)
         return Digest(output: BLAKE3Core.rootOutputParallel(
             input,
             key: BLAKE3Core.iv,
@@ -409,7 +407,7 @@ private struct BLAKE3DefaultHashConfiguration: Sendable {
         let metalMinimumByteCount = environment["BLAKE3_SWIFT_METAL_MIN_BYTES"]
             .flatMap { Int($0) }
             .map { max(0, $0) }
-            ?? (16 * 1024 * 1024)
+            ?? (32 * 1024 * 1024)
 
         return Self(
             backendPolicy: backendPolicy,
