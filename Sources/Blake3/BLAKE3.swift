@@ -97,6 +97,44 @@ public enum BLAKE3 {
         }
     }
 
+    /// Hashes contiguous input and returns `outputByteCount` BLAKE3 output bytes.
+    ///
+    /// Use this for BLAKE3's extendable-output mode when more than the standard 32-byte digest is needed.
+    public static func hash(
+        _ input: some ContiguousBytes,
+        outputByteCount: Int
+    ) throws -> [UInt8] {
+        try input.withUnsafeBytes { raw in
+            try hash(raw, outputByteCount: outputByteCount)
+        }
+    }
+
+    /// Hashes raw input and returns `outputByteCount` BLAKE3 output bytes.
+    ///
+    /// The 32-byte case uses the default backend policy. Longer output is expanded through the CPU
+    /// root-output path because Metal kernels produce the standard digest.
+    public static func hash(
+        _ input: UnsafeRawBufferPointer,
+        outputByteCount: Int
+    ) throws -> [UInt8] {
+        try validateOutputByteCount(outputByteCount)
+        if outputByteCount == 0 {
+            return []
+        }
+        if outputByteCount == digestByteCount {
+            return hash(input).bytes
+        }
+
+        return rootBytes(
+            input,
+            key: BLAKE3Core.iv,
+            flags: 0,
+            mode: .parallel(maxWorkers: nil),
+            outputByteCount: outputByteCount,
+            wipingWorkspace: false
+        )
+    }
+
     /// Hashes contiguous input using the fastest CPU-only one-shot path.
     ///
     /// This bypasses the default Metal dispatcher and is useful for benchmark baselines and hosts where
@@ -190,19 +228,42 @@ public enum BLAKE3 {
         input: some ContiguousBytes
     ) throws -> Digest {
         try key.withUnsafeBytes { keyBytes in
-            guard keyBytes.count == keyByteCount else {
-                throw BLAKE3Error.invalidKeyLength(
-                    expected: keyByteCount,
-                    actual: keyBytes.count
-                )
+            try withValidatedKeyWords(keyBytes) { keyWords in
+                input.withUnsafeBytes { inputBytes in
+                    rootDigest(
+                        inputBytes,
+                        key: keyWords,
+                        flags: BLAKE3Core.keyedHash,
+                        mode: .serial,
+                        wipingWorkspace: true
+                    )
+                }
             }
-            let keyWords = BLAKE3Core.keyedWords(keyBytes)
-            return input.withUnsafeBytes { inputBytes in
-                Digest(output: BLAKE3Core.rootOutputDefault(
-                    inputBytes,
-                    key: keyWords,
-                    flags: BLAKE3Core.keyedHash
-                ))
+        }
+    }
+
+    /// Computes `outputByteCount` bytes of BLAKE3 keyed-hash output.
+    ///
+    /// `key` must be exactly ``keyByteCount`` bytes. Use the 32-byte ``keyedHash(key:input:)`` overload
+    /// when a fixed-size digest is required.
+    public static func keyedHash(
+        key: some ContiguousBytes,
+        input: some ContiguousBytes,
+        outputByteCount: Int
+    ) throws -> [UInt8] {
+        try validateOutputByteCount(outputByteCount)
+        return try key.withUnsafeBytes { keyBytes in
+            try withValidatedKeyWords(keyBytes) { keyWords in
+                input.withUnsafeBytes { inputBytes in
+                    rootBytes(
+                        inputBytes,
+                        key: keyWords,
+                        flags: BLAKE3Core.keyedHash,
+                        mode: .serial,
+                        outputByteCount: outputByteCount,
+                        wipingWorkspace: true
+                    )
+                }
             }
         }
     }
@@ -215,22 +276,41 @@ public enum BLAKE3 {
         input: some ContiguousBytes
     ) throws -> Digest {
         try key.withUnsafeBytes { keyBytes in
-            guard keyBytes.count == keyByteCount else {
-                throw BLAKE3Error.invalidKeyLength(
-                    expected: keyByteCount,
-                    actual: keyBytes.count
-                )
+            try withValidatedKeyWords(keyBytes) { keyWords in
+                input.withUnsafeBytes { inputBytes in
+                    rootDigest(
+                        inputBytes,
+                        key: keyWords,
+                        flags: BLAKE3Core.keyedHash,
+                        mode: .parallel(maxWorkers: nil),
+                        wipingWorkspace: true
+                    )
+                }
             }
-            let keyWords = BLAKE3Core.keyedWords(keyBytes)
-            return input.withUnsafeBytes { inputBytes in
-                var workspace = BLAKE3Core.Workspace()
-                return Digest(output: BLAKE3Core.rootOutputParallel(
-                    inputBytes,
-                    key: keyWords,
-                    flags: BLAKE3Core.keyedHash,
-                    maxWorkers: nil,
-                    workspace: &workspace
-                ))
+        }
+    }
+
+    /// Computes `outputByteCount` bytes of BLAKE3 keyed-hash output with CPU parallelism.
+    ///
+    /// `key` must be exactly ``keyByteCount`` bytes.
+    public static func keyedHashParallel(
+        key: some ContiguousBytes,
+        input: some ContiguousBytes,
+        outputByteCount: Int
+    ) throws -> [UInt8] {
+        try validateOutputByteCount(outputByteCount)
+        return try key.withUnsafeBytes { keyBytes in
+            try withValidatedKeyWords(keyBytes) { keyWords in
+                input.withUnsafeBytes { inputBytes in
+                    rootBytes(
+                        inputBytes,
+                        key: keyWords,
+                        flags: BLAKE3Core.keyedHash,
+                        mode: .parallel(maxWorkers: nil),
+                        outputByteCount: outputByteCount,
+                        wipingWorkspace: true
+                    )
+                }
             }
         }
     }
@@ -243,19 +323,25 @@ public enum BLAKE3 {
         material: some ContiguousBytes,
         outputByteCount: Int = BLAKE3.digestByteCount
     ) throws -> [UInt8] {
-        guard outputByteCount >= 0 else {
-            throw BLAKE3Error.invalidOutputLength(outputByteCount)
+        try validateOutputByteCount(outputByteCount)
+        if outputByteCount == 0 {
+            return []
         }
 
         let contextBytes = Array(context.utf8)
         return contextBytes.withUnsafeBytes { contextRaw in
-            let contextKey = BLAKE3Core.deriveKeyContextKey(contextRaw)
+            var contextKey = BLAKE3Core.deriveKeyContextKey(contextRaw)
+            defer {
+                BLAKE3Core.secureWipe(&contextKey)
+            }
             return material.withUnsafeBytes { materialRaw in
-                BLAKE3Core.hash(
+                rootBytes(
                     materialRaw,
                     key: contextKey,
                     flags: BLAKE3Core.deriveKeyMaterial,
-                    outputByteCount: outputByteCount
+                    mode: .serial,
+                    outputByteCount: outputByteCount,
+                    wipingWorkspace: true
                 )
             }
         }
@@ -269,19 +355,25 @@ public enum BLAKE3 {
         material: some ContiguousBytes,
         outputByteCount: Int = BLAKE3.digestByteCount
     ) throws -> [UInt8] {
-        guard outputByteCount >= 0 else {
-            throw BLAKE3Error.invalidOutputLength(outputByteCount)
+        try validateOutputByteCount(outputByteCount)
+        if outputByteCount == 0 {
+            return []
         }
 
         let contextBytes = Array(context.utf8)
         return contextBytes.withUnsafeBytes { contextRaw in
-            let contextKey = BLAKE3Core.deriveKeyContextKey(contextRaw)
+            var contextKey = BLAKE3Core.deriveKeyContextKey(contextRaw)
+            defer {
+                BLAKE3Core.secureWipe(&contextKey)
+            }
             return material.withUnsafeBytes { materialRaw in
-                BLAKE3Core.hashParallel(
+                rootBytes(
                     materialRaw,
                     key: contextKey,
                     flags: BLAKE3Core.deriveKeyMaterial,
-                    outputByteCount: outputByteCount
+                    mode: .parallel(maxWorkers: nil),
+                    outputByteCount: outputByteCount,
+                    wipingWorkspace: true
                 )
             }
         }
@@ -335,8 +427,105 @@ private struct BLAKE3DefaultHashConfiguration: Sendable {
     }
 }
 
+private enum BLAKE3RootOutputMode {
+    case serial
+    case parallel(maxWorkers: Int?)
+}
+
 private extension BLAKE3 {
     static let defaultHashConfiguration = BLAKE3DefaultHashConfiguration.fromEnvironment()
+
+    @inline(__always)
+    static func validateOutputByteCount(_ outputByteCount: Int) throws {
+        guard outputByteCount >= 0 else {
+            throw BLAKE3Error.invalidOutputLength(outputByteCount)
+        }
+    }
+
+    @inline(__always)
+    static func withValidatedKeyWords<R>(
+        _ keyBytes: UnsafeRawBufferPointer,
+        _ body: (BLAKE3Core.ChainingValue) throws -> R
+    ) throws -> R {
+        guard keyBytes.count == keyByteCount else {
+            throw BLAKE3Error.invalidKeyLength(
+                expected: keyByteCount,
+                actual: keyBytes.count
+            )
+        }
+
+        var keyWords = BLAKE3Core.keyedWords(keyBytes)
+        defer {
+            BLAKE3Core.secureWipe(&keyWords)
+        }
+        return try body(keyWords)
+    }
+
+    @inline(__always)
+    static func rootDigest(
+        _ input: UnsafeRawBufferPointer,
+        key: BLAKE3Core.ChainingValue,
+        flags: UInt32,
+        mode: BLAKE3RootOutputMode,
+        wipingWorkspace: Bool
+    ) -> Digest {
+        var workspace = BLAKE3Core.Workspace()
+        defer {
+            workspace.reset(keepingCapacity: false, wiping: wipingWorkspace)
+        }
+        return Digest(output: rootOutput(input, key: key, flags: flags, mode: mode, workspace: &workspace))
+    }
+
+    @inline(__always)
+    static func rootBytes(
+        _ input: UnsafeRawBufferPointer,
+        key: BLAKE3Core.ChainingValue,
+        flags: UInt32,
+        mode: BLAKE3RootOutputMode,
+        outputByteCount: Int,
+        wipingWorkspace: Bool
+    ) -> [UInt8] {
+        guard outputByteCount > 0 else {
+            return []
+        }
+
+        var workspace = BLAKE3Core.Workspace()
+        defer {
+            workspace.reset(keepingCapacity: false, wiping: wipingWorkspace)
+        }
+        let output = rootOutput(input, key: key, flags: flags, mode: mode, workspace: &workspace)
+        if outputByteCount == digestByteCount {
+            return Digest(output: output).bytes
+        }
+        return output.rootBytes(byteCount: outputByteCount)
+    }
+
+    @inline(__always)
+    static func rootOutput(
+        _ input: UnsafeRawBufferPointer,
+        key: BLAKE3Core.ChainingValue,
+        flags: UInt32,
+        mode: BLAKE3RootOutputMode,
+        workspace: inout BLAKE3Core.Workspace
+    ) -> BLAKE3Core.Output {
+        switch mode {
+        case .serial:
+            return BLAKE3Core.rootOutputSerial(
+                input,
+                key: key,
+                flags: flags,
+                workspace: &workspace
+            )
+        case let .parallel(maxWorkers):
+            return BLAKE3Core.rootOutputParallel(
+                input,
+                key: key,
+                flags: flags,
+                maxWorkers: maxWorkers,
+                workspace: &workspace
+            )
+        }
+    }
 
     static func shouldUseMetalForDefaultHash(byteCount: Int) -> Bool {
         #if canImport(Metal)

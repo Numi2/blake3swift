@@ -1,7 +1,10 @@
 import Foundation
+#if canImport(CryptoKit)
+import CryptoKit
+#endif
 
-private final class BLAKE3HasherStorage {
-    let key: BLAKE3Core.ChainingValue
+private final class BLAKE3HasherStorage: @unchecked Sendable {
+    private var key: BLAKE3Core.ChainingValue
     let flags: UInt32
     private var cvStack: BLAKE3Core.CVStack
     private var chunkBuffer: [UInt8]
@@ -26,6 +29,13 @@ private final class BLAKE3HasherStorage {
 
     func copy() -> BLAKE3HasherStorage {
         BLAKE3HasherStorage(copying: self)
+    }
+
+    deinit {
+        reset(keepingCapacity: false, wiping: containsSecretState)
+        if containsSecretState {
+            BLAKE3Core.secureWipe(&key)
+        }
     }
 
     func update(_ input: UnsafeRawBufferPointer) {
@@ -137,14 +147,23 @@ private final class BLAKE3HasherStorage {
         }
     }
 
-    func reset() {
-        cvStack.reset(keepingCapacity: true)
-        chunkBuffer.removeAll(keepingCapacity: true)
-        parallelChunkCVs.removeAll(keepingCapacity: true)
+    func reset(keepingCapacity: Bool = true, wiping: Bool? = nil) {
+        let shouldWipe = wiping ?? containsSecretState
+        cvStack.reset(keepingCapacity: keepingCapacity, wiping: shouldWipe)
+        if shouldWipe {
+            BLAKE3Core.secureWipeBytes(&chunkBuffer)
+            BLAKE3Core.secureWipeChainingValues(&parallelChunkCVs)
+        }
+        chunkBuffer.removeAll(keepingCapacity: keepingCapacity)
+        parallelChunkCVs.removeAll(keepingCapacity: keepingCapacity)
     }
 
     var retainedTreeNodeCount: Int {
         cvStack.retainedTreeNodeCount(hasCurrentChunk: !chunkBuffer.isEmpty)
+    }
+
+    private var containsSecretState: Bool {
+        flags != 0
     }
 
     func rootOutput() -> BLAKE3Core.Output {
@@ -215,8 +234,12 @@ public extension BLAKE3 {
                         actual: keyBytes.count
                     )
                 }
+                var keyWords = BLAKE3Core.keyedWords(keyBytes)
+                defer {
+                    BLAKE3Core.secureWipe(&keyWords)
+                }
                 return BLAKE3HasherStorage(
-                    key: BLAKE3Core.keyedWords(keyBytes),
+                    key: keyWords,
                     flags: BLAKE3Core.keyedHash
                 )
             }
@@ -227,8 +250,11 @@ public extension BLAKE3 {
         /// `context` is encoded as UTF-8 exactly.
         public init(deriveKeyContext context: String) {
             let contextBytes = Array(context.utf8)
-            let contextKey = contextBytes.withUnsafeBytes { raw in
+            var contextKey = contextBytes.withUnsafeBytes { raw in
                 BLAKE3Core.deriveKeyContextKey(raw)
+            }
+            defer {
+                BLAKE3Core.secureWipe(&contextKey)
             }
             self.storage = BLAKE3HasherStorage(
                 key: contextKey,
@@ -332,3 +358,19 @@ public extension BLAKE3 {
         }
     }
 }
+
+#if canImport(CryptoKit)
+extension BLAKE3.Hasher: CryptoKit.HashFunction {
+    public static var blockByteCount: Int {
+        BLAKE3.blockByteCount
+    }
+
+    public static var byteCount: Int {
+        BLAKE3.digestByteCount
+    }
+
+    public mutating func update(bufferPointer: UnsafeRawBufferPointer) {
+        update(bufferPointer)
+    }
+}
+#endif

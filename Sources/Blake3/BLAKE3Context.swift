@@ -22,7 +22,7 @@ public extension BLAKE3 {
     final class Context: @unchecked Sendable {
         public let maxWorkers: Int
 
-        private let key: BLAKE3Core.ChainingValue
+        private var key: BLAKE3Core.ChainingValue
         private let flags: UInt32
         private let lock = NSLock()
         private let scheduler: BLAKE3Core.ParallelScheduler
@@ -50,7 +50,11 @@ public extension BLAKE3 {
                         actual: keyBytes.count
                     )
                 }
-                return BLAKE3Core.keyedWords(keyBytes)
+                var keyWords = BLAKE3Core.keyedWords(keyBytes)
+                defer {
+                    BLAKE3Core.secureWipe(&keyWords)
+                }
+                return keyWords
             }
             self.flags = BLAKE3Core.keyedHash
             self.scheduler = BLAKE3Core.ParallelScheduler(workerCount: self.maxWorkers)
@@ -62,11 +66,20 @@ public extension BLAKE3 {
         public init(deriveKeyContext context: String, maxWorkers: Int? = nil) {
             self.maxWorkers = BLAKE3Core.normalizedParallelWorkerCount(maxWorkers)
             let contextBytes = Array(context.utf8)
-            self.key = contextBytes.withUnsafeBytes { raw in
+            var contextKey = contextBytes.withUnsafeBytes { raw in
                 BLAKE3Core.deriveKeyContextKey(raw)
             }
+            self.key = contextKey
+            BLAKE3Core.secureWipe(&contextKey)
             self.flags = BLAKE3Core.deriveKeyMaterial
             self.scheduler = BLAKE3Core.ParallelScheduler(workerCount: self.maxWorkers)
+        }
+
+        deinit {
+            workspace.reset(keepingCapacity: false, wiping: containsSecretState)
+            if containsSecretState {
+                BLAKE3Core.secureWipe(&key)
+            }
         }
 
         /// Hashes contiguous input using this context's reusable workspace.
@@ -123,8 +136,12 @@ public extension BLAKE3 {
         /// when the context should release memory after unusually large inputs.
         public func resetWorkspace(keepingCapacity: Bool = true) {
             lock.lock()
-            workspace.reset(keepingCapacity: keepingCapacity)
+            workspace.reset(keepingCapacity: keepingCapacity, wiping: containsSecretState)
             lock.unlock()
+        }
+
+        private var containsSecretState: Bool {
+            flags != 0
         }
     }
 }

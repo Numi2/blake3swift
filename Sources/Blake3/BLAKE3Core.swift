@@ -1,3 +1,6 @@
+#if canImport(Darwin)
+import Darwin
+#endif
 import Dispatch
 import Foundation
 
@@ -79,7 +82,11 @@ enum BLAKE3Core {
         var chunkCVs: [ChainingValue] = []
         var scratchCVs: [ChainingValue] = []
 
-        mutating func reset(keepingCapacity: Bool = true) {
+        mutating func reset(keepingCapacity: Bool = true, wiping: Bool = false) {
+            if wiping {
+                BLAKE3Core.secureWipeChainingValues(&chunkCVs)
+                BLAKE3Core.secureWipeChainingValues(&scratchCVs)
+            }
             chunkCVs.removeAll(keepingCapacity: keepingCapacity)
             scratchCVs.removeAll(keepingCapacity: keepingCapacity)
         }
@@ -211,7 +218,12 @@ enum BLAKE3Core {
             entries.reserveCapacity(UInt64.bitWidth)
         }
 
-        mutating func reset(keepingCapacity: Bool = true) {
+        mutating func reset(keepingCapacity: Bool = true, wiping: Bool = false) {
+            if wiping {
+                entries.withUnsafeMutableBytes { raw in
+                    BLAKE3Core.secureWipe(raw)
+                }
+            }
             entries.removeAll(keepingCapacity: keepingCapacity)
             finalizedChunkCount = 0
         }
@@ -439,6 +451,50 @@ enum BLAKE3Core {
             load32(key, at: 24),
             load32(key, at: 28)
         )
+    }
+
+    @inline(never)
+    static func secureWipe(_ raw: UnsafeMutableRawBufferPointer) {
+        guard raw.count > 0,
+              let baseAddress = raw.baseAddress
+        else {
+            return
+        }
+
+        #if canImport(Darwin)
+        _ = memset_s(baseAddress, raw.count, 0, raw.count)
+        #else
+        for index in raw.indices {
+            raw[index] = 0
+        }
+        #endif
+    }
+
+    @inline(never)
+    static func secureWipe(_ value: inout ChainingValue) {
+        withUnsafeMutableBytes(of: &value) { raw in
+            secureWipe(raw)
+        }
+    }
+
+    @inline(never)
+    static func secureWipeBytes(_ bytes: inout [UInt8]) {
+        guard !bytes.isEmpty else {
+            return
+        }
+        bytes.withUnsafeMutableBytes { raw in
+            secureWipe(raw)
+        }
+    }
+
+    @inline(never)
+    static func secureWipeChainingValues(_ values: inout [ChainingValue]) {
+        guard !values.isEmpty else {
+            return
+        }
+        values.withUnsafeMutableBytes { raw in
+            secureWipe(raw)
+        }
     }
 
     static func chainingValue(

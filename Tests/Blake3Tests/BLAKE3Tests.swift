@@ -1,5 +1,8 @@
 import XCTest
 @testable import Blake3
+#if canImport(CryptoKit)
+import CryptoKit
+#endif
 #if canImport(Metal)
 import Metal
 #endif
@@ -48,6 +51,11 @@ final class BLAKE3Tests: XCTestCase {
                 "default hash mismatch for input_len=\(testCase.inputLength)"
             )
             XCTAssertEqual(
+                try BLAKE3.hash(input, outputByteCount: expectedHash.count),
+                expectedHash,
+                "default XOF convenience mismatch for input_len=\(testCase.inputLength)"
+            )
+            XCTAssertEqual(
                 BLAKE3.hashParallel(input).bytes,
                 Array(expectedHash.prefix(BLAKE3.digestByteCount)),
                 "parallel hash mismatch for input_len=\(testCase.inputLength)"
@@ -58,9 +66,19 @@ final class BLAKE3Tests: XCTestCase {
                 "keyed hash mismatch for input_len=\(testCase.inputLength)"
             )
             XCTAssertEqual(
+                try BLAKE3.keyedHash(key: key, input: input, outputByteCount: expectedKeyedHash.count),
+                expectedKeyedHash,
+                "keyed XOF convenience mismatch for input_len=\(testCase.inputLength)"
+            )
+            XCTAssertEqual(
                 try BLAKE3.keyedHashParallel(key: key, input: input).bytes,
                 Array(expectedKeyedHash.prefix(BLAKE3.digestByteCount)),
                 "parallel keyed hash mismatch for input_len=\(testCase.inputLength)"
+            )
+            XCTAssertEqual(
+                try BLAKE3.keyedHashParallel(key: key, input: input, outputByteCount: expectedKeyedHash.count),
+                expectedKeyedHash,
+                "parallel keyed XOF convenience mismatch for input_len=\(testCase.inputLength)"
             )
             XCTAssertEqual(
                 try BLAKE3.deriveKey(
@@ -412,8 +430,35 @@ final class BLAKE3Tests: XCTestCase {
                     "derived streaming XOF seek mismatch for byteCount=\(size), splitPattern=\(splitPattern)"
                 )
             }
+
+            var reusableKeyedStream = try BLAKE3.Hasher(key: key)
+            reusableKeyedStream.update(input)
+            XCTAssertEqual(reusableKeyedStream.finalize(), keyedDigest)
+            reusableKeyedStream.reset()
+            reusableKeyedStream.update(input)
+            XCTAssertEqual(
+                reusableKeyedStream.finalize(),
+                keyedDigest,
+                "keyed reset should preserve reusable keyed state for byteCount=\(size)"
+            )
         }
     }
+
+    #if canImport(CryptoKit)
+    func testCryptoKitHashFunctionConformance() {
+        let input = deterministicInput(byteCount: 4_097)
+        var hasher = BLAKE3.Hasher()
+
+        hasher.update(data: Data(input[..<257]))
+        input[257...].withUnsafeBytes { raw in
+            hasher.update(bufferPointer: raw)
+        }
+
+        XCTAssertEqual(BLAKE3.Hasher.blockByteCount, BLAKE3.blockByteCount)
+        XCTAssertEqual(BLAKE3.Hasher.byteCount, BLAKE3.digestByteCount)
+        XCTAssertEqual(hasher.finalize(), BLAKE3.hash(input))
+    }
+    #endif
 
     func testCPUContextMatchesOneShotAcrossModes() throws {
         let context = BLAKE3.Context()
@@ -501,6 +546,22 @@ final class BLAKE3Tests: XCTestCase {
 
         XCTAssertThrowsError(try BLAKE3.deriveKey(context: "context", material: [UInt8](), outputByteCount: -1)) { error in
             XCTAssertEqual(error as? BLAKE3Error, .invalidOutputLength(-1))
+        }
+
+        XCTAssertThrowsError(try BLAKE3.hash([UInt8](), outputByteCount: -1)) { error in
+            XCTAssertEqual(error as? BLAKE3Error, .invalidOutputLength(-1))
+        }
+
+        XCTAssertThrowsError(try BLAKE3.keyedHash(key: [UInt8](repeating: 0, count: BLAKE3.keyByteCount), input: [UInt8](), outputByteCount: -1)) { error in
+            XCTAssertEqual(error as? BLAKE3Error, .invalidOutputLength(-1))
+        }
+
+        let key = [UInt8](repeating: 7, count: BLAKE3.keyByteCount)
+        XCTAssertEqual(try BLAKE3.hash([1, 2, 3], outputByteCount: 0), [])
+        XCTAssertEqual(try BLAKE3.keyedHash(key: key, input: [1, 2, 3], outputByteCount: 0), [])
+        XCTAssertEqual(try BLAKE3.deriveKey(context: "context", material: [1, 2, 3], outputByteCount: 0), [])
+        XCTAssertThrowsError(try BLAKE3.keyedHash(key: [UInt8](), input: [1, 2, 3], outputByteCount: 0)) { error in
+            XCTAssertEqual(error as? BLAKE3Error, .invalidKeyLength(expected: BLAKE3.keyByteCount, actual: 0))
         }
     }
 
