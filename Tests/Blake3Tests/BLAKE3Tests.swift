@@ -885,6 +885,90 @@ final class BLAKE3Tests: XCTestCase {
         }
     }
 
+    func testMetalFusedTileKernelsProduceSubtreeChainingValues() throws {
+        guard BLAKE3Metal.isAvailable else {
+            throw XCTSkip("Metal is not available on this host.")
+        }
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let pipelines = try BLAKE3MetalPipelineCache.shared.pipelines(device: device)
+        let commandQueue = try XCTUnwrap(device.makeCommandQueue())
+        let cases: [(Int, MTLComputePipelineState)] = [
+            (128, pipelines.chunkTile128CVs),
+            (256, pipelines.chunkTile256CVs),
+            (512, pipelines.chunkTile512CVs),
+            (1024, pipelines.chunkTile1024CVs)
+        ]
+
+        var testedCaseCount = 0
+        for (tileChunkCount, pipeline) in cases {
+            let scratchByteCount = tileChunkCount * BLAKE3.digestByteCount
+            let executionWidth = max(1, pipeline.threadExecutionWidth)
+            guard tileChunkCount <= pipeline.maxTotalThreadsPerThreadgroup,
+                  scratchByteCount <= device.maxThreadgroupMemoryLength,
+                  tileChunkCount.isMultiple(of: executionWidth) else {
+                continue
+            }
+            testedCaseCount += 1
+
+            let input = deterministicInput(byteCount: tileChunkCount * BLAKE3.chunkByteCount)
+            let baseChunkCounter = UInt64(13)
+            let inputBuffer = try XCTUnwrap(input.withUnsafeBytes { raw in
+                device.makeBuffer(bytes: raw.baseAddress!, length: raw.count, options: .storageModeShared)
+            })
+            XCTAssertTrue(Int(bitPattern: inputBuffer.contents()).isMultiple(of: MemoryLayout<UInt32>.stride))
+            let outputBuffer = try XCTUnwrap(device.makeBuffer(length: BLAKE3.digestByteCount, options: .storageModeShared))
+            var params = BLAKE3MetalChunkParams(
+                inputOffset: 0,
+                inputLength: UInt64(input.count),
+                baseChunkCounter: baseChunkCounter,
+                chunkCount: UInt32(tileChunkCount),
+                canLoadWords: 1
+            )
+            let paramsBuffer = try XCTUnwrap(withUnsafeBytes(of: &params) { raw in
+                device.makeBuffer(bytes: raw.baseAddress!, length: raw.count, options: .storageModeShared)
+            })
+
+            let commandBuffer = try XCTUnwrap(commandQueue.makeCommandBuffer())
+            let encoder = try XCTUnwrap(commandBuffer.makeComputeCommandEncoder())
+            encoder.setComputePipelineState(pipeline)
+            encoder.setBuffer(inputBuffer, offset: 0, index: 0)
+            encoder.setBuffer(outputBuffer, offset: 0, index: 1)
+            encoder.setBuffer(paramsBuffer, offset: 0, index: 2)
+            encoder.setThreadgroupMemoryLength(scratchByteCount, index: 0)
+            encoder.dispatchThreadgroups(
+                MTLSize(width: 1, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: tileChunkCount, height: 1, depth: 1)
+            )
+            encoder.endEncoding()
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
+            XCTAssertNil(commandBuffer.error)
+
+            let expected = input.withUnsafeBytes { raw in
+                var chunkCVs = [BLAKE3Core.ChainingValue]()
+                chunkCVs.reserveCapacity(tileChunkCount)
+                for chunkIndex in 0..<tileChunkCount {
+                    chunkCVs.append(
+                        BLAKE3Core.blake3ProcessFullChunk(
+                            baseAddress: raw.baseAddress!,
+                            chunkByteOffset: chunkIndex * BLAKE3.chunkByteCount,
+                            chunkCounter: baseChunkCounter + UInt64(chunkIndex),
+                            key: BLAKE3Core.iv,
+                            flags: 0
+                        )
+                    )
+                }
+                return BLAKE3Core.rootOutput(fromChunkCVs: chunkCVs, key: BLAKE3Core.iv, flags: 0)
+                    .chainingValue()
+            }
+            let actual = BLAKE3Core.chainingValue(
+                from: UnsafeRawBufferPointer(start: outputBuffer.contents(), count: BLAKE3.digestByteCount)
+            )
+            XCTAssertEqual(actual, expected, "fused tile subtree mismatch for tileChunkCount=\(tileChunkCount)")
+        }
+        XCTAssertGreaterThan(testedCaseCount, 0)
+    }
+
     func testMetalBufferHashSupportsUnalignedRanges() throws {
         guard BLAKE3Metal.isAvailable else {
             throw XCTSkip("Metal is not available on this host.")
@@ -1078,6 +1162,28 @@ final class BLAKE3Tests: XCTestCase {
                 "context no-copy GPU mismatch for byteCount=\(size)"
             )
         }
+    }
+
+    func testMetalNoCopyHandlesUnalignedWrappedInputBase() throws {
+        guard BLAKE3Metal.isAvailable else {
+            throw XCTSkip("Metal is not available on this host.")
+        }
+        let context = try BLAKE3Metal.makeContext()
+        let input = deterministicInput(byteCount: 2 * 1_024 * 1_024)
+        var backing = [UInt8](repeating: 0xA5, count: input.count + 1)
+        backing.replaceSubrange(1..., with: input)
+
+        let digest = try backing.withUnsafeBytes { raw in
+            try context.hash(
+                input: UnsafeRawBufferPointer(
+                    start: raw.baseAddress!.advanced(by: 1),
+                    count: input.count
+                ),
+                policy: .gpu
+            )
+        }
+
+        XCTAssertEqual(digest, BLAKE3.hash(input))
     }
 
     func testMetalAsyncHashMatchesSynchronousPaths() async throws {

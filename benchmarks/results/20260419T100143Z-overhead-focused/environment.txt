@@ -1,0 +1,24 @@
+date_utc=2026-04-19T10:06:54Z
+commit=4ebdfabc11aeb914b67ff3235ec85d1adf977249
+working_tree=dirty
+git_status= M README.md
+git_status= M Sources/Blake3/BLAKE3Metal.swift
+git_status= M Sources/Blake3/BLAKE3MetalKernel.swift
+git_status= M Tests/Blake3Tests/BLAKE3Tests.swift
+git_status= M benchmarks/README.md
+git_status= M benchmarks/run-publication.sh
+git_status= M docs/m4-metal-performance-strategy.md
+git_status=?? benchmarks/results/20260419T100143Z-overhead-focused/
+git_status=?? benchmarks/results/20260419T100143Z/
+Apple Swift version 6.3 (swiftlang-6.3.0.123.5 clang-2100.0.123.102) Target: arm64-apple-macosx26.0 
+ProductName:		macOS
+ProductVersion:		26.5
+BuildVersion:		25F5042g
+Apple M4
+Mac16,12
+performance_cores=4
+active_cpus=10
+metal_library=runtime-source
+metal_modes=resident,staged,wrapped,e2e
+sizes=256m,512m,1g
+iterations=5

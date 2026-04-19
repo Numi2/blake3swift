@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 
 SIZES="${SIZES:-16m,64m,256m,512m,1g}"
 ITERATIONS="${ITERATIONS:-8}"
-METAL_MODES="${METAL_MODES:-resident,private,e2e}"
+METAL_MODES="${METAL_MODES:-resident,private,staged,wrapped,e2e}"
 OUT_DIR="${OUT_DIR:-benchmarks/results/$(date -u +%Y%m%dT%H%M%SZ)}"
 
 mkdir -p "$OUT_DIR"
@@ -16,6 +16,14 @@ BENCHMARK_BIN="${BENCHMARK_BIN:-$ROOT_DIR/.build/release/blake3-bench}"
 {
   echo "date_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "commit=$(git rev-parse HEAD 2>/dev/null || true)"
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if [[ -n "$(git status --short)" ]]; then
+      echo "working_tree=dirty"
+      git status --short | sed 's/^/git_status=/'
+    else
+      echo "working_tree=clean"
+    fi
+  fi
   echo "swift=$(swift --version | tr '\n' ' ')"
   sw_vers 2>/dev/null || true
   sysctl -n machdep.cpu.brand_string 2>/dev/null || true

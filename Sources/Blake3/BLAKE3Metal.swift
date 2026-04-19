@@ -33,7 +33,6 @@ public enum BLAKE3Metal {
     }
     private static let wideParentReductionThreshold = 512 * 1024
     private static let quadParentReductionThreshold = 32 * 1024
-    private static let alignedFullChunkKernelMaxBytes = 64 * 1024 * 1024
     private static let combinedPrivateStagedMaxBytes = 16 * 1024 * 1024
     private static let largeGridThreadThreshold = 1024 * 1024
     private static let smallGridSIMDGroupsPerThreadgroup = 8
@@ -2139,47 +2138,42 @@ public enum BLAKE3Metal {
         parameterBuffer: MTLBuffer,
         encoder: MTLComputeCommandEncoder
     ) throws {
+        let canLoadWords = canLoadWords(buffer: buffer, range: range)
         let params = BLAKE3MetalChunkParams(
             inputOffset: UInt64(range.lowerBound),
             inputLength: UInt64(range.count),
             baseChunkCounter: 0,
-            chunkCount: UInt32(chunkCount)
+            chunkCount: UInt32(chunkCount),
+            canLoadWords: canLoadWords ? 1 : 0
         )
         copyParameter(params, into: parameterBuffer, slot: 0)
-        let tileChunkCount = fusedTileChunkCount
-        let tileByteCount = tileChunkCount * BLAKE3.chunkByteCount
-        let tilePipeline = fusedTilePipeline(
-            tileChunkCount: tileChunkCount,
+        let tilePlan = fusedTilePlan(
+            buffer: buffer,
+            range: range,
+            chunkCount: chunkCount,
+            canLoadWords: canLoadWords,
             pipelines: pipelines
         )
-        let canUseFusedTile = tileChunkCount > 0
-            && buffer.storageMode != .private
-            && range.count.isMultiple(of: tileByteCount)
-            && range.lowerBound.isMultiple(of: MemoryLayout<UInt32>.stride)
-            && chunkCount >= tileChunkCount * 2
-            && tilePipeline.map { tileChunkCount <= $0.maxTotalThreadsPerThreadgroup } == true
-            && tilePipeline.map { tileChunkCount.isMultiple(of: max(1, $0.threadExecutionWidth)) } == true
 
         var currentBuffer = cvBuffer
         var nextBuffer = scratchBuffer
         var currentCount: Int
         var parameterSlot = 1
 
-        if canUseFusedTile, let tilePipeline {
-            encoder.setComputePipelineState(tilePipeline)
+        if let tilePlan {
+            encoder.setComputePipelineState(tilePlan.pipeline)
             encoder.setBuffer(buffer, offset: 0, index: 0)
             encoder.setBuffer(cvBuffer, offset: 0, index: 1)
             encoder.setBuffer(parameterBuffer, offset: 0, index: 2)
-            encoder.setThreadgroupMemoryLength(tileChunkCount * BLAKE3.digestByteCount, index: 0)
+            encoder.setThreadgroupMemoryLength(tilePlan.chunkCount * BLAKE3.digestByteCount, index: 0)
             encoder.dispatchThreadgroups(
-                MTLSize(width: chunkCount / tileChunkCount, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: tileChunkCount, height: 1, depth: 1)
+                MTLSize(width: chunkCount / tilePlan.chunkCount, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: tilePlan.chunkCount, height: 1, depth: 1)
             )
-            currentCount = chunkCount / tileChunkCount
+            currentCount = chunkCount / tilePlan.chunkCount
         } else {
             let chunkPipeline = if range.count.isMultiple(of: BLAKE3.chunkByteCount) {
-                range.count <= alignedFullChunkKernelMaxBytes
-                    && range.lowerBound.isMultiple(of: MemoryLayout<UInt32>.stride)
+                canUseAlignedFullChunkKernel(buffer: buffer, range: range)
                     ? pipelines.chunkFullAlignedCVs
                     : pipelines.chunkFullCVs
             } else {
@@ -2287,11 +2281,11 @@ public enum BLAKE3Metal {
             inputOffset: UInt64(range.lowerBound),
             inputLength: UInt64(range.count),
             baseChunkCounter: baseChunkCounter,
-            chunkCount: UInt32(chunkCount)
+            chunkCount: UInt32(chunkCount),
+            canLoadWords: canLoadWords(buffer: buffer, range: range) ? 1 : 0
         )
         copyParameter(params, into: parameterBuffer, slot: 0)
-        let pipeline = range.count <= alignedFullChunkKernelMaxBytes
-            && range.lowerBound.isMultiple(of: MemoryLayout<UInt32>.stride)
+        let pipeline = canUseAlignedFullChunkKernel(buffer: buffer, range: range)
             ? pipelines.chunkFullAlignedCVs
             : pipelines.chunkFullCVs
 
@@ -2369,32 +2363,56 @@ public enum BLAKE3Metal {
         parameterBuffer: MTLBuffer,
         encoder: MTLComputeCommandEncoder
     ) throws -> MTLBuffer {
+        let canLoadWords = canLoadWords(buffer: buffer, range: range)
         let params = BLAKE3MetalChunkParams(
             inputOffset: UInt64(range.lowerBound),
             inputLength: UInt64(range.count),
             baseChunkCounter: baseChunkCounter,
-            chunkCount: UInt32(chunkCount)
+            chunkCount: UInt32(chunkCount),
+            canLoadWords: canLoadWords ? 1 : 0
         )
         copyParameter(params, into: parameterBuffer, slot: 0)
-        let chunkPipeline = range.count <= alignedFullChunkKernelMaxBytes
-            && range.lowerBound.isMultiple(of: MemoryLayout<UInt32>.stride)
-            ? pipelines.chunkFullAlignedCVs
-            : pipelines.chunkFullCVs
-
-        encoder.setComputePipelineState(chunkPipeline)
-        encoder.setBuffer(buffer, offset: 0, index: 0)
-        encoder.setBuffer(cvBuffer, offset: 0, index: 1)
-        encoder.setBuffer(parameterBuffer, offset: 0, index: 2)
-        dispatchThreads(
-            count: chunkCount,
-            pipeline: chunkPipeline,
-            encoder: encoder
-        )
 
         var currentBuffer = cvBuffer
         var nextBuffer = scratchBuffer
-        var currentCount = chunkCount
+        var currentCount: Int
         var parameterSlot = 1
+
+        let tilePlan = fusedTilePlan(
+            buffer: buffer,
+            range: range,
+            chunkCount: chunkCount,
+            canLoadWords: canLoadWords,
+            pipelines: pipelines
+        )
+
+        if let tilePlan {
+            encoder.setComputePipelineState(tilePlan.pipeline)
+            encoder.setBuffer(buffer, offset: 0, index: 0)
+            encoder.setBuffer(cvBuffer, offset: 0, index: 1)
+            encoder.setBuffer(parameterBuffer, offset: 0, index: 2)
+            encoder.setThreadgroupMemoryLength(tilePlan.chunkCount * BLAKE3.digestByteCount, index: 0)
+            encoder.dispatchThreadgroups(
+                MTLSize(width: chunkCount / tilePlan.chunkCount, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: tilePlan.chunkCount, height: 1, depth: 1)
+            )
+            currentCount = chunkCount / tilePlan.chunkCount
+        } else {
+            let chunkPipeline = canUseAlignedFullChunkKernel(buffer: buffer, range: range)
+                ? pipelines.chunkFullAlignedCVs
+                : pipelines.chunkFullCVs
+
+            encoder.setComputePipelineState(chunkPipeline)
+            encoder.setBuffer(buffer, offset: 0, index: 0)
+            encoder.setBuffer(cvBuffer, offset: 0, index: 1)
+            encoder.setBuffer(parameterBuffer, offset: 0, index: 2)
+            dispatchThreads(
+                count: chunkCount,
+                pipeline: chunkPipeline,
+                encoder: encoder
+            )
+            currentCount = chunkCount
+        }
 
         while currentCount > 1 {
             let parentParams = BLAKE3MetalParentParams(inputCount: UInt32(currentCount))
@@ -2443,6 +2461,54 @@ public enum BLAKE3Metal {
         slot * Context.parameterSlotStride
     }
 
+    private struct FusedTilePlan {
+        let chunkCount: Int
+        let pipeline: MTLComputePipelineState
+    }
+
+    private static func fusedTilePlan(
+        buffer: MTLBuffer,
+        range: Range<Int>,
+        chunkCount: Int,
+        canLoadWords: Bool,
+        pipelines: BLAKE3MetalPipelines
+    ) -> FusedTilePlan? {
+        let tileChunkCount = fusedTileChunkCount
+        guard tileChunkCount > 0 else {
+            return nil
+        }
+        let tileByteCount = tileChunkCount * BLAKE3.chunkByteCount
+        guard tileByteCount > 0,
+              buffer.storageMode != .private,
+              range.count.isMultiple(of: tileByteCount),
+              canLoadWords,
+              chunkCount >= tileChunkCount * 2,
+              tileChunkCount * BLAKE3.digestByteCount <= buffer.device.maxThreadgroupMemoryLength,
+              let tilePipeline = fusedTilePipeline(
+                tileChunkCount: tileChunkCount,
+                pipelines: pipelines
+              ),
+              tileChunkCount <= tilePipeline.maxTotalThreadsPerThreadgroup,
+              tileChunkCount.isMultiple(of: max(1, tilePipeline.threadExecutionWidth))
+        else {
+            return nil
+        }
+        return FusedTilePlan(chunkCount: tileChunkCount, pipeline: tilePipeline)
+    }
+
+    private static func canUseAlignedFullChunkKernel(buffer: MTLBuffer, range: Range<Int>) -> Bool {
+        canLoadWords(buffer: buffer, range: range)
+    }
+
+    private static func canLoadWords(buffer: MTLBuffer, range: Range<Int>) -> Bool {
+        let wordAlignment = MemoryLayout<UInt32>.stride
+        if buffer.storageMode == .private {
+            return range.lowerBound.isMultiple(of: wordAlignment)
+        }
+        let address = Int(bitPattern: buffer.contents()) + range.lowerBound
+        return address.isMultiple(of: wordAlignment)
+    }
+
     private static func copyParameter<T>(_ value: T, into buffer: MTLBuffer, slot: Int) {
         var value = value
         withUnsafeBytes(of: &value) { raw in
@@ -2457,10 +2523,14 @@ public enum BLAKE3Metal {
         pipelines: BLAKE3MetalPipelines
     ) -> MTLComputePipelineState? {
         switch tileChunkCount {
+        case 128:
+            pipelines.chunkTile128CVs
         case 256:
             pipelines.chunkTile256CVs
         case 512:
             pipelines.chunkTile512CVs
+        case 1024:
+            pipelines.chunkTile1024CVs
         default:
             nil
         }
@@ -2468,16 +2538,20 @@ public enum BLAKE3Metal {
 
     private static func configuredFusedTileChunkCount() -> Int {
         guard let rawValue = ProcessInfo.processInfo.environment["BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS"] else {
-            return 0
+            return 256
         }
 
         switch rawValue.lowercased() {
         case "0", "off", "false", "disabled", "none":
             return 0
+        case "128":
+            return 128
         case "256":
             return 256
         case "512":
             return 512
+        case "1024":
+            return 1024
         default:
             return 0
         }

@@ -248,7 +248,9 @@ Initial tile candidates:
 Autotune tile size. Do not assume 1024 is fastest. It may reduce dispatch count
 but hurt occupancy.
 
-Implementation note, April 18, 2026: 256- and 512-chunk fused tile kernels exist, but fused tiling is opt-in with `BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS=256` or `512`. The default is `0`, and the fused path is limited to exact full-chunk shared-memory inputs. Private buffers intentionally keep the prior global-CV reduction path on this M4 because the measured private-resident path was faster without fused tiles.
+Implementation note, April 19, 2026: 128-, 256-, 512-, and 1024-chunk fused tile kernels exist. The default is now `BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS=256` for exact full-chunk shared-memory inputs, after fixing an in-place threadgroup reduction race. Set the value to `0` to disable fused tiling, `128` to test the smaller tile, or `512`/`1024` to test larger tiles. Private buffers intentionally keep the prior global-CV reduction path on this M4 because the measured private-resident path was faster without fused tiles.
+
+April 19 follow-up sweep: 128 and 256 chunks were effectively tied for 1 GiB staged/wrapped throughput on the local M4, while 512 and 1024 were weaker in the no-copy wrapped path. Keep 256 as the conservative default because it emits half as many tile roots as 128 without losing measured throughput.
 
 ### Kernel 5: Final CV Reduction
 

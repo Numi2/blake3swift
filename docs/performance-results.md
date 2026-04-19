@@ -11,9 +11,37 @@ This file records candidate public performance data after sustained measurements
 - Record whether Metal rows used `runtime-source` or a packaged `.metallib`.
 - Do not present a single best sample as sustained throughput.
 
+## April 19, 2026 Fused Tile Overhead-Focused Run
+
+Current focused copy/no-copy overhead artifact:
+
+```sh
+benchmarks/results/20260419T100143Z-overhead-focused
+```
+
+Environment: Apple M4, Mac16,12, 10 active CPUs, macOS 26.5 build 25F5042g, Swift 6.3, runtime Metal source, working tree dirty with the fused-tile changes in this branch.
+
+The table reports median GiB/s from validated JSON. The `staged-gpu` row includes copying Swift bytes into a reused shared Metal buffer plus hashing. The `wrapped-gpu` row includes no-copy Metal buffer wrapping plus hashing. Repeated allocation/copy `e2e` rows are preserved in the artifact but are allocator-sensitive and are not used as the headline overhead claim.
+
+| Input | Official C one-shot | Swift CPU parallel | Default `BLAKE3.hash` | Metal staged GPU | Metal wrapped GPU | Metal resident GPU |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 256 MiB | 2.28 | 10.58 | 42.96 | 24.08 | 55.62 | 68.26 |
+| 512 MiB | 2.24 | 11.18 | 51.09 | 25.84 | 55.19 | 80.53 |
+| 1 GiB | 2.20 | 11.33 | 54.18 | 24.76 | 54.05 | 76.80 |
+
+Follow-up experiments kept out of the default:
+
+- `BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS=128` was effectively tied with the 256 default on 1 GiB staged/wrapped timings, but emits twice as many tile roots.
+- `512` and `1024` fused tiles are correct and available as tuning options, but were weaker in the no-copy wrapped path on the local M4.
+- A CPU-finalize-after-fused-tiles prototype did not beat the all-GPU finalization path.
+- Lowering the 4-way parent reduction threshold from 32K CVs to 1K CVs regressed large-buffer throughput.
+- Adding `madvise` read-ahead hints to mmap file hashing regressed the local Metal file benchmark and was removed.
+
+A full all-mode/file fixture was also generated at `benchmarks/results/20260419T100143Z`. Its JSON validated, but late 1 GiB `e2e` and file rows were noisy after all large modes ran back-to-back.
+
 ## April 19, 2026 Head Publication Run
 
-Current checked-in publication artifact:
+Prior full publication artifact:
 
 ```sh
 OUT_DIR=benchmarks/results/20260419T074508Z-head-publication benchmarks/run-publication.sh

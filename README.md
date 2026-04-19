@@ -6,29 +6,19 @@ The project is performance-focused, but correctness comes first: the Swift imple
 
 ## Latest Results
 
-Local release benchmarks on Apple M4 are used to tune the Swift CPU and Metal backends and to keep correctness checks attached to every timing row. These numbers are from `benchmarks/results/20260419T074508Z-head-publication` at commit `a210ae4`, with JSON validation enabled.
+Local release benchmarks on Apple M4 are used to tune the Swift CPU and Metal backends and to keep correctness checks attached to every timing row. These numbers are from the focused copy/no-copy overhead artifact `benchmarks/results/20260419T100143Z-overhead-focused`, with JSON validation enabled.
 
-The official C row is a vendored in-process one-shot comparison point, not a claim about every upstream BLAKE3 configuration. Metal timing classes are reported separately: end-to-end rows include Swift-owned input buffer allocation/copy plus hashing, while resident/private rows start after input is already in Metal-accessible storage and are useful for GPU pipeline analysis.
+The official C row is a vendored in-process one-shot comparison point, not a claim about every upstream BLAKE3 configuration. Metal timing classes are reported separately: staged rows include copying Swift bytes into a reused shared Metal buffer plus hashing, wrapped rows include no-copy Metal buffer wrapping plus hashing, and resident rows start after input is already in Metal-accessible storage.
 
-| Input | Official C one-shot | Swift CPU parallel | Default `BLAKE3.hash` | Metal end-to-end GPU | Best resident/private Metal row |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| 16 MiB | 2.27 GiB/s | 8.85 GiB/s | 7.86 GiB/s | 6.77 GiB/s | 17.88 GiB/s |
-| 64 MiB | 2.22 GiB/s | 9.22 GiB/s | 14.95 GiB/s | 8.62 GiB/s | 38.25 GiB/s |
-| 256 MiB | 2.20 GiB/s | 10.25 GiB/s | 32.77 GiB/s | 10.70 GiB/s | 59.70 GiB/s |
-| 512 MiB | 2.18 GiB/s | 10.70 GiB/s | 31.06 GiB/s | 10.52 GiB/s | 61.50 GiB/s |
-| 1 GiB | 2.17 GiB/s | 11.22 GiB/s | 34.56 GiB/s | 10.06 GiB/s | 67.24 GiB/s |
+| Input | Official C one-shot | Swift CPU parallel | Default `BLAKE3.hash` | Metal staged GPU | Metal wrapped GPU | Metal resident GPU |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 256 MiB | 2.28 GiB/s | 10.58 GiB/s | 42.96 GiB/s | 24.08 GiB/s | 55.62 GiB/s | 68.26 GiB/s |
+| 512 MiB | 2.24 GiB/s | 11.18 GiB/s | 51.09 GiB/s | 25.84 GiB/s | 55.19 GiB/s | 80.53 GiB/s |
+| 1 GiB | 2.20 GiB/s | 11.33 GiB/s | 54.18 GiB/s | 24.76 GiB/s | 54.05 GiB/s | 76.80 GiB/s |
 
 The automatic path uses Swift CPU hashing below the Metal crossover and Metal for larger unkeyed inputs. The current default crossover is 16 MiB, which keeps small buffers on the CPU path while letting larger buffers use the GPU when that is beneficial for the selected timing class.
 
-Large-file tiled Metal hashing now reduces complete non-final tiles to subtree chaining values on the GPU before merging them into the canonical Swift CV stack.
-
-| File input | CPU mmap parallel | Metal mmap GPU | Metal tiled mmap GPU |
-| --- | ---: | ---: | ---: |
-| 256 MiB | 5.86 GiB/s | 7.35 GiB/s | 5.28 GiB/s |
-| 512 MiB | 5.80 GiB/s | 7.32 GiB/s | 6.26 GiB/s |
-| 1 GiB | 5.81 GiB/s | 8.27 GiB/s | 6.81 GiB/s |
-
-An external `b3sum 1.8.4` warm-file sanity check is included in the same artifact directory. That timing includes CLI process startup, file open/mapping or reading, hashing, and stdout suppression, so it is not directly comparable to resident Metal rows. On the same 1 GiB fixture, `b3sum` default threading measured 11.98 GiB/s median; `--num-threads 1` measured 1.89 GiB/s median; `--no-mmap` measured 1.91 GiB/s median.
+Full publication and file-path fixtures are kept under `benchmarks/results/`. File mmap timings are more page-in sensitive than resident-memory timings and are not used for the staged/wrapped overhead claim.
 
 ## Features
 
@@ -325,10 +315,10 @@ Runtime backend overrides:
 BLAKE3_SWIFT_BACKEND=cpu             # force default BLAKE3.hash to CPU
 BLAKE3_SWIFT_BACKEND=metal           # prefer Metal above the threshold, with CPU fallback
 BLAKE3_SWIFT_METAL_MIN_BYTES=16777216
-BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS=0|256|512
+BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS=0|128|256|512|1024
 ```
 
-`BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS=0` is the default on this branch. Set `256` or `512` to opt in for exact full-chunk shared-memory inputs. The fused path is skipped for private buffers, where the previous reduction path is faster on the local M4 measurements.
+`BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS=256` is the default on this branch for exact full-chunk shared-memory inputs. Set it to `0` to disable fused tiling, `128` to test the smaller tile, or `512`/`1024` to test larger tiles. The fused path is skipped for private buffers, where the previous reduction path is faster on the local M4 measurements.
 
 ## Examples
 
