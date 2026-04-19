@@ -6,21 +6,21 @@ The project is performance-focused, but correctness comes first: the Swift imple
 
 ## Latest Results
 
-Local release benchmarks on Apple M4 are used to tune the Swift CPU and Metal backends and to keep correctness checks attached to every timing row. These numbers are from the focused copy/no-copy overhead artifact `benchmarks/results/20260419T100143Z-overhead-focused`, with JSON validation enabled.
+Local release benchmarks on Apple M4 are used to tune the Swift CPU and Metal backends and to keep correctness checks attached to every timing row. These numbers are from `benchmarks/results/20260419T140713Z-readme-refresh`, with JSON validation enabled.
 
-The official C row is a vendored in-process one-shot comparison point, not a claim about every upstream BLAKE3 configuration. Metal timing classes are reported separately: staged rows include copying Swift bytes into a reused shared Metal buffer plus hashing, wrapped rows include no-copy Metal buffer wrapping plus hashing, and resident rows start after input is already in Metal-accessible storage.
+The official C row is a vendored in-process one-shot comparison point, not a claim about every upstream BLAKE3 configuration. CryptoKit SHA-256 is a cross-algorithm Apple platform baseline from the separate `cryptokit-comparison` artifact, not BLAKE3 parity. Metal timing classes are reported separately: staged rows include copying Swift bytes into a reused shared Metal buffer plus hashing, wrapped rows include no-copy Metal buffer wrapping plus hashing, and resident rows start after input is already in Metal-accessible storage.
 
-A later targeted sanity check for the current 128-chunk ping-pong fused tile default is kept at `benchmarks/results/20260419T105700Z-pingpong-rested-sanity`.
+This run used the current 128-chunk ping-pong fused tile default and runtime Metal source on Apple M4, macOS 26.5, Swift 6.3. The working tree was dirty with benchmark harness and documentation changes.
 
-| Input | Official C one-shot | Swift CPU parallel | Default `BLAKE3.hash` | Metal staged GPU | Metal wrapped GPU | Metal resident GPU |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 256 MiB | 2.28 GiB/s | 10.58 GiB/s | 42.96 GiB/s | 24.08 GiB/s | 55.62 GiB/s | 68.26 GiB/s |
-| 512 MiB | 2.24 GiB/s | 11.18 GiB/s | 51.09 GiB/s | 25.84 GiB/s | 55.19 GiB/s | 80.53 GiB/s |
-| 1 GiB | 2.20 GiB/s | 11.33 GiB/s | 54.18 GiB/s | 24.76 GiB/s | 54.05 GiB/s | 76.80 GiB/s |
+| Input | Official C BLAKE3 one-shot | CryptoKit SHA-256 | Swift CPU parallel | Default `BLAKE3.hash` | Metal staged GPU | Metal wrapped GPU | Metal resident GPU |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 256 MiB | 2.31 GiB/s | 2.93 GiB/s | 10.80 GiB/s | 41.79 GiB/s | 21.86 GiB/s | 42.93 GiB/s | 75.28 GiB/s |
+| 512 MiB | 2.25 GiB/s | 2.90 GiB/s | 11.08 GiB/s | 37.00 GiB/s | 23.69 GiB/s | 48.94 GiB/s | 67.91 GiB/s |
+| 1 GiB | 2.21 GiB/s | 2.86 GiB/s | 11.54 GiB/s | 46.94 GiB/s | 22.61 GiB/s | 40.65 GiB/s | 73.18 GiB/s |
 
 The automatic path uses Swift CPU hashing below the Metal crossover and Metal for larger unkeyed inputs. The current default crossover is 16 MiB, which keeps small buffers on the CPU path while letting larger buffers use the GPU when that is beneficial for the selected timing class.
 
-Full publication and file-path fixtures are kept under `benchmarks/results/`. File mmap timings are more page-in sensitive than resident-memory timings and are not used for the staged/wrapped overhead claim.
+Full publication and file-path fixtures are kept under `benchmarks/results/`. File mmap timings are more page-in sensitive than resident-memory timings and are not used for the staged/wrapped overhead claim. The 1 GiB Metal file rows in this refresh were noisy and are kept as raw artifacts rather than headline numbers.
 
 ## Features
 
@@ -265,6 +265,21 @@ swift run -c release blake3-bench \
   --iterations 5 \
   --metal-modes resident,staged,private
 ```
+
+By default, `blake3-bench` also includes a `cryptokit sha256` row as a familiar Apple platform baseline. CryptoKit does not provide BLAKE3, so this is a cross-algorithm comparison against Apple's built-in SHA-256 implementation, not a BLAKE3 parity row. CryptoKit rows are emitted after BLAKE3 CPU/Metal rows to avoid perturbing Metal timings. Use `--cryptokit-modes none` when tuning only BLAKE3 backends.
+
+Focused CryptoKit comparison command:
+
+```bash
+swift run -c release blake3-bench \
+  --sizes 16m,64m,256m \
+  --iterations 4 \
+  --metal-modes resident,staged,wrapped,e2e \
+  --file-modes none \
+  --cryptokit-modes sha256
+```
+
+Only promote CryptoKit comparison numbers from a rested run where CPU and Metal baselines match the current publication artifact range. `benchmarks/run-publication.sh` writes CryptoKit comparison output as a separate post-baseline artifact so the canonical CPU/Metal and file tables stay comparable. Background CPU/GPU load can make short focused runs look like Metal regressions.
 
 Run file-path measurements:
 

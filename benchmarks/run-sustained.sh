@@ -9,6 +9,7 @@ ITERATIONS="${ITERATIONS:-2}"
 DURATION_SECONDS="${DURATION_SECONDS:-30}"
 SUSTAINED_MODE="${SUSTAINED_MODE:-resident}"
 SUSTAINED_POLICY="${SUSTAINED_POLICY:-gpu}"
+CRYPTOKIT_MODES="${CRYPTOKIT_MODES:-none}"
 OUT_DIR="${OUT_DIR:-benchmarks/results/$(date -u +%Y%m%dT%H%M%SZ)-sustained}"
 
 mkdir -p "$OUT_DIR"
@@ -28,6 +29,7 @@ BENCHMARK_BIN="${BENCHMARK_BIN:-$ROOT_DIR/.build/release/blake3-bench}"
     echo "metal_library=runtime-source"
   fi
   echo "minimum_gpu_bytes=${MINIMUM_GPU_BYTES:-default}"
+  echo "cryptokit_modes=$CRYPTOKIT_MODES"
 } | tee "$OUT_DIR/environment.txt"
 
 COMMAND=(
@@ -35,6 +37,7 @@ COMMAND=(
   --sizes "$SIZES"
   --iterations "$ITERATIONS"
   --metal-modes "$SUSTAINED_MODE"
+  --cryptokit-modes "$CRYPTOKIT_MODES"
   --sustained-seconds "$DURATION_SECONDS"
   --sustained-mode "$SUSTAINED_MODE"
   --sustained-policy "$SUSTAINED_POLICY"

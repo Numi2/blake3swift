@@ -21,6 +21,7 @@ Collects separate output files for:
 - CPU scalar, CPU serial SIMD, CPU parallel, and reusable CPU context rows.
 - Metal resident and end-to-end rows.
 - CPU file and Metal file strategy rows.
+- CryptoKit SHA-256 comparison rows in a separate post-baseline artifact.
 
 Each publication run writes Markdown tables and matching JSON reports with per-sample timings, then validates the JSON report before exiting.
 
@@ -56,6 +57,8 @@ Runs measured Metal gate and mode sweeps and writes validated recommendation JSO
 - `METAL_LIBRARY`: optional path to a precompiled `BLAKE3Metal.metallib`.
 - `MINIMUM_GPU_BYTES`: optional `.automatic` Metal CPU/GPU gate for benchmark contexts.
 - `METAL_TILE_SIZE`: optional tiled Metal file benchmark tile size.
+- `CRYPTOKIT_MODES`: optional CryptoKit cross-algorithm baseline modes. Default: `sha256` for smoke/publication, `none` for sustained/tuning. Publication scripts keep this in a separate artifact so the canonical CPU/Metal and file tables stay comparable.
+- `CRYPTOKIT_METAL_MODES`: optional Metal timing classes for the publication CryptoKit comparison artifact. Default: `resident,staged,wrapped,e2e`.
 - `BLAKE3_SWIFT_BACKEND`: optional default `BLAKE3.hash` backend policy: `auto`, `cpu`, or `metal`.
 - `BLAKE3_SWIFT_METAL_MIN_BYTES`: optional byte threshold where default `BLAKE3.hash` may use Metal; accepts raw bytes or `k`, `m`, `g` suffixes.
 - `BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS`: optional fused Metal tile setting: `0`, `128`, `256`, `512`, or `1024`.

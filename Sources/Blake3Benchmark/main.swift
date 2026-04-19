@@ -1,5 +1,8 @@
 @_spi(Benchmark) import Blake3
 import Blake3BenchmarkSupport
+#if canImport(CryptoKit)
+import CryptoKit
+#endif
 import Darwin
 import Foundation
 #if canImport(Metal)
@@ -77,6 +80,19 @@ private enum FileTimingMode: String {
         }
     }
 }
+
+#if canImport(CryptoKit)
+private enum CryptoKitTimingMode: String {
+    case sha256
+
+    var description: String {
+        switch self {
+        case .sha256:
+            return "timed CryptoKit SHA256 init, update(bufferPointer:), and finalize over existing Swift bytes; cross-algorithm baseline, not BLAKE3 parity; emitted after BLAKE3 rows to avoid perturbing Metal timings"
+        }
+    }
+}
+#endif
 
 private let defaultSizes = [
     1,
@@ -231,6 +247,33 @@ private func fileTimingModes() -> [FileTimingMode] {
 
     return modes
 }
+
+#if canImport(CryptoKit)
+private func cryptoKitTimingModes() -> [CryptoKitTimingMode] {
+    guard let rawValue = argumentValue(named: "--cryptokit-modes") else {
+        return [.sha256]
+    }
+
+    let tokens = rawValue
+        .split(separator: ",")
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+
+    if tokens.contains("none") || tokens.contains("off") || tokens.contains("disabled") {
+        return []
+    }
+
+    let modes = tokens.compactMap { token -> CryptoKitTimingMode? in
+        switch token {
+        case "sha256", "sha-256", "sha2-256", "sha-2-256":
+            return .sha256
+        default:
+            return nil
+        }
+    }
+
+    return modes.isEmpty ? [.sha256] : modes
+}
+#endif
 
 #if canImport(Metal)
 private func metalTimingModes() -> [MetalTimingMode] {
@@ -402,6 +445,15 @@ private func hashOfficialCForBenchmark(_ input: UnsafeRawBufferPointer) -> BLAKE
     OfficialCBLAKE3.hash(input)
 }
 
+#if canImport(CryptoKit)
+@inline(never)
+private func hashCryptoKitSHA256ForBenchmark(_ input: UnsafeRawBufferPointer) -> BLAKE3.Digest {
+    var hasher = SHA256()
+    hasher.update(bufferPointer: input)
+    return BLAKE3.Digest(benchmarkBytes: Array(hasher.finalize()))
+}
+#endif
+
 @inline(never)
 private func hashMetalAutoForBenchmark(
     context: BLAKE3Metal.Context,
@@ -437,6 +489,7 @@ private func runBenchmark(
     mode: String,
     input: [UInt8],
     iterations: Int,
+    expectedDigest: BLAKE3.Digest? = nil,
     operation: ([UInt8]) -> BLAKE3.Digest
 ) -> BenchmarkResult {
     var sampleNanoseconds = [UInt64]()
@@ -455,7 +508,8 @@ private func runBenchmark(
         mode: mode,
         byteCount: input.count,
         sampleNanoseconds: sampleNanoseconds,
-        digest: finalDigest
+        digest: finalDigest,
+        expectedDigest: expectedDigest
     )
 }
 
@@ -464,6 +518,7 @@ private func runRawBenchmark(
     mode: String,
     input: [UInt8],
     iterations: Int,
+    expectedDigest: BLAKE3.Digest? = nil,
     operation: (UnsafeRawBufferPointer) -> BLAKE3.Digest
 ) -> BenchmarkResult {
     input.withUnsafeBytes { rawInput in
@@ -483,7 +538,8 @@ private func runRawBenchmark(
             mode: mode,
             byteCount: rawInput.count,
             sampleNanoseconds: sampleNanoseconds,
-            digest: finalDigest
+            digest: finalDigest,
+            expectedDigest: expectedDigest
         )
     }
 }
@@ -493,6 +549,7 @@ private func runThrowingBenchmark(
     mode: String,
     input: [UInt8],
     iterations: Int,
+    expectedDigest: BLAKE3.Digest? = nil,
     operation: ([UInt8]) throws -> BLAKE3.Digest
 ) throws -> BenchmarkResult {
     var sampleNanoseconds = [UInt64]()
@@ -511,7 +568,8 @@ private func runThrowingBenchmark(
         mode: mode,
         byteCount: input.count,
         sampleNanoseconds: sampleNanoseconds,
-        digest: finalDigest
+        digest: finalDigest,
+        expectedDigest: expectedDigest
     )
 }
 
@@ -521,6 +579,7 @@ private func runFileBenchmark(
     path: String,
     byteCount: Int,
     iterations: Int,
+    expectedDigest: BLAKE3.Digest? = nil,
     operation: (String) throws -> BLAKE3.Digest
 ) throws -> BenchmarkResult {
     var sampleNanoseconds = [UInt64]()
@@ -539,7 +598,8 @@ private func runFileBenchmark(
         mode: mode,
         byteCount: byteCount,
         sampleNanoseconds: sampleNanoseconds,
-        digest: finalDigest
+        digest: finalDigest,
+        expectedDigest: expectedDigest
     )
 }
 
@@ -584,6 +644,7 @@ private struct BenchmarkResult {
     let byteCount: Int
     let sampleNanoseconds: [UInt64]
     let digest: BLAKE3.Digest
+    let expectedDigest: BLAKE3.Digest?
 
     var throughputStats: ThroughputStats {
         makeThroughputStats(
@@ -591,6 +652,10 @@ private struct BenchmarkResult {
                 throughput(byteCount: byteCount, nanoseconds: nanoseconds)
             }
         )
+    }
+
+    func isCorrect(defaultExpectedDigest: BLAKE3.Digest) -> Bool {
+        digest == (expectedDigest ?? defaultExpectedDigest)
     }
 }
 
@@ -630,6 +695,7 @@ private struct BenchmarkEnvironment: Codable {
     let metalTileByteCount: Int?
     let metalModes: [String]
     let fileModes: [String]
+    let cryptoKitModes: [String]?
     let cpuWorkers: Int?
     let memoryStats: Bool
 
@@ -647,6 +713,7 @@ private struct BenchmarkEnvironment: Codable {
         case metalTileByteCount = "metal_tile_byte_count"
         case metalModes = "metal_modes"
         case fileModes = "file_modes"
+        case cryptoKitModes = "cryptokit_modes"
         case cpuWorkers = "cpu_workers"
         case memoryStats = "memory_stats"
     }
@@ -1873,6 +1940,9 @@ private let requestedSizes = benchmarkSizes()
 private let requestedIterationsOverride = iterationsOverride()
 private let requestedJSONOutputPath = jsonOutputPath()
 private let requestedFileTimingModes = fileTimingModes()
+#if canImport(CryptoKit)
+private let requestedCryptoKitTimingModes = cryptoKitTimingModes()
+#endif
 #if canImport(Metal)
 private let requestedMetalLibrarySource = metalLibrarySource()
 private let requestedMetalMinimumGPUByteCount = metalMinimumGPUByteCount()
@@ -1933,6 +2003,19 @@ if let metalDevice {
 }
 #endif
 print("sizes=\(requestedSizes.map(formatBytes).joined(separator: ", "))")
+#if canImport(CryptoKit)
+let requestedCryptoKitTimingModeLabel = requestedCryptoKitTimingModes.isEmpty
+    ? "none"
+    : requestedCryptoKitTimingModes.map(\.rawValue).joined(separator: ",")
+print("cryptoKitModes=\(requestedCryptoKitTimingModeLabel)")
+for mode in requestedCryptoKitTimingModes {
+    print("cryptokit-\(mode.rawValue) includes: \(mode.description)")
+}
+#else
+if argumentValue(named: "--cryptokit-modes") != nil {
+    print("cryptoKitModes=unavailable")
+}
+#endif
 if !requestedFileTimingModes.isEmpty {
     print("fileModes=\(requestedFileTimingModes.map(\.rawValue).joined(separator: ","))")
     for mode in requestedFileTimingModes {
@@ -2270,9 +2353,26 @@ for size in requestedSizes {
         results.append(metalE2EGPU)
     }
     #endif
+    #if canImport(CryptoKit)
+    if requestedCryptoKitTimingModes.contains(.sha256) {
+        let expectedDigest = input.withUnsafeBytes { rawInput in
+            hashCryptoKitSHA256ForBenchmark(rawInput)
+        }
+        results.append(
+            runRawBenchmark(
+                backend: "cryptokit",
+                mode: "sha256",
+                input: input,
+                iterations: iterations,
+                expectedDigest: expectedDigest,
+                operation: hashCryptoKitSHA256ForBenchmark
+            )
+        )
+    }
+    #endif
     for result in results {
         let stats = result.throughputStats
-        let correct = result.digest == scalar.digest
+        let correct = result.isCorrect(defaultExpectedDigest: scalar.digest)
         benchmarkRows.append(
             BenchmarkRow(
                 size: label,
@@ -2423,6 +2523,11 @@ if let requestedJSONOutputPath {
     let reportMetalModes: [String] = []
     let reportSustainedSeconds: Double? = nil
     #endif
+    #if canImport(CryptoKit)
+    let reportCryptoKitModes: [String]? = requestedCryptoKitTimingModes.map(\.rawValue)
+    #else
+    let reportCryptoKitModes: [String]? = nil
+    #endif
 
     let report = BenchmarkReport(
         schemaVersion: 1,
@@ -2442,6 +2547,7 @@ if let requestedJSONOutputPath {
             metalTileByteCount: reportMetalTileByteCount,
             metalModes: reportMetalModes,
             fileModes: requestedFileTimingModes.map(\.rawValue),
+            cryptoKitModes: reportCryptoKitModes,
             cpuWorkers: cpuWorkerCount(),
             memoryStats: reportsMemoryStats()
         ),

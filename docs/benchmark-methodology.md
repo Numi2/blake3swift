@@ -180,13 +180,13 @@ The wrapped mode is only valid while the Swift storage stays alive and immobile 
 CPU-only Swift backend sweep:
 
 ```sh
-swift run -c release blake3-bench --sizes 1m,16m,64m --iterations 8 --metal-modes none
+swift run -c release blake3-bench --sizes 1m,16m,64m --iterations 8 --metal-modes none --cryptokit-modes none
 ```
 
 CPU worker tuning sweep:
 
 ```sh
-swift run -c release blake3-bench --sizes 1m,16m,64m --iterations 8 --metal-modes none --cpu-workers 8
+swift run -c release blake3-bench --sizes 1m,16m,64m --iterations 8 --metal-modes none --cryptokit-modes none --cpu-workers 8
 ```
 
 When `--cpu-workers` is omitted, automatic CPU parallelism uses the library default: `ProcessInfo.processInfo.activeProcessorCount`. Publication runs should record the emitted `defaultParallelWorkers` value and pin `--cpu-workers` when comparing CPU scheduler changes.
@@ -194,6 +194,14 @@ When `--cpu-workers` is omitted, automatic CPU parallelism uses the library defa
 The one-shot CPU row switches from the bounded streaming stack to the SIMD chunk/parent reducer at 16 KiB. Automatic CPU parallelism starts at 96 KiB on the current Apple Silicon tuning pass.
 
 The `context-auto` row uses `BLAKE3.Context`, which reuses chaining-value workspace and a persistent CPU worker pool across iterations. Compare `parallel` against `context-auto` to see the cost of one-shot scheduling/allocation versus repeated-hash reuse.
+
+## CryptoKit SHA-256 Baseline
+
+`blake3-bench` includes `cryptokit sha256` by default on platforms where CryptoKit is available. This row hashes the existing Swift byte array with `SHA256`, using `update(bufferPointer:)` inside the timed region and finalizing to a 32-byte digest. The timed region excludes benchmark input allocation and deterministic input filling, matching the in-memory BLAKE3 rows.
+
+This is a cross-algorithm platform baseline. CryptoKit does not provide BLAKE3, so the row must not be described as implementation parity with BLAKE3. Its correctness check compares against the expected SHA-256 digest for the same input, while BLAKE3 rows continue to compare against the scalar BLAKE3 digest. Inside a single benchmark process, CryptoKit rows are emitted after BLAKE3 rows for each size so a large SHA-256 pass does not warm or throttle the following Metal rows. Disable it with `--cryptokit-modes none` when running pure BLAKE3 tuning sweeps.
+
+Publication scripts keep the canonical CPU/Metal and file reports CryptoKit-free, then emit a separate `cryptokit-comparison` report after those baseline artifacts. Treat that comparison artifact as a platform-hash reference, not as a replacement for the BLAKE3 publication tables.
 
 Optional RSS snapshots:
 

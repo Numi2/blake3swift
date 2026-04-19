@@ -10,6 +10,7 @@ BENCHMARK_BIN="${BENCHMARK_BIN:-$ROOT_DIR/.build/release/blake3-bench}"
 SIZES="${SIZES:-1m,16m}"
 ITERATIONS="${ITERATIONS:-2}"
 METAL_MODES="${METAL_MODES:-resident,e2e}"
+CRYPTOKIT_MODES="${CRYPTOKIT_MODES:-sha256}"
 FILE_MODES="${FILE_MODES:-none}"
 
 COMMAND=(
@@ -17,6 +18,7 @@ COMMAND=(
   --sizes "$SIZES"
   --iterations "$ITERATIONS"
   --metal-modes "$METAL_MODES"
+  --cryptokit-modes "$CRYPTOKIT_MODES"
   --file-modes "$FILE_MODES"
 )
 

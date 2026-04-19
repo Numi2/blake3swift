@@ -10,6 +10,7 @@ CPU_WORKER_COUNTS="${CPU_WORKER_COUNTS:-4 6 8 10}"
 METAL_MODE_SETS="${METAL_MODE_SETS:-resident private staged e2e private,private-staged}"
 METAL_GATE_BYTES_LIST="${METAL_GATE_BYTES_LIST:-16m}"
 METAL_TILE_SIZES="${METAL_TILE_SIZES:-}"
+CRYPTOKIT_MODES="${CRYPTOKIT_MODES:-none}"
 OUT_DIR="${OUT_DIR:-benchmarks/results/$(date -u +%Y%m%dT%H%M%SZ)-tuning}"
 
 mkdir -p "$OUT_DIR"
@@ -22,6 +23,7 @@ for workers in $CPU_WORKER_COUNTS; do
     --sizes "$SIZES"
     --iterations "$ITERATIONS"
     --metal-modes none
+    --cryptokit-modes "$CRYPTOKIT_MODES"
     --file-modes none
     --cpu-workers "$workers"
     --json-output "$OUT_DIR/cpu-workers-$workers.json"
@@ -45,6 +47,7 @@ for modes in $METAL_MODE_SETS; do
       --sizes "$SIZES"
       --iterations "$ITERATIONS"
       --metal-modes "$modes"
+      --cryptokit-modes "$CRYPTOKIT_MODES"
       --file-modes none
       --minimum-gpu-bytes "$gate_bytes"
       --json-output "$OUT_DIR/metal-$safe_modes-gate-$safe_gate.json"
@@ -67,6 +70,7 @@ for tile_size in $METAL_TILE_SIZES; do
     --sizes "$SIZES"
     --iterations "$ITERATIONS"
     --metal-modes none
+    --cryptokit-modes "$CRYPTOKIT_MODES"
     --file-modes metal-tiled-mmap
     --metal-tile-size "$tile_size"
     --json-output "$OUT_DIR/metal-tiled-file-tile-$safe_tile.json"
