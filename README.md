@@ -6,61 +6,51 @@ The project is performance-focused, but correctness comes first: the Swift imple
 
 ## Latest Results
 
-Local release benchmarks on Apple M4 are used to tune the Swift CPU and Metal backends and to keep correctness checks attached to every timing row. The buffer-throughput numbers are from `benchmarks/results/20260419T140713Z-readme-refresh`; the file-path reality rows below are from the isolated file harness under `/tmp/blake3swift-file-reality-final-code`. The prior publication artifacts were JSON validated, and the follow-up JSON was validated during tuning.
+Local release benchmarks on Apple M4 are used to tune the Swift CPU and Metal backends and to keep correctness checks attached to every timing row. All numbers below are current `flatkernels` results from `benchmarks/results/20260419T-readme-flatkernels-current`, generated April 19, 2026 on macOS 26.5 with Swift 6.3, runtime Metal source, the 16 MiB Metal crossover, 64 MiB mmap Metal tiles, 32 MiB staged-read Metal tiles, and 4 benchmark iterations. The generated CPU/Metal, file, and CryptoKit JSON reports were validated.
 
-The official C row is a vendored in-process one-shot comparison point, not a claim about every upstream BLAKE3 configuration. CryptoKit SHA-256 is a cross-algorithm Apple platform baseline from the separate `cryptokit-comparison` artifact, not BLAKE3 parity. Metal timing classes are reported separately: staged rows include copying Swift bytes into a reused shared Metal buffer plus hashing, wrapped rows include no-copy Metal buffer wrapping plus hashing, and resident rows start after input is already in Metal-accessible storage.
+All tables report median GiB/s. The official C row is the vendored in-process BLAKE3 one-shot comparison point, not a claim about every upstream BLAKE3 configuration. CryptoKit SHA-256 is a cross-algorithm Apple platform baseline from the companion `cryptokit-comparison` run, not BLAKE3 parity.
 
-This run used the current 128-chunk ping-pong fused tile default and runtime Metal source on Apple M4, macOS 26.5, Swift 6.3. The working tree was dirty with benchmark harness and documentation changes.
+CPU buffer hashing:
 
-| Input | Official C BLAKE3 one-shot | CryptoKit SHA-256 | Swift CPU parallel | Default `BLAKE3.hash` | Metal staged GPU | Metal wrapped GPU | Metal resident GPU |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 256 MiB | 2.31 GiB/s | 2.93 GiB/s | 10.80 GiB/s | 41.79 GiB/s | 21.86 GiB/s | 42.93 GiB/s | 75.28 GiB/s |
-| 512 MiB | 2.25 GiB/s | 2.90 GiB/s | 11.08 GiB/s | 37.00 GiB/s | 23.69 GiB/s | 48.94 GiB/s | 67.91 GiB/s |
-| 1 GiB | 2.21 GiB/s | 2.86 GiB/s | 11.54 GiB/s | 46.94 GiB/s | 22.61 GiB/s | 40.65 GiB/s | 73.18 GiB/s |
+| Input | Official C one-shot | Swift scalar | Swift SIMD4 | Swift CPU parallel | CPU context-auto |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 16 MiB | 2.23 | 1.15 | 1.79 | 8.72 | 9.15 |
+| 64 MiB | 2.19 | 1.15 | 1.77 | 9.91 | 9.92 |
+| 256 MiB | 2.20 | 1.16 | 1.80 | 10.78 | 10.61 |
+| 512 MiB | 2.19 | 1.16 | 1.79 | 11.12 | 11.00 |
+| 1 GiB | 2.19 | 1.16 | 1.80 | 11.52 | 11.58 |
 
-The automatic path uses Swift CPU hashing below the Metal crossover and Metal for larger unkeyed inputs. The current default crossover is 16 MiB, which keeps small buffers on the CPU path while letting larger buffers use the GPU when that is beneficial for the selected timing class.
+Default API and platform baseline:
 
-File rows are the reality check for allocation, copy, file-cache, mmap/page-in, and thermal behavior. The staged-read Metal file path reads bounded tiles directly into shared Metal buffers, pipelines async GPU tile reductions across four leased slots, and avoids large final-tile CPU CV merges. The CPU read row uses two bounded read buffers so file copy can overlap the previous tile's subtree reduction.
+| Input | Default `BLAKE3.hash` | CryptoKit SHA-256 |
+| --- | ---: | ---: |
+| 16 MiB | 9.65 | 2.78 |
+| 64 MiB | 17.86 | 2.90 |
+| 256 MiB | 33.21 | 2.94 |
+| 512 MiB | 35.22 | 2.92 |
+| 1 GiB | 41.87 | 2.87 |
 
-| File Input | CPU bounded read | CPU mmap parallel | Metal tiled mmap GPU | Metal staged read GPU |
-| --- | ---: | ---: | ---: | ---: |
-| 512 MiB | 7.53 GiB/s | 9.41 GiB/s | 7.37 GiB/s | 11.80 GiB/s |
-| 1 GiB | 7.71 GiB/s | 9.42 GiB/s | 9.60 GiB/s | 11.99 GiB/s |
+Metal timing classes are separated by ownership and transfer cost. Resident mode starts after input is already in a shared Metal buffer. Private mode hashes a pre-created private buffer and excludes setup copy. Staged mode includes copying Swift bytes into a reused shared Metal buffer. Wrapped mode includes no-copy Metal buffer wrapping over existing Swift bytes. End-to-end mode includes shared buffer allocation/copy from Swift bytes plus hashing.
 
-These rows run each file strategy in a separate benchmark process, with JSON validation and thermal snapshots around each mode. The staged-read row uses the 32 MiB staged tile default, four async read/GPU slots, a matching preallocated Metal async workspace, and the final-prefix CV merge threshold. A staged-only final-code repeat check at `/tmp/blake3swift-file-reality-async-workspace-default4` measured 10.44/11.58 and 10.15/11.27 GiB/s for 512 MiB/1 GiB. Full publication and file-path fixtures are kept under `benchmarks/results/`. File mmap timings are more page-in sensitive than resident-memory timings and are not used for staged/wrapped/resident overhead claims.
+| Input | Resident GPU | Private GPU | Staged GPU | Wrapped GPU | End-to-end GPU |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 16 MiB | 8.97 | 10.13 | 10.20 | 11.22 | 5.48 |
+| 64 MiB | 33.38 | 40.52 | 13.95 | 30.31 | 9.31 |
+| 256 MiB | 51.90 | 57.43 | 19.91 | 45.50 | 11.03 |
+| 512 MiB | 60.80 | 64.90 | 23.05 | 51.01 | 6.31 |
+| 1 GiB | 63.15 | 59.21 | 23.95 | 34.00 | 2.22 |
 
-### `flatkernels` optimization branch
+File rows include timed file open/stat, the selected access strategy, hashing, finalization, and close; benchmark file creation is excluded. File mmap, tiled mmap, and staged-read rows are page-in and thermal sensitive, so the table reports this current run directly.
 
-The `flatkernels` branch is the current CPU-side optimization experiment. The retained changes replace the streaming hasher's 1 KiB chunk staging with a one-block candidate-final state, collapse SIMD4 four-chunk batches locally before touching the CV stack, use uninitialized CV workspace arrays instead of zero-filled arrays in hot leaf/parent staging, unroll scalar full-chunk block processing, and make CPU regular-file read inflight buffering size-aware. These benchmarks were recorded on April 19, 2026 under `benchmarks/results/20260419T174416Z-flatkernels-streambench-final2`, `20260419T182711Z-flatkernels-uninitarrays-smoke`, and `20260419T183247Z-flatkernels-read-inflight`. Correctness checks passed in each benchmark row, and `swift test` passed 35 tests after the changes.
+| File input | CPU read | CPU mmap | CPU mmap parallel | Metal mmap GPU | Metal tiled mmap GPU | Metal staged read GPU |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 MiB | 4.31 | 1.10 | 7.79 | 6.07 | 1.68 | 2.76 |
+| 64 MiB | 5.00 | 1.11 | 8.34 | 5.91 | 2.67 | 3.76 |
+| 256 MiB | 7.00 | 1.11 | 9.26 | 9.08 | 6.42 | 9.63 |
+| 512 MiB | 7.53 | 1.10 | 9.63 | 9.25 | 5.77 | 10.09 |
+| 1 GiB | 7.69 | 1.11 | 10.05 | 3.03 | 4.12 | 2.25 |
 
-Streaming update throughput improved most where the old chunk staging was most expensive. The table below compares median GiB/s against clean `main` for 16 MiB total input:
-
-| Update size | `main` | `flatkernels` | Change |
-| ---: | ---: | ---: | ---: |
-| 1 byte | 0.0666 | 0.1094 | +64.3% |
-| 64 bytes | 0.8451 | 0.8205 | -2.9% |
-| 1 KiB | 1.0253 | 1.0386 | +1.3% |
-| 64 KiB | 1.0831 | 1.0885 | +0.5% |
-
-The post-workspace CPU smoke run measured:
-
-| Input | Scalar CPU | SIMD4 single | CPU parallel | CPU context-auto |
-| --- | ---: | ---: | ---: | ---: |
-| 1 MiB | 1.11 GiB/s | 1.72 GiB/s | 5.36 GiB/s | 5.49 GiB/s |
-| 16 MiB | 1.16 GiB/s | 1.77 GiB/s | 9.09 GiB/s | 9.08 GiB/s |
-| 64 MiB | 1.16 GiB/s | 1.77 GiB/s | 10.11 GiB/s | 10.25 GiB/s |
-
-The uninitialized CV workspace change was a clear win in the short smoke comparison: 1 MiB `parallel` moved from 4.41 to 5.36 GiB/s and 1 MiB `context-auto` moved from 4.39 to 5.49 GiB/s. The scalar full-chunk unroll improved scalar throughput in focused runs, but it also made release compilation much slower in this branch, with benchmark product builds around 134-146 seconds. Treat that unroll as an explicit compile-time versus runtime tradeoff.
-
-CPU regular-file read inflight was swept with 2, 3, and 4 bounded read buffers:
-
-| File size | 2 buffers | 3 buffers | 4 buffers | Branch default |
-| --- | ---: | ---: | ---: | --- |
-| 16 MiB | 4.03 GiB/s | 3.80 GiB/s | 4.03 GiB/s | 2 buffers |
-| 64 MiB | 5.11 GiB/s | 5.03 GiB/s | 5.04 GiB/s | 2 buffers |
-| 256 MiB | 6.74 GiB/s | 7.06 GiB/s | 7.09 GiB/s | 4 buffers |
-
-An attempted CPU `XOF4` SIMD expander was correct but slower, so it was not retained. The recorded experiment under `benchmarks/results/20260419T175329Z-flatkernels-xof4` was roughly 25-45% slower than the scalar root-output path for the measured output sizes.
+The current `flatkernels` branch includes the block-state streaming hasher, local SIMD4 four-chunk subtree collapse, uninitialized CV workspace arrays in hot leaf/parent staging, scalar full-chunk unrolling, and size-aware CPU read inflight buffering. The fresh publication build completed in 125.60 seconds; the scalar unroll remains a compile-time versus runtime tradeoff.
 
 ## Features
 
