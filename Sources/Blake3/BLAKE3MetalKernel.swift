@@ -27,6 +27,7 @@ struct BLAKE3MetalPipelines {
     let chunkTile256CVs: MTLComputePipelineState
     let chunkTile512CVs: MTLComputePipelineState
     let chunkTile1024CVs: MTLComputePipelineState
+    let chunkTile128SIMDGroupCVs: MTLComputePipelineState
     let chunkTile128PingPongCVs: MTLComputePipelineState
     let chunkTile256PingPongCVs: MTLComputePipelineState
     let chunkTile512PingPongCVs: MTLComputePipelineState
@@ -77,6 +78,7 @@ final class BLAKE3MetalPipelineCache: @unchecked Sendable {
               let chunkTile256Function = library.makeFunction(name: "blake3_chunk_tile256_cvs"),
               let chunkTile512Function = library.makeFunction(name: "blake3_chunk_tile512_cvs"),
               let chunkTile1024Function = library.makeFunction(name: "blake3_chunk_tile1024_cvs"),
+              let chunkTile128SIMDGroupFunction = library.makeFunction(name: "blake3_chunk_tile128_simdgroup_cvs"),
               let chunkTile128PingPongFunction = library.makeFunction(name: "blake3_chunk_tile128_pingpong_cvs"),
               let chunkTile256PingPongFunction = library.makeFunction(name: "blake3_chunk_tile256_pingpong_cvs"),
               let chunkTile512PingPongFunction = library.makeFunction(name: "blake3_chunk_tile512_pingpong_cvs"),
@@ -100,6 +102,7 @@ final class BLAKE3MetalPipelineCache: @unchecked Sendable {
             chunkTile256CVs: try device.makeComputePipelineState(function: chunkTile256Function),
             chunkTile512CVs: try device.makeComputePipelineState(function: chunkTile512Function),
             chunkTile1024CVs: try device.makeComputePipelineState(function: chunkTile1024Function),
+            chunkTile128SIMDGroupCVs: try device.makeComputePipelineState(function: chunkTile128SIMDGroupFunction),
             chunkTile128PingPongCVs: try device.makeComputePipelineState(function: chunkTile128PingPongFunction),
             chunkTile256PingPongCVs: try device.makeComputePipelineState(function: chunkTile256PingPongFunction),
             chunkTile512PingPongCVs: try device.makeComputePipelineState(function: chunkTile512PingPongFunction),
@@ -647,6 +650,76 @@ enum BLAKE3MetalKernelSource {
         tile_reduce_pingpong_exact(tileScratch, tileCVs, tileChunkCount, tid, tgid);
     }
 
+    static inline void reduce_simdgroup32_cv(thread uint cv[8],
+                                             uint simdLane) {
+        for (uint offset = 1u; offset < 32u; offset <<= 1u) {
+            uint partner[8];
+            for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                partner[wordIndex] = simd_shuffle_down(cv[wordIndex], ushort(offset));
+            }
+
+            if ((simdLane & ((offset << 1u) - 1u)) == 0u) {
+                uint blockWords[16];
+                for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                    blockWords[wordIndex] = cv[wordIndex];
+                    blockWords[wordIndex + 8u] = partner[wordIndex];
+                }
+                parent_cv(cv, blockWords);
+            }
+        }
+    }
+
+    static inline void chunk_tile128_simdgroup_cvs(device const uchar *input,
+                                                   device uchar *tileCVs,
+                                                   constant BLAKE3ChunkParams &params,
+                                                   threadgroup uint *tileScratch,
+                                                   uint tid,
+                                                   uint gid,
+                                                   uint tgid,
+                                                   uint simdLane,
+                                                   uint simdGroup) {
+        device const uchar *chunk = input + params.inputOffset + ulong(gid) * 1024UL;
+        ulong chunkCounter = params.baseChunkCounter + ulong(gid);
+        uint cv[8];
+        chunk_full_aligned_cv(chunk, chunkCounter, cv);
+
+        reduce_simdgroup32_cv(cv, simdLane);
+
+        if (simdLane == 0u) {
+            uint scratchBase = simdGroup * 8u;
+            for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                tileScratch[scratchBase + wordIndex] = cv[wordIndex];
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid < 2u) {
+            uint blockWords[16];
+            uint wordBase = tid * 16u;
+            for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+                blockWords[wordIndex] = tileScratch[wordBase + wordIndex];
+            }
+            parent_cv(cv, blockWords);
+            uint outWordBase = tid * 8u;
+            for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                tileScratch[outWordBase + wordIndex] = cv[wordIndex];
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid == 0u) {
+            uint blockWords[16];
+            for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+                blockWords[wordIndex] = tileScratch[wordIndex];
+            }
+            parent_cv(cv, blockWords);
+            device uint *out = reinterpret_cast<device uint *>(tileCVs + ulong(tgid) * 32UL);
+            for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                store32_aligned(out, wordIndex, cv[wordIndex]);
+            }
+        }
+    }
+
     kernel void blake3_chunk_tile128_cvs(device const uchar *input [[buffer(0)]],
                                          device uchar *tileCVs [[buffer(1)]],
                                          constant BLAKE3ChunkParams &params [[buffer(2)]],
@@ -685,6 +758,18 @@ enum BLAKE3MetalKernelSource {
                                           uint gid [[thread_position_in_grid]],
                                           uint tgid [[threadgroup_position_in_grid]]) {
         chunk_tile_cvs(input, tileCVs, params, tileScratch, 1024u, tid, gid, tgid);
+    }
+
+    kernel void blake3_chunk_tile128_simdgroup_cvs(device const uchar *input [[buffer(0)]],
+                                                   device uchar *tileCVs [[buffer(1)]],
+                                                   constant BLAKE3ChunkParams &params [[buffer(2)]],
+                                                   threadgroup uint *tileScratch [[threadgroup(0)]],
+                                                   uint tid [[thread_position_in_threadgroup]],
+                                                   uint gid [[thread_position_in_grid]],
+                                                   uint tgid [[threadgroup_position_in_grid]],
+                                                   uint simdLane [[thread_index_in_simdgroup]],
+                                                   uint simdGroup [[simdgroup_index_in_threadgroup]]) {
+        chunk_tile128_simdgroup_cvs(input, tileCVs, params, tileScratch, tid, gid, tgid, simdLane, simdGroup);
     }
 
     kernel void blake3_chunk_tile128_pingpong_cvs(device const uchar *input [[buffer(0)]],

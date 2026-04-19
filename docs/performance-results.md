@@ -39,6 +39,8 @@ This targeted confirmation uses the new default `128`-chunk double-scratch ping-
 
 A later ping-pong cleanup writes the final tile CV directly to the output buffer instead of copying it back through scratch memory. Correctness and JSON smoke validation passed, but the available same-session timing run was throttled across CPU and GPU baselines and was not promoted as a new headline table.
 
+An experimental 128-chunk `simdgroup` fused tile reducer keeps the first 32-way reductions in SIMD-group lane shuffles and only uses 128 B of threadgroup memory for four intermediate CVs. Focused A/B JSON validated correctly, but the cleaner matching pass still favored ping-pong by about 5% geometric mean across staged and wrapped 512 MiB/1 GiB overhead modes, so `simdgroup` stays opt-in rather than replacing the default.
+
 Follow-up experiments kept out of the default:
 
 - The original in-place `BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS=128` and `256` settings were close, but the 128-chunk ping-pong reduction had the better overall 256 MiB to 1 GiB overhead-mode geometric mean and is now the default.

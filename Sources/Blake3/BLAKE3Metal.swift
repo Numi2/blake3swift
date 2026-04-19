@@ -2470,14 +2470,17 @@ public enum BLAKE3Metal {
 
     private enum FusedTileReductionStrategy {
         case inPlace
+        case simdGroup
         case pingPong
 
-        var threadgroupMemoryMultiplier: Int {
+        func threadgroupMemoryByteCount(tileChunkCount: Int) -> Int {
             switch self {
             case .inPlace:
-                return 1
+                return tileChunkCount * BLAKE3.digestByteCount
+            case .simdGroup:
+                return max(1, tileChunkCount / 32) * BLAKE3.digestByteCount
             case .pingPong:
-                return 2
+                return tileChunkCount * BLAKE3.digestByteCount * 2
             }
         }
     }
@@ -2489,17 +2492,56 @@ public enum BLAKE3Metal {
         canLoadWords: Bool,
         pipelines: BLAKE3MetalPipelines
     ) -> FusedTilePlan? {
-        if let plan = fusedTilePlan(
-            buffer: buffer,
-            range: range,
-            chunkCount: chunkCount,
-            canLoadWords: canLoadWords,
-            reductionStrategy: fusedTileReductionStrategy,
-            pipelines: pipelines
-        ) {
-            return plan
-        }
-        if fusedTileReductionStrategy == .pingPong {
+        switch fusedTileReductionStrategy {
+        case .simdGroup:
+            if let plan = fusedTilePlan(
+                buffer: buffer,
+                range: range,
+                chunkCount: chunkCount,
+                canLoadWords: canLoadWords,
+                reductionStrategy: .simdGroup,
+                pipelines: pipelines
+            ) {
+                return plan
+            }
+            if let plan = fusedTilePlan(
+                buffer: buffer,
+                range: range,
+                chunkCount: chunkCount,
+                canLoadWords: canLoadWords,
+                reductionStrategy: .pingPong,
+                pipelines: pipelines
+            ) {
+                return plan
+            }
+            return fusedTilePlan(
+                buffer: buffer,
+                range: range,
+                chunkCount: chunkCount,
+                canLoadWords: canLoadWords,
+                reductionStrategy: .inPlace,
+                pipelines: pipelines
+            )
+        case .pingPong:
+            if let plan = fusedTilePlan(
+                buffer: buffer,
+                range: range,
+                chunkCount: chunkCount,
+                canLoadWords: canLoadWords,
+                reductionStrategy: .pingPong,
+                pipelines: pipelines
+            ) {
+                return plan
+            }
+            return fusedTilePlan(
+                buffer: buffer,
+                range: range,
+                chunkCount: chunkCount,
+                canLoadWords: canLoadWords,
+                reductionStrategy: .inPlace,
+                pipelines: pipelines
+            )
+        case .inPlace:
             return fusedTilePlan(
                 buffer: buffer,
                 range: range,
@@ -2509,7 +2551,6 @@ public enum BLAKE3Metal {
                 pipelines: pipelines
             )
         }
-        return nil
     }
 
     private static func fusedTilePlan(
@@ -2525,9 +2566,9 @@ public enum BLAKE3Metal {
             return nil
         }
         let tileByteCount = tileChunkCount * BLAKE3.chunkByteCount
-        let threadgroupMemoryByteCount = tileChunkCount
-            * BLAKE3.digestByteCount
-            * reductionStrategy.threadgroupMemoryMultiplier
+        let threadgroupMemoryByteCount = reductionStrategy.threadgroupMemoryByteCount(
+            tileChunkCount: tileChunkCount
+        )
         guard tileByteCount > 0,
               buffer.storageMode != .private,
               range.count.isMultiple(of: tileByteCount),
@@ -2538,9 +2579,14 @@ public enum BLAKE3Metal {
                 tileChunkCount: tileChunkCount,
                 reductionStrategy: reductionStrategy,
                 pipelines: pipelines
-              ),
-              tileChunkCount <= tilePipeline.maxTotalThreadsPerThreadgroup,
-              tileChunkCount.isMultiple(of: max(1, tilePipeline.threadExecutionWidth))
+              )
+        else {
+            return nil
+        }
+        let executionWidth = max(1, tilePipeline.threadExecutionWidth)
+        guard tileChunkCount <= tilePipeline.maxTotalThreadsPerThreadgroup,
+              tileChunkCount.isMultiple(of: executionWidth),
+              reductionStrategy != .simdGroup || (tileChunkCount == 128 && executionWidth == 32)
         else {
             return nil
         }
@@ -2587,6 +2633,8 @@ public enum BLAKE3Metal {
             return pipelines.chunkTile512CVs
         case (1024, .inPlace):
             return pipelines.chunkTile1024CVs
+        case (128, .simdGroup):
+            return pipelines.chunkTile128SIMDGroupCVs
         case (128, .pingPong):
             return pipelines.chunkTile128PingPongCVs
         case (256, .pingPong):
@@ -2629,6 +2677,8 @@ public enum BLAKE3Metal {
         }
 
         switch rawValue.lowercased() {
+        case "simdgroup", "simd-group", "warp", "lane":
+            return .simdGroup
         case "pingpong", "ping-pong", "double", "double-buffered":
             return .pingPong
         default:

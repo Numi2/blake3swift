@@ -732,6 +732,7 @@ final class BLAKE3Tests: XCTestCase {
         XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_chunk_cvs"))
         XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_chunk_full_aligned_cvs"))
         XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_chunk_tile256_cvs"))
+        XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_chunk_tile128_simdgroup_cvs"))
         XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_chunk_tile128_pingpong_cvs"))
         XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_chunk_tile512_cvs"))
         XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_root_digest"))
@@ -894,23 +895,26 @@ final class BLAKE3Tests: XCTestCase {
         let pipelines = try BLAKE3MetalPipelineCache.shared.pipelines(device: device)
         let commandQueue = try XCTUnwrap(device.makeCommandQueue())
         let cases: [(Int, MTLComputePipelineState, Int, String)] = [
-            (128, pipelines.chunkTile128CVs, 1, "in-place"),
-            (256, pipelines.chunkTile256CVs, 1, "in-place"),
-            (512, pipelines.chunkTile512CVs, 1, "in-place"),
-            (1024, pipelines.chunkTile1024CVs, 1, "in-place"),
-            (128, pipelines.chunkTile128PingPongCVs, 2, "ping-pong"),
-            (256, pipelines.chunkTile256PingPongCVs, 2, "ping-pong"),
-            (512, pipelines.chunkTile512PingPongCVs, 2, "ping-pong"),
-            (1024, pipelines.chunkTile1024PingPongCVs, 2, "ping-pong")
+            (128, pipelines.chunkTile128CVs, 128 * BLAKE3.digestByteCount, "in-place"),
+            (256, pipelines.chunkTile256CVs, 256 * BLAKE3.digestByteCount, "in-place"),
+            (512, pipelines.chunkTile512CVs, 512 * BLAKE3.digestByteCount, "in-place"),
+            (1024, pipelines.chunkTile1024CVs, 1024 * BLAKE3.digestByteCount, "in-place"),
+            (128, pipelines.chunkTile128SIMDGroupCVs, 4 * BLAKE3.digestByteCount, "simdgroup"),
+            (128, pipelines.chunkTile128PingPongCVs, 128 * BLAKE3.digestByteCount * 2, "ping-pong"),
+            (256, pipelines.chunkTile256PingPongCVs, 256 * BLAKE3.digestByteCount * 2, "ping-pong"),
+            (512, pipelines.chunkTile512PingPongCVs, 512 * BLAKE3.digestByteCount * 2, "ping-pong"),
+            (1024, pipelines.chunkTile1024PingPongCVs, 1024 * BLAKE3.digestByteCount * 2, "ping-pong")
         ]
 
         var testedCaseCount = 0
-        for (tileChunkCount, pipeline, scratchMultiplier, label) in cases {
-            let scratchByteCount = tileChunkCount * BLAKE3.digestByteCount * scratchMultiplier
+        for (tileChunkCount, pipeline, scratchByteCount, label) in cases {
             let executionWidth = max(1, pipeline.threadExecutionWidth)
             guard tileChunkCount <= pipeline.maxTotalThreadsPerThreadgroup,
                   scratchByteCount <= device.maxThreadgroupMemoryLength,
                   tileChunkCount.isMultiple(of: executionWidth) else {
+                continue
+            }
+            if label == "simdgroup" && executionWidth != 32 {
                 continue
             }
             testedCaseCount += 1

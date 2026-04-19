@@ -59,7 +59,7 @@ Runs measured Metal gate and mode sweeps and writes validated recommendation JSO
 - `BLAKE3_SWIFT_BACKEND`: optional default `BLAKE3.hash` backend policy: `auto`, `cpu`, or `metal`.
 - `BLAKE3_SWIFT_METAL_MIN_BYTES`: optional byte threshold where default `BLAKE3.hash` may use Metal; accepts raw bytes or `k`, `m`, `g` suffixes.
 - `BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS`: optional fused Metal tile setting: `0`, `128`, `256`, `512`, or `1024`.
-- `BLAKE3_SWIFT_METAL_FUSED_TILE_REDUCTION`: optional fused Metal tile reduction: `pingpong` or `inplace`.
+- `BLAKE3_SWIFT_METAL_FUSED_TILE_REDUCTION`: optional fused Metal tile reduction: `pingpong`, `inplace`, or experimental `simdgroup` for the 128-chunk 32-lane reducer.
 - `AUTOTUNE_GATES`: comma-separated Metal automatic gate candidates for `run-autotune.sh`.
 - `AUTOTUNE_MODES`: comma-separated Metal mode candidates for `run-autotune.sh`.
 - `AUTOTUNE_FILE_TILES`: set to `1` to include tiled Metal file tile-size sweeps in `run-autotune.sh`.
