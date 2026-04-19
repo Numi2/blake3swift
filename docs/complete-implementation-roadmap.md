@@ -1,5 +1,12 @@
 # Complete Roadmap for a Best-in-Class Swift BLAKE3
 
+Historical note: this roadmap is retained as engineering context. The current
+package state is reflected first by `README.md`, `docs/benchmark-methodology.md`,
+and the latest `benchmarks/results/*` artifacts. In particular, the public
+`Blake3` library product is native Swift, while the repository now vendors the
+official C implementation only inside the isolated `CBLAKE3` benchmark-support
+target.
+
 This is the execution plan for building a world-class Swift BLAKE3 package.
 The baseline upstream is BLAKE3 `1.8.4`, released 2026-03-30. The goal is not
 to be fast "for Swift"; the goal is to be competitive with the official C and
@@ -351,8 +358,9 @@ BLAKE3_SWIFT_DISABLE_PARALLEL=1
 
 ## Native Swift Backend
 
-The package must not vendor upstream C sources. Upstream C/Rust should remain an
-external correctness and benchmark comparator only.
+The public library product must not use upstream C as a backend. The current
+repository vendors upstream C only in the isolated `CBLAKE3` benchmark-support
+target; upstream C/Rust should remain correctness and benchmark comparators.
 
 Owned Swift backend layers:
 

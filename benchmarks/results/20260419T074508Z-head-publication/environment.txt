@@ -1,0 +1,14 @@
+date_utc=2026-04-19T07:45:09Z
+commit=a210ae4ed0f1124cfd88b99e47a5ec9ca1555943
+swift=Apple Swift version 6.3 (swiftlang-6.3.0.123.5 clang-2100.0.123.102) Target: arm64-apple-macosx26.0 
+ProductName:		macOS
+ProductVersion:		26.5
+BuildVersion:		25F5042g
+Apple M4
+Mac16,12
+performance_cores=4
+active_cpus=10
+metal_library=runtime-source
+minimum_gpu_bytes=default
+metal_tile_size=default
+metal_modes=resident,private,e2e

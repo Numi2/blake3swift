@@ -1,0 +1,11 @@
+Upstream b3sum warm-file baseline
+b3sum_version=b3sum 1.8.4
+file=/tmp/blake3swift-b3sum-1g.bin
+byte_count=1073741824
+note=Each command is run once to warm the file cache, then 5 timed subprocess runs. Timing includes b3sum process startup, file open/mmap/read, hashing, and stdout write to /dev/null.
+
+| Command | Median GiB/s | Min GiB/s | Max GiB/s | Samples s |
+| --- | ---: | ---: | ---: | --- |
+| `b3sum default` | 11.98 | 11.60 | 12.04 | 0.0835, 0.0835, 0.0831, 0.0862, 0.0836 |
+| `b3sum --num-threads 1` | 1.89 | 1.86 | 1.91 | 0.5248, 0.5333, 0.5363, 0.5270, 0.5299 |
+| `b3sum --no-mmap` | 1.91 | 1.91 | 1.91 | 0.5235, 0.5226, 0.5231, 0.5243, 0.5240 |

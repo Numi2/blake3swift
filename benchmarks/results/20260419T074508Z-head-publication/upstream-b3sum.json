@@ -1,0 +1,66 @@
+{
+  "b3sum_version": "b3sum 1.8.4",
+  "file": "/tmp/blake3swift-b3sum-1g.bin",
+  "byte_count": 1073741824,
+  "host": "macOS-26.5-arm64-arm-64bit",
+  "note": "Warm-file CLI baseline. Timing includes b3sum process startup, file open/mmap/read, hashing, and stdout write to /dev/null.",
+  "results": [
+    {
+      "label": "b3sum default",
+      "command": [
+        "b3sum",
+        "--no-names",
+        "/tmp/blake3swift-b3sum-1g.bin"
+      ],
+      "samples_seconds": [
+        0.083462542,
+        0.083485,
+        0.083090166,
+        0.086205959,
+        0.083603916
+      ],
+      "median_gib_per_second": 11.978199676588607,
+      "minimum_gib_per_second": 11.600126158332047,
+      "maximum_gib_per_second": 12.035118572274847
+    },
+    {
+      "label": "b3sum --num-threads 1",
+      "command": [
+        "b3sum",
+        "--no-names",
+        "--num-threads",
+        "1",
+        "/tmp/blake3swift-b3sum-1g.bin"
+      ],
+      "samples_seconds": [
+        0.524829292,
+        0.533255834,
+        0.5363145,
+        0.526954375,
+        0.529892667
+      ],
+      "median_gib_per_second": 1.8871746341792648,
+      "minimum_gib_per_second": 1.864577593930427,
+      "maximum_gib_per_second": 1.9053814549665038
+    },
+    {
+      "label": "b3sum --no-mmap",
+      "command": [
+        "b3sum",
+        "--no-names",
+        "--no-mmap",
+        "/tmp/blake3swift-b3sum-1g.bin"
+      ],
+      "samples_seconds": [
+        0.523492917,
+        0.522638916,
+        0.523123333,
+        0.524344959,
+        0.523996542
+      ],
+      "median_gib_per_second": 1.9102455210487594,
+      "minimum_gib_per_second": 1.907141439687227,
+      "maximum_gib_per_second": 1.9133668951662988
+    }
+  ]
+}

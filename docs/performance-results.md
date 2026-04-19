@@ -11,6 +11,42 @@ This file records candidate public performance data after sustained measurements
 - Record whether Metal rows used `runtime-source` or a packaged `.metallib`.
 - Do not present a single best sample as sustained throughput.
 
+## April 19, 2026 Head Publication Run
+
+Current checked-in publication artifact:
+
+```sh
+OUT_DIR=benchmarks/results/20260419T074508Z-head-publication benchmarks/run-publication.sh
+```
+
+Environment: Apple M4, Mac16,12, 10 active CPUs, macOS 26.5 build 25F5042g, Swift 6.3, runtime Metal source, commit `a210ae4ed0f1124cfd88b99e47a5ec9ca1555943`.
+
+The table reports median GiB/s from validated JSON. The official C row is the vendored in-process one-shot comparator. The best resident/private Metal row excludes Swift input allocation and upload, and should not be compared as a full bytes-to-digest path.
+
+| Input | Official C one-shot | Swift CPU parallel | Default `BLAKE3.hash` | Metal end-to-end GPU | Best resident/private Metal row |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 16 MiB | 2.27 | 8.85 | 7.86 | 6.77 | 17.88 |
+| 64 MiB | 2.22 | 9.22 | 14.95 | 8.62 | 38.25 |
+| 256 MiB | 2.20 | 10.25 | 32.77 | 10.70 | 59.70 |
+| 512 MiB | 2.18 | 10.70 | 31.06 | 10.52 | 61.50 |
+| 1 GiB | 2.17 | 11.22 | 34.56 | 10.06 | 67.24 |
+
+File-path timings from the same artifact:
+
+| File input | CPU mmap parallel | Metal mmap GPU | Metal tiled mmap GPU |
+| --- | ---: | ---: | ---: |
+| 256 MiB | 5.86 | 7.35 | 5.28 |
+| 512 MiB | 5.80 | 7.32 | 6.26 |
+| 1 GiB | 5.81 | 8.27 | 6.81 |
+
+External upstream CLI sanity check from `upstream-b3sum.txt` in the same artifact directory. This timing includes `b3sum` process startup, file open/mapping or reading, hashing, and stdout suppression, so it is not the same timing class as resident Metal:
+
+| Command | 1 GiB warm-file median GiB/s |
+| --- | ---: |
+| `b3sum 1.8.4` default threading | 11.98 |
+| `b3sum 1.8.4 --num-threads 1` | 1.89 |
+| `b3sum 1.8.4 --no-mmap` | 1.91 |
+
 ## April 18, 2026 Default Dispatcher Check
 
 Development check after enabling automatic large-input Metal dispatch for `BLAKE3.hash` and adding the 512-chunk fused shared-memory tile kernel:

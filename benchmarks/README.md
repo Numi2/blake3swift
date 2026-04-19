@@ -26,6 +26,8 @@ Each publication run writes Markdown tables and matching JSON reports with per-s
 
 Default publication sizes are `16 MiB`, `64 MiB`, `256 MiB`, `512 MiB`, and `1 GiB`.
 
+External upstream CLI checks, such as `b3sum`, should be stored beside the publication run as separate artifacts. They include process startup and CLI file handling, so keep them out of the in-process benchmark tables.
+
 ## Sustained Runs
 
 ```sh
