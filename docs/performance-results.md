@@ -37,12 +37,15 @@ benchmarks/results/20260419T105700Z-pingpong-rested-sanity
 
 This targeted confirmation uses the new default `128`-chunk double-scratch ping-pong fused tile reduction. It is not a replacement publication table because an immediate full all-size rerun was thermally contaminated, but the validated rested sanity check kept the large overhead modes in the expected band: 512 MiB resident/staged/wrapped medians of 75.08/23.79/47.77 GiB/s and 1 GiB resident/staged/wrapped medians of 71.25/23.68/43.28 GiB/s.
 
+A later ping-pong cleanup writes the final tile CV directly to the output buffer instead of copying it back through scratch memory. Correctness and JSON smoke validation passed, but the available same-session timing run was throttled across CPU and GPU baselines and was not promoted as a new headline table.
+
 Follow-up experiments kept out of the default:
 
 - The original in-place `BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS=128` and `256` settings were close, but the 128-chunk ping-pong reduction had the better overall 256 MiB to 1 GiB overhead-mode geometric mean and is now the default.
 - `512` and `1024` fused tiles are correct and available as tuning options, but were weaker in the no-copy wrapped path on the local M4.
 - A CPU-finalize-after-fused-tiles prototype did not beat the all-GPU finalization path.
 - Lowering the 4-way parent reduction threshold from 32K CVs to 1K CVs regressed large-buffer throughput.
+- Re-testing lower 4-way parent reduction thresholds after the ping-pong tile change still did not produce a durable overhead-mode win; the 32K-CV threshold remains.
 - Adding `madvise` read-ahead hints to mmap file hashing regressed the local Metal file benchmark and was removed.
 - Explicit unroll pragmas in the full-chunk Metal loop regressed large-buffer throughput and were removed.
 - Root8/root16 one-dispatch final digest kernels were correct, but not a durable win across staged/wrapped overhead modes, so the root2/3/4 path remains.
