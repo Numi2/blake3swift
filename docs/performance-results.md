@@ -54,6 +54,25 @@ Follow-up experiments kept out of the default:
 
 A full all-mode/file fixture was also generated at `benchmarks/results/20260419T100143Z`. Its JSON validated, but late 1 GiB `e2e` and file rows were noisy after all large modes ran back-to-back.
 
+## April 19, 2026 Staged Metal File Read Prototype
+
+Artifact:
+
+```sh
+benchmarks/results/20260419T145223Z-subtree-file-check
+```
+
+This run adds `BLAKE3File.Strategy.metalStagedRead`, which reads bounded file tiles directly into a shared Metal staging buffer instead of wrapping mmap pages for first-touch GPU access. It also reuses cached Metal contexts for file paths and decomposes large final complete-chunk prefixes into GPU subtree reductions, avoiding the old path where exact-size final tiles pulled tens or hundreds of thousands of CVs back for CPU merging.
+
+Focused validated medians, default 64 MiB Metal tile:
+
+| File input | CPU mmap parallel | Metal tiled mmap GPU | Metal staged read GPU |
+| --- | ---: | ---: | ---: |
+| 512 MiB | 5.83 | 8.00 | 9.79 |
+| 1 GiB | 5.87 | 7.77 | 10.00 |
+
+This is still a reality-check path, not a headline resident-GPU claim. A subsequent all-file-mode run at `benchmarks/results/20260419T145459Z-final-file-staged-read` validated correctness but showed severe late-run 1 GiB thermal/order degradation, with `metal-staged-read-gpu` falling to 2.12 GiB/s when it ran after the other file modes. A staged-read-only rerun immediately afterward recovered only to 6.73 GiB/s at 1 GiB, so publication-quality file claims still need rested, isolated runs and sustained thermal reporting.
+
 ## April 19, 2026 Head Publication Run
 
 Prior full publication artifact:

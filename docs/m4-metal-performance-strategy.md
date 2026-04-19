@@ -312,6 +312,8 @@ For fastest file hashing on M4:
 The no-copy path is essential. If file data is copied into a new GPU buffer,
 Metal will likely lose to CPU parallel hashing for many file sizes.
 
+Implementation note, April 19, 2026: `BLAKE3File.Strategy.metalStagedRead` now covers the bounded-copy case explicitly. It reads file tiles directly into a reusable shared `MTLBuffer`, applies best-effort Darwin read-ahead, hashes complete tile chunks on Metal, and avoids large final-tile CPU CV merge by decomposing complete prefixes into GPU subtree reductions. Focused runs improved the file reality row, but sustained heat can still erase the win, so file publication claims must stay separate from resident-buffer claims.
+
 ## Autotuning
 
 Build an autotuner that runs only in benchmark mode at first. Later, optionally

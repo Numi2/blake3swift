@@ -620,6 +620,13 @@ final class BLAKE3Tests: XCTestCase {
                 ),
                 BLAKE3.hash(metalTiledInput)
             )
+            XCTAssertEqual(
+                try BLAKE3File.hash(
+                    path: metalTiledURL.path,
+                    strategy: .metalStagedRead(tileByteCount: 512 * 1_024, fallbackToCPU: false)
+                ),
+                BLAKE3.hash(metalTiledInput)
+            )
         }
         #endif
     }
@@ -666,6 +673,18 @@ final class BLAKE3Tests: XCTestCase {
                 expected,
                 "mapped parallel file mismatch for byteCount=\(size)"
             )
+            #if canImport(Metal)
+            if BLAKE3Metal.isAvailable {
+                XCTAssertEqual(
+                    try BLAKE3File.hash(
+                        path: url.path,
+                        strategy: .metalStagedRead(tileByteCount: 4 * 1_024, fallbackToCPU: false)
+                    ),
+                    expected,
+                    "metal staged read file mismatch for byteCount=\(size)"
+                )
+            }
+            #endif
         }
     }
 
@@ -723,6 +742,12 @@ final class BLAKE3Tests: XCTestCase {
                 strategy: .metalTiledMemoryMapped(tileByteCount: 512 * 1_024, fallbackToCPU: false)
             )
             XCTAssertEqual(metalTiledDigest, expected)
+
+            let metalStagedReadDigest = try await BLAKE3File.hashAsync(
+                path: fileURL.path,
+                strategy: .metalStagedRead(tileByteCount: 512 * 1_024, fallbackToCPU: false)
+            )
+            XCTAssertEqual(metalStagedReadDigest, expected)
         }
         #endif
     }

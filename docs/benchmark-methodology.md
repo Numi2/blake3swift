@@ -109,6 +109,12 @@ The tiled Metal mapped-file path is the canonical tree-contract path for large f
 
 The async tiled variant uses the same timing class and tree contract. `BLAKE3File.hashAsync(..., strategy: .metalTiledMemoryMapped)` keeps the mapping alive until every async chunk-CV command has completed, uses Metal completion handlers instead of caller-thread waits for tile kernels, and checks cancellation between tile commands and before finalization.
 
+## `BLAKE3File.Strategy.metalStagedRead`
+
+The staged Metal read path is the bounded-copy alternative to mapped-file Metal hashing. It opens and stats the file, allocates one shared Metal staging buffer sized to the configured tile, enables best-effort Darwin read-ahead for the file descriptor, reads each tile directly into `MTLBuffer.contents()`, hashes complete non-final chunks on the GPU, merges chunk or subtree CVs into the Swift CV stack, and finalizes the last BLAKE3 chunk on the CPU.
+
+`--file-modes metal-staged-read` timing includes file open/stat, staging-buffer allocation, sequential file reads into shared Metal memory, GPU tile work, digest readback, final CPU stack/root work, and close. It excludes benchmark file creation and full-file Swift byte-array allocation. This mode exists because no-copy `mmap` can still be dominated by page-in behavior when the first touch happens from GPU work.
+
 ## `metal-e2e-*`
 
 End-to-end Metal timings measure hashing from an existing Swift byte array into a fresh shared `MTLBuffer`.

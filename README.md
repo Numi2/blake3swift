@@ -6,7 +6,7 @@ The project is performance-focused, but correctness comes first: the Swift imple
 
 ## Latest Results
 
-Local release benchmarks on Apple M4 are used to tune the Swift CPU and Metal backends and to keep correctness checks attached to every timing row. These numbers are from `benchmarks/results/20260419T140713Z-readme-refresh`, with JSON validation enabled.
+Local release benchmarks on Apple M4 are used to tune the Swift CPU and Metal backends and to keep correctness checks attached to every timing row. The buffer-throughput numbers are from `benchmarks/results/20260419T140713Z-readme-refresh`; the file-path reality rows are from `benchmarks/results/20260419T145223Z-subtree-file-check`. Both artifacts were JSON validated.
 
 The official C row is a vendored in-process one-shot comparison point, not a claim about every upstream BLAKE3 configuration. CryptoKit SHA-256 is a cross-algorithm Apple platform baseline from the separate `cryptokit-comparison` artifact, not BLAKE3 parity. Metal timing classes are reported separately: staged rows include copying Swift bytes into a reused shared Metal buffer plus hashing, wrapped rows include no-copy Metal buffer wrapping plus hashing, and resident rows start after input is already in Metal-accessible storage.
 
@@ -20,7 +20,14 @@ This run used the current 128-chunk ping-pong fused tile default and runtime Met
 
 The automatic path uses Swift CPU hashing below the Metal crossover and Metal for larger unkeyed inputs. The current default crossover is 16 MiB, which keeps small buffers on the CPU path while letting larger buffers use the GPU when that is beneficial for the selected timing class.
 
-Full publication and file-path fixtures are kept under `benchmarks/results/`. File mmap timings are more page-in sensitive than resident-memory timings and are not used for the staged/wrapped overhead claim. The 1 GiB Metal file rows in this refresh were noisy and are kept as raw artifacts rather than headline numbers.
+File rows are the reality check for allocation, copy, file-cache, mmap/page-in, and thermal behavior. The new staged-read Metal file path reads bounded tiles directly into a shared Metal buffer and avoids large final-tile CPU CV merges.
+
+| File Input | CPU mmap parallel | Metal tiled mmap GPU | Metal staged read GPU |
+| --- | ---: | ---: | ---: |
+| 512 MiB | 5.83 GiB/s | 8.00 GiB/s | 9.79 GiB/s |
+| 1 GiB | 5.87 GiB/s | 7.77 GiB/s | 10.00 GiB/s |
+
+Full publication and file-path fixtures are kept under `benchmarks/results/`. File mmap timings are more page-in sensitive than resident-memory timings and are not used for staged/wrapped/resident overhead claims. A later all-file-mode run at `benchmarks/results/20260419T145459Z-final-file-staged-read` validated correctness but showed severe late-run thermal/order degradation, with the 1 GiB staged-read row falling to 2.12 GiB/s; a staged-read-only rerun immediately afterward recovered to 6.73 GiB/s. Treat file claims as thermally sensitive unless reproduced in rested, isolated runs.
 
 ## Features
 
@@ -34,9 +41,9 @@ Full publication and file-path fixtures are kept under `benchmarks/results/`. Fi
 - Explicit `hashSerial`, `hashCPU`, and `hashParallel` APIs keep CPU-only benchmarking and backend selection reproducible.
 - Bounded-memory CV stack for streaming and multi-GB file hashing.
 - CPU file strategies for buffered reads and memory-mapped hashing.
-- Metal resident-buffer, no-copy Swift input, staged-buffer, tuned private-staged, async pipeline, and tiled file hashing APIs.
+- Metal resident-buffer, no-copy Swift input, staged-buffer, tuned private-staged, async pipeline, tiled mmap file, and staged-read file hashing APIs.
 - Fused Metal tile reduction for aligned full-chunk shared-memory inputs.
-- Tiled Metal file hashing reduces complete non-final tiles to GPU subtree chaining values before CPU stack merge.
+- Metal file hashing can use no-copy mmap pages or staged reads into bounded shared buffers; large complete prefixes reduce to GPU subtree chaining values before CPU stack merge.
 - Runtime Metal compilation fallback plus precompiled `.metallib` loading for production startup control.
 - Benchmark harness with separate resident, end-to-end, CPU, file, and sustained-run modes.
 
@@ -149,19 +156,19 @@ let digest = try await BLAKE3File.hashAsync(
 print(digest)
 ```
 
-On Metal-capable systems, tiled mapped file hashing keeps large-file memory bounded while using the GPU for tile work:
+On Metal-capable systems, staged read hashing keeps large-file memory bounded while avoiding GPU-side page faults on mapped file pages:
 
 ```swift
 import Blake3
 
 let digest = try await BLAKE3File.hashAsync(
     path: "/path/to/file",
-    strategy: .metalTiledMemoryMapped()
+    strategy: .metalStagedRead()
 )
 print(digest)
 ```
 
-The default tiled Metal file tile is 64 MiB on this branch. CPU mapped file hashing keeps its smaller 16 MiB tile default.
+The default Metal file tile is 64 MiB on this branch. `.metalTiledMemoryMapped()` remains available as the no-copy mmap path, but `.metalStagedRead()` is the preferred reality-check path when mmap page-in noise dominates. CPU mapped file hashing keeps its smaller 16 MiB tile default.
 
 ## Metal Resident Hashing
 
@@ -288,7 +295,7 @@ swift run -c release blake3-bench \
   --sizes 512m,1g \
   --iterations 3 \
   --metal-modes none \
-  --file-modes mmap-parallel,metal-mmap,metal-tiled-mmap
+  --file-modes mmap-parallel,metal-mmap,metal-tiled-mmap,metal-staged-read
 ```
 
 ### Timing Classes
@@ -297,7 +304,7 @@ Resident mode starts after the input is already in a Metal-accessible buffer and
 
 End-to-end mode starts from Swift-owned input and includes buffer creation, input transfer/setup, command submission, hashing, reduction, and digest extraction. It measures the application path.
 
-File modes include the selected file access strategy. Memory-mapped modes include mapping and digest extraction. Tiled Metal file mode includes tile mapping, Metal dispatches, per-tile CV extraction, and final canonical tree reduction.
+File modes include the selected file access strategy. Memory-mapped modes include mapping and digest extraction. Tiled Metal mmap mode includes tile mapping, Metal dispatches, per-tile CV extraction, and final canonical tree reduction. Staged-read Metal mode includes file reads into a bounded shared Metal buffer, tile dispatches, digest readback, and final canonical tree reduction.
 
 Warmup runs should be kept separate from reported measurements. Pipeline compilation, first allocation, and first dispatch are excluded from resident headline numbers unless a benchmark mode explicitly states otherwise.
 

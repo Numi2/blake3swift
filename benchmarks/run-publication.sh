@@ -60,7 +60,7 @@ FILE_COMMAND=(
   --iterations "$ITERATIONS"
   --metal-modes none
   --cryptokit-modes none
-  --file-modes read,mmap,mmap-parallel,metal-mmap,metal-tiled-mmap
+  --file-modes read,mmap,mmap-parallel,metal-mmap,metal-tiled-mmap,metal-staged-read
   --json-output "$OUT_DIR/file-publication.json"
 )
 

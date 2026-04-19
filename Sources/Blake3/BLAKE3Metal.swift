@@ -80,6 +80,18 @@ public enum BLAKE3Metal {
         )
     }
 
+    static func cachedContext(
+        device: MTLDevice,
+        minimumGPUByteCount: Int = defaultMinimumGPUByteCount,
+        librarySource: LibrarySource = .runtimeSource
+    ) throws -> Context {
+        try contextCache.context(
+            device: device,
+            minimumGPUByteCount: minimumGPUByteCount,
+            librarySource: librarySource
+        )
+    }
+
     /// Hashes a resident Metal buffer.
     ///
     /// The buffer must remain valid until the synchronous call returns. With `.gpu`, timing belongs to the
@@ -2722,28 +2734,58 @@ private struct BLAKE3MetalDeviceReference: @unchecked Sendable {
 }
 
 private final class BLAKE3MetalContextCache: @unchecked Sendable {
-    private let lock = NSLock()
-    private var contexts: [UInt64: BLAKE3Metal.Context] = [:]
+    private struct CacheKey: Hashable {
+        let deviceRegistryID: UInt64
+        let minimumGPUByteCount: Int
+        let libraryIdentifier: String
+    }
 
-    func context(device: MTLDevice) throws -> BLAKE3Metal.Context {
+    private let lock = NSLock()
+    private var contexts: [CacheKey: BLAKE3Metal.Context] = [:]
+
+    func context(
+        device: MTLDevice,
+        minimumGPUByteCount: Int = BLAKE3Metal.defaultMinimumGPUByteCount,
+        librarySource: BLAKE3Metal.LibrarySource = .runtimeSource
+    ) throws -> BLAKE3Metal.Context {
+        let key = CacheKey(
+            deviceRegistryID: device.registryID,
+            minimumGPUByteCount: max(0, minimumGPUByteCount),
+            libraryIdentifier: librarySource.contextCacheIdentifier
+        )
         lock.lock()
-        if let context = contexts[device.registryID] {
+        if let context = contexts[key] {
             lock.unlock()
             return context
         }
         lock.unlock()
 
-        let context = try BLAKE3Metal.Context(device: device)
+        let context = try BLAKE3Metal.Context(
+            device: device,
+            minimumGPUByteCount: minimumGPUByteCount,
+            librarySource: librarySource
+        )
 
         lock.lock()
         defer {
             lock.unlock()
         }
-        if let existing = contexts[device.registryID] {
+        if let existing = contexts[key] {
             return existing
         }
-        contexts[device.registryID] = context
+        contexts[key] = context
         return context
+    }
+}
+
+private extension BLAKE3Metal.LibrarySource {
+    var contextCacheIdentifier: String {
+        switch self {
+        case .runtimeSource:
+            return "runtime-source"
+        case let .metallib(url):
+            return "metallib:\(url.standardizedFileURL.path)"
+        }
     }
 }
 #endif

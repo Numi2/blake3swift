@@ -61,6 +61,7 @@ private enum FileTimingMode: String {
     #if canImport(Metal)
     case metalMemoryMapped = "metal-mmap"
     case metalTiledMemoryMapped = "metal-tiled-mmap"
+    case metalStagedRead = "metal-staged-read"
     #endif
 
     var description: String {
@@ -76,6 +77,8 @@ private enum FileTimingMode: String {
             return "timed file open/stat, mmap, no-copy Metal buffer wrapper, GPU hash wait, digest read, munmap, close; benchmark file creation excluded"
         case .metalTiledMemoryMapped:
             return "timed file open/stat, mmap, no-copy Metal buffer wrapper, tiled GPU chunk-CV dispatches, CPU CV-stack merge, digest read, munmap, close; benchmark file creation excluded"
+        case .metalStagedRead:
+            return "timed file open/stat, bounded read directly into a shared Metal staging buffer, tiled GPU chunk-CV dispatches, CPU CV-stack merge, digest read, close; benchmark file creation excluded"
         #endif
         }
     }
@@ -239,6 +242,8 @@ private func fileTimingModes() -> [FileTimingMode] {
             return .metalMemoryMapped
         case "metal-tiled-mmap", "tiled-metal-mmap", "metal-mmap-tiled", "metal-tiled":
             return .metalTiledMemoryMapped
+        case "metal-staged-read", "metal-read", "metal-read-staged", "staged-metal-read":
+            return .metalStagedRead
         #endif
         default:
             return nil
@@ -1950,6 +1955,7 @@ private let requestedMetalTileByteCount = metalTileByteCount()
 private let requestedMetalTimingModes = metalTimingModes()
 private let requestedMetalFileTiming = requestedFileTimingModes.contains(.metalMemoryMapped)
     || requestedFileTimingModes.contains(.metalTiledMemoryMapped)
+    || requestedFileTimingModes.contains(.metalStagedRead)
 private let requestedMetalWork = !requestedMetalTimingModes.isEmpty || requestedMetalFileTiming
 let metalDevice = MTLCreateSystemDefaultDevice()
 let metalContext: BLAKE3Metal.Context?
@@ -2183,6 +2189,26 @@ for size in requestedSizes {
                         try BLAKE3File.hash(
                             path: path,
                             strategy: .metalTiledMemoryMapped(
+                                tileByteCount: requestedMetalTileByteCount,
+                                fallbackToCPU: false,
+                                librarySource: requestedMetalLibrarySource
+                            )
+                        )
+                    }
+                )
+            }
+            if requestedFileTimingModes.contains(.metalStagedRead), metalDevice != nil {
+                fileResults.append(
+                    try runFileBenchmark(
+                        backend: "metal-file",
+                        mode: "metal-staged-read-gpu",
+                        path: path,
+                        byteCount: size,
+                        iterations: iterations
+                    ) { path in
+                        try BLAKE3File.hash(
+                            path: path,
+                            strategy: .metalStagedRead(
                                 tileByteCount: requestedMetalTileByteCount,
                                 fallbackToCPU: false,
                                 librarySource: requestedMetalLibrarySource
