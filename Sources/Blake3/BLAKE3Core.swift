@@ -440,6 +440,60 @@ enum BLAKE3Core {
         )
     }
 
+    static func subtreeChainingValue(
+        _ input: UnsafeRawBufferPointer,
+        baseChunkCounter: Int,
+        key: ChainingValue,
+        flags: UInt32,
+        maxWorkers: Int?,
+        scheduler: ParallelScheduler? = nil,
+        workspace: inout Workspace
+    ) -> ChainingValue {
+        precondition(input.count > 0)
+        precondition(input.count.isMultiple(of: chunkLen))
+        let chunkCount = input.count / chunkLen
+        precondition(chunkCount.nonzeroBitCount == 1)
+
+        writeChunkChainingValues(
+            input,
+            key: key,
+            flags: flags,
+            baseChunkCounter: baseChunkCounter,
+            maxWorkers: maxWorkers,
+            scheduler: scheduler,
+            into: &workspace.chunkCVs
+        )
+
+        var currentCount = workspace.chunkCVs.count
+        var currentIsChunkCVs = true
+        while currentCount > 1 {
+            if currentIsChunkCVs {
+                currentCount = reduceParentLevel(
+                    workspace.chunkCVs,
+                    count: currentCount,
+                    key: key,
+                    flags: flags,
+                    into: &workspace.scratchCVs,
+                    maxWorkers: maxWorkers,
+                    scheduler: scheduler
+                )
+            } else {
+                currentCount = reduceParentLevel(
+                    workspace.scratchCVs,
+                    count: currentCount,
+                    key: key,
+                    flags: flags,
+                    into: &workspace.chunkCVs,
+                    maxWorkers: maxWorkers,
+                    scheduler: scheduler
+                )
+            }
+            currentIsChunkCVs.toggle()
+        }
+
+        return currentIsChunkCVs ? workspace.chunkCVs[0] : workspace.scratchCVs[0]
+    }
+
     static func keyedWords(_ key: UnsafeRawBufferPointer) -> ChainingValue {
         precondition(key.count == keyLen)
         return ChainingValue(

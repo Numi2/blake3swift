@@ -37,6 +37,14 @@ benchmarks/run-sustained.sh
 
 Runs repeated `512 MiB` and `1 GiB` sustained Metal measurements. Defaults are intentionally moderate for development speed. Increase `DURATION_SECONDS` before publishing sustained claims.
 
+## Isolated File Reality Runs
+
+```sh
+benchmarks/run-file-reality.sh
+```
+
+Runs each selected file strategy in a separate benchmark process, validates every JSON report, captures thermal snapshots before and after each mode, and writes a `summary.md` table when `jq` is available. Use this for file rows where mmap page-in, file-cache warmth, and run order can dominate the hash-path cost.
+
 ## Metal Autotune
 
 ```sh
@@ -53,16 +61,21 @@ Runs measured Metal gate and mode sweeps and writes validated recommendation JSO
 - `CPU_WORKERS`: optional fixed CPU parallel worker count.
 - `DURATION_SECONDS`: sustained run duration. Default: `30`.
 - `SUSTAINED_MODE`: sustained Metal mode. Default: `resident`.
+- `FILE_MODES`: for `run-file-reality.sh`, space-separated file modes to run in isolated processes. Default: `read mmap-parallel metal-tiled-mmap metal-staged-read`.
+- `REPEATS`: for `run-file-reality.sh`, number of isolated passes per file mode. Default: `1`.
+- `COOLDOWN_SECONDS`: for `run-file-reality.sh`, delay between isolated file-mode runs. Default: `20`; set to `0` for quick validation.
 - `MEMORY_STATS`: set to `1` to include process RSS plus allocator bytes/block snapshots in benchmark output.
 - `METAL_LIBRARY`: optional path to a precompiled `BLAKE3Metal.metallib`.
 - `MINIMUM_GPU_BYTES`: optional `.automatic` Metal CPU/GPU gate for benchmark contexts.
-- `METAL_TILE_SIZE`: optional tiled/staged Metal file benchmark tile size.
+- `METAL_TILE_SIZE`: optional tiled/staged Metal file benchmark tile size. When omitted, tiled mmap uses 64 MiB and staged read uses 32 MiB.
 - `CRYPTOKIT_MODES`: optional CryptoKit cross-algorithm baseline modes. Default: `sha256` for smoke/publication, `none` for sustained/tuning. Publication scripts keep this in a separate artifact so the canonical CPU/Metal and file tables stay comparable.
 - `CRYPTOKIT_METAL_MODES`: optional Metal timing classes for the publication CryptoKit comparison artifact. Default: `resident,staged,wrapped,e2e`.
 - `BLAKE3_SWIFT_BACKEND`: optional default `BLAKE3.hash` backend policy: `auto`, `cpu`, or `metal`.
 - `BLAKE3_SWIFT_METAL_MIN_BYTES`: optional byte threshold where default `BLAKE3.hash` may use Metal; accepts raw bytes or `k`, `m`, `g` suffixes.
 - `BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS`: optional fused Metal tile setting: `0`, `128`, `256`, `512`, or `1024`.
 - `BLAKE3_SWIFT_METAL_FUSED_TILE_REDUCTION`: optional fused Metal tile reduction: `pingpong`, `inplace`, or experimental `simdgroup` for the 128-chunk 32-lane reducer.
+- `BLAKE3_SWIFT_READ_INFLIGHT`: optional regular-file CPU read buffer count: `1` for sequential one-buffer timing, `2` for the default read/CPU-subtree overlap.
+- `BLAKE3_SWIFT_METAL_STAGED_READ_INFLIGHT`: optional staged-read Metal file buffer count: `1` for sequential one-buffer timing, `2` for the default read/GPU overlap.
 - `AUTOTUNE_GATES`: comma-separated Metal automatic gate candidates for `run-autotune.sh`.
 - `AUTOTUNE_MODES`: comma-separated Metal mode candidates for `run-autotune.sh`.
 - `AUTOTUNE_FILE_TILES`: set to `1` to include tiled Metal file tile-size sweeps in `run-autotune.sh`.

@@ -67,11 +67,11 @@ private enum FileTimingMode: String {
     var description: String {
         switch self {
         case .read:
-            return "timed file open, streaming read loop, CPU update/finalize, close; benchmark file creation excluded"
+            return "timed file open/stat, two-buffer bounded read loop, overlapped CPU subtree reductions for regular files, finalize, close; benchmark file creation excluded"
         case .memoryMapped:
             return "timed file open/stat, mmap, bounded tiled CPU hash, finalize, munmap, close; benchmark file creation excluded"
         case .memoryMappedParallel:
-            return "timed file open/stat, mmap, bounded tiled CPU parallel hash, finalize, munmap, close; benchmark file creation excluded"
+            return "timed file open/stat, mmap, direct CPU parallel tree hash up to the one-shot cap, bounded tiled fallback above it, finalize, munmap, close; benchmark file creation excluded"
         #if canImport(Metal)
         case .metalMemoryMapped:
             return "timed file open/stat, mmap, no-copy Metal buffer wrapper, GPU hash wait, digest read, munmap, close; benchmark file creation excluded"
@@ -370,11 +370,11 @@ private func metalMinimumGPUByteCount() -> Int {
     return parsed
 }
 
-private func metalTileByteCount() -> Int {
+private func metalTileByteCount(default defaultByteCount: Int) -> Int {
     guard let rawValue = argumentValue(named: "--metal-tile-size") ?? argumentValue(named: "--tile-size"),
           let parsed = parseByteCount(Substring(rawValue))
     else {
-        return BLAKE3File.metalMappedTileByteCount
+        return defaultByteCount
     }
     return max(BLAKE3.chunkByteCount, parsed)
 }
@@ -698,6 +698,8 @@ private struct BenchmarkEnvironment: Codable {
     let metalLibrary: String?
     let metalMinimumGPUByteCount: Int?
     let metalTileByteCount: Int?
+    let metalMappedTileByteCount: Int?
+    let metalStagedReadTileByteCount: Int?
     let metalModes: [String]
     let fileModes: [String]
     let cryptoKitModes: [String]?
@@ -716,6 +718,8 @@ private struct BenchmarkEnvironment: Codable {
         case metalLibrary = "metal_library"
         case metalMinimumGPUByteCount = "metal_minimum_gpu_byte_count"
         case metalTileByteCount = "metal_tile_byte_count"
+        case metalMappedTileByteCount = "metal_mapped_tile_byte_count"
+        case metalStagedReadTileByteCount = "metal_staged_read_tile_byte_count"
         case metalModes = "metal_modes"
         case fileModes = "file_modes"
         case cryptoKitModes = "cryptokit_modes"
@@ -1951,7 +1955,12 @@ private let requestedCryptoKitTimingModes = cryptoKitTimingModes()
 #if canImport(Metal)
 private let requestedMetalLibrarySource = metalLibrarySource()
 private let requestedMetalMinimumGPUByteCount = metalMinimumGPUByteCount()
-private let requestedMetalTileByteCount = metalTileByteCount()
+private let requestedMetalMappedTileByteCount = metalTileByteCount(
+    default: BLAKE3File.metalMappedTileByteCount
+)
+private let requestedMetalStagedReadTileByteCount = metalTileByteCount(
+    default: BLAKE3File.metalStagedReadTileByteCount
+)
 private let requestedMetalTimingModes = metalTimingModes()
 private let requestedMetalFileTiming = requestedFileTimingModes.contains(.metalMemoryMapped)
     || requestedFileTimingModes.contains(.metalTiledMemoryMapped)
@@ -1980,7 +1989,8 @@ if let metalDevice {
     print("metalDevice=\(metalDevice.name)")
     print("metalLibrary=\(metalLibraryDescription(requestedMetalLibrarySource))")
     print("metalMinimumGPUByteCount=\(requestedMetalMinimumGPUByteCount)")
-    print("metalTileByteCount=\(requestedMetalTileByteCount)")
+    print("metalMappedTileByteCount=\(requestedMetalMappedTileByteCount)")
+    print("metalStagedReadTileByteCount=\(requestedMetalStagedReadTileByteCount)")
     print("metalModes=\(requestedMetalTimingModes.map(\.rawValue).joined(separator: ","))")
     if let metalContextError {
         print("metalLibraryError=\(metalContextError)")
@@ -2189,7 +2199,7 @@ for size in requestedSizes {
                         try BLAKE3File.hash(
                             path: path,
                             strategy: .metalTiledMemoryMapped(
-                                tileByteCount: requestedMetalTileByteCount,
+                                tileByteCount: requestedMetalMappedTileByteCount,
                                 fallbackToCPU: false,
                                 librarySource: requestedMetalLibrarySource
                             )
@@ -2209,7 +2219,7 @@ for size in requestedSizes {
                         try BLAKE3File.hash(
                             path: path,
                             strategy: .metalStagedRead(
-                                tileByteCount: requestedMetalTileByteCount,
+                                tileByteCount: requestedMetalStagedReadTileByteCount,
                                 fallbackToCPU: false,
                                 librarySource: requestedMetalLibrarySource
                             )
@@ -2538,7 +2548,9 @@ if let requestedJSONOutputPath {
     let reportMetalDevice = metalDevice?.name
     let reportMetalLibrary = metalDevice.map { _ in metalLibraryDescription(requestedMetalLibrarySource) }
     let reportMetalMinimumGPUByteCount = metalDevice.map { _ in requestedMetalMinimumGPUByteCount }
-    let reportMetalTileByteCount = metalDevice.map { _ in requestedMetalTileByteCount }
+    let reportMetalTileByteCount = metalDevice.map { _ in requestedMetalMappedTileByteCount }
+    let reportMetalMappedTileByteCount = metalDevice.map { _ in requestedMetalMappedTileByteCount }
+    let reportMetalStagedReadTileByteCount = metalDevice.map { _ in requestedMetalStagedReadTileByteCount }
     let reportMetalModes = requestedMetalTimingModes.map(\.rawValue)
     let reportSustainedSeconds = sustainedSeconds()
     #else
@@ -2546,6 +2558,8 @@ if let requestedJSONOutputPath {
     let reportMetalLibrary: String? = nil
     let reportMetalMinimumGPUByteCount: Int? = nil
     let reportMetalTileByteCount: Int? = nil
+    let reportMetalMappedTileByteCount: Int? = nil
+    let reportMetalStagedReadTileByteCount: Int? = nil
     let reportMetalModes: [String] = []
     let reportSustainedSeconds: Double? = nil
     #endif
@@ -2571,6 +2585,8 @@ if let requestedJSONOutputPath {
             metalLibrary: reportMetalLibrary,
             metalMinimumGPUByteCount: reportMetalMinimumGPUByteCount,
             metalTileByteCount: reportMetalTileByteCount,
+            metalMappedTileByteCount: reportMetalMappedTileByteCount,
+            metalStagedReadTileByteCount: reportMetalStagedReadTileByteCount,
             metalModes: reportMetalModes,
             fileModes: requestedFileTimingModes.map(\.rawValue),
             cryptoKitModes: reportCryptoKitModes,
