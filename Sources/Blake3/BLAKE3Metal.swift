@@ -856,9 +856,26 @@ public enum BLAKE3Metal {
             range: Range<Int>,
             baseChunkCounter: UInt64
         ) async throws -> BLAKE3Core.ChainingValue {
+            try await chunkSubtreeChainingValueAsync(
+                buffer: buffer,
+                range: range,
+                baseChunkCounter: baseChunkCounter,
+                workspace: defaultAsyncWorkspace
+            )
+        }
+
+        func chunkSubtreeChainingValueAsync(
+            buffer: MTLBuffer,
+            range: Range<Int>,
+            baseChunkCounter: UInt64,
+            workspace asyncWorkspace: AsyncWorkspace
+        ) async throws -> BLAKE3Core.ChainingValue {
             try Task.checkCancellation()
             guard buffer.device.registryID == device.registryID else {
                 throw BLAKE3Error.metalCommandFailed("Buffer belongs to a different Metal device.")
+            }
+            guard asyncWorkspace.deviceRegistryID == device.registryID else {
+                throw BLAKE3Error.metalCommandFailed("Async workspace belongs to a different Metal device.")
             }
             guard range.lowerBound >= 0,
                   range.upperBound <= buffer.length,
@@ -875,12 +892,12 @@ public enum BLAKE3Metal {
                 throw BLAKE3Error.metalCommandFailed("Subtree chaining value ranges must contain a power-of-two chunk count.")
             }
 
-            let lease = try defaultAsyncWorkspace.lease(chunkCount: chunkCount)
+            let lease = try asyncWorkspace.lease(chunkCount: chunkCount)
             let buffers: AsyncHashBuffers
             do {
                 buffers = try lease.resources.buffers()
             } catch {
-                defaultAsyncWorkspace.release(lease)
+                asyncWorkspace.release(lease)
                 throw error
             }
 
@@ -900,7 +917,7 @@ public enum BLAKE3Metal {
                     parameterBuffer: buffers.parameterBuffer
                 )
             } catch {
-                defaultAsyncWorkspace.release(lease)
+                asyncWorkspace.release(lease)
                 throw error
             }
 
@@ -908,7 +925,7 @@ public enum BLAKE3Metal {
                 (continuation: CheckedContinuation<BLAKE3Core.ChainingValue, Error>) in
                 commandBuffer.addCompletedHandler { completedBuffer in
                     defer {
-                        self.defaultAsyncWorkspace.release(lease)
+                        asyncWorkspace.release(lease)
                     }
                     if let error = completedBuffer.error {
                         continuation.resume(throwing: BLAKE3Error.metalCommandFailed(error.localizedDescription))

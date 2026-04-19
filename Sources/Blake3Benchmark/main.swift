@@ -78,7 +78,7 @@ private enum FileTimingMode: String {
         case .metalTiledMemoryMapped:
             return "timed file open/stat, mmap, no-copy Metal buffer wrapper, tiled GPU chunk-CV dispatches, CPU CV-stack merge, digest read, munmap, close; benchmark file creation excluded"
         case .metalStagedRead:
-            return "timed file open/stat, bounded read directly into a shared Metal staging buffer, tiled GPU chunk-CV dispatches, CPU CV-stack merge, digest read, close; benchmark file creation excluded"
+            return "timed file open/stat, bounded read directly into shared Metal staging buffers, async tiled GPU chunk-CV dispatches, CPU CV-stack merge, digest read, close; benchmark file creation excluded"
         #endif
         }
     }

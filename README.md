@@ -20,14 +20,14 @@ This run used the current 128-chunk ping-pong fused tile default and runtime Met
 
 The automatic path uses Swift CPU hashing below the Metal crossover and Metal for larger unkeyed inputs. The current default crossover is 16 MiB, which keeps small buffers on the CPU path while letting larger buffers use the GPU when that is beneficial for the selected timing class.
 
-File rows are the reality check for allocation, copy, file-cache, mmap/page-in, and thermal behavior. The staged-read Metal file path reads bounded tiles directly into shared Metal buffers and avoids large final-tile CPU CV merges. The CPU read row now uses two bounded read buffers so file copy can overlap the previous tile's subtree reduction.
+File rows are the reality check for allocation, copy, file-cache, mmap/page-in, and thermal behavior. The staged-read Metal file path reads bounded tiles directly into shared Metal buffers, pipelines async GPU tile reductions across four leased slots, and avoids large final-tile CPU CV merges. The CPU read row uses two bounded read buffers so file copy can overlap the previous tile's subtree reduction.
 
 | File Input | CPU bounded read | CPU mmap parallel | Metal tiled mmap GPU | Metal staged read GPU |
 | --- | ---: | ---: | ---: | ---: |
-| 512 MiB | 7.50 GiB/s | 9.08 GiB/s | 6.79 GiB/s | 10.49 GiB/s |
-| 1 GiB | 7.69 GiB/s | 9.57 GiB/s | 8.48 GiB/s | 10.30 GiB/s |
+| 512 MiB | 7.53 GiB/s | 9.41 GiB/s | 7.37 GiB/s | 11.80 GiB/s |
+| 1 GiB | 7.71 GiB/s | 9.42 GiB/s | 9.60 GiB/s | 11.99 GiB/s |
 
-These rows run each file strategy in a separate benchmark process, with JSON validation and thermal snapshots around each mode. The staged-read row uses the new 32 MiB staged tile default and the final-prefix CV merge threshold; a staged-only two-repeat check at `/tmp/blake3swift-file-reality-final-cv-threshold32k` measured 11.37/10.99 and 11.24/10.76 GiB/s for 512 MiB/1 GiB. Full publication and file-path fixtures are kept under `benchmarks/results/`. File mmap timings are more page-in sensitive than resident-memory timings and are not used for staged/wrapped/resident overhead claims.
+These rows run each file strategy in a separate benchmark process, with JSON validation and thermal snapshots around each mode. The staged-read row uses the 32 MiB staged tile default, four async read/GPU slots, a matching preallocated Metal async workspace, and the final-prefix CV merge threshold. A staged-only final-code repeat check at `/tmp/blake3swift-file-reality-async-workspace-default4` measured 10.44/11.58 and 10.15/11.27 GiB/s for 512 MiB/1 GiB. Full publication and file-path fixtures are kept under `benchmarks/results/`. File mmap timings are more page-in sensitive than resident-memory timings and are not used for staged/wrapped/resident overhead claims.
 
 ## Features
 
@@ -168,7 +168,7 @@ let digest = try await BLAKE3File.hashAsync(
 print(digest)
 ```
 
-The default tiled mmap Metal file tile is 64 MiB on this branch, while staged-read Metal now defaults to 32 MiB. `.metalTiledMemoryMapped()` remains available as the no-copy mmap path, but `.metalStagedRead()` is the preferred reality-check path when mmap page-in noise dominates. Staged-read Metal uses two bounded shared buffers by default so file reads can overlap the previous tile's GPU reduction. CPU mapped parallel hashing uses the direct one-shot parallel tree for files up to 2 GiB, then falls back to the smaller 16 MiB subtree-tiled path to avoid unbounded CV workspace growth. CPU regular-file reads use bounded 64 MiB read tiles, two read buffers by default, and CPU subtree reductions overlapped with the next file read.
+The default tiled mmap Metal file tile is 64 MiB on this branch, while staged-read Metal now defaults to 32 MiB. `.metalTiledMemoryMapped()` remains available as the no-copy mmap path, but `.metalStagedRead()` is the preferred reality-check path when mmap page-in noise dominates. Staged-read Metal uses four bounded shared buffers and a matching async workspace by default so file reads can overlap multiple in-flight GPU reductions without sharing scratch or CV output buffers. CPU mapped parallel hashing uses the direct one-shot parallel tree for files up to 2 GiB, then falls back to the smaller 16 MiB subtree-tiled path to avoid unbounded CV workspace growth. CPU regular-file reads use bounded 64 MiB read tiles, two read buffers by default, and CPU subtree reductions overlapped with the next file read.
 
 ## Metal Resident Hashing
 
@@ -304,7 +304,7 @@ Resident mode starts after the input is already in a Metal-accessible buffer and
 
 End-to-end mode starts from Swift-owned input and includes buffer creation, input transfer/setup, command submission, hashing, reduction, and digest extraction. It measures the application path.
 
-File modes include the selected file access strategy. Memory-mapped modes include mapping and digest extraction. CPU `read` uses bounded read tiles with CPU subtree reductions for regular files. CPU `mmap-parallel` uses a direct parallel tree up to the mapped one-shot cap and a bounded subtree-tiled fallback above it. Tiled Metal mmap mode includes tile mapping, Metal dispatches, per-tile CV extraction, and final canonical tree reduction. Staged-read Metal mode includes file reads into bounded shared Metal buffers, tile dispatches, digest readback, and final canonical tree reduction. Set `BLAKE3_SWIFT_METAL_STAGED_READ_INFLIGHT=1` to force the older one-buffer staged-read timing shape.
+File modes include the selected file access strategy. Memory-mapped modes include mapping and digest extraction. CPU `read` uses bounded read tiles with CPU subtree reductions for regular files. CPU `mmap-parallel` uses a direct parallel tree up to the mapped one-shot cap and a bounded subtree-tiled fallback above it. Tiled Metal mmap mode includes tile mapping, Metal dispatches, per-tile CV extraction, and final canonical tree reduction. Staged-read Metal mode includes file reads into bounded shared Metal buffers, async tile dispatches, digest readback, and final canonical tree reduction. Set `BLAKE3_SWIFT_METAL_STAGED_READ_INFLIGHT=1` to force the older one-buffer staged-read timing shape; the default is four bounded read/GPU slots.
 
 Warmup runs should be kept separate from reported measurements. Pipeline compilation, first allocation, and first dispatch are excluded from resident headline numbers unless a benchmark mode explicitly states otherwise.
 

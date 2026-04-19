@@ -701,10 +701,16 @@ public enum BLAKE3File {
             let tileChunkCapacity = max(1, alignedTileByteCount / BLAKE3.chunkByteCount)
             let stagedReadInflightCount = configuredMetalStagedReadInflightCount()
             let context = try BLAKE3Metal.cachedContext(device: device, librarySource: librarySource)
+            let asyncWorkspace = try context.makeAsyncWorkspace(
+                maxPooledResources: stagedReadInflightCount,
+                preallocateForByteCount: alignedTileByteCount
+            )
             let stagingBuffers = try (0..<stagedReadInflightCount).map { _ in
                 try context.makeStagingBuffer(capacity: alignedTileByteCount)
             }
-            let chunkCVBuffer = try context.makeChunkChainingValueBuffer(chunkCapacity: tileChunkCapacity)
+            let chunkCVBuffers = try (0..<stagedReadInflightCount).map { _ in
+                try context.makeChunkChainingValueBuffer(chunkCapacity: tileChunkCapacity)
+            }
 
             let fd = open(path, O_RDONLY)
             guard fd >= 0 else {
@@ -731,22 +737,32 @@ public enum BLAKE3File {
             }
 
             enableReadAhead(fd: fd)
-            let workQueue = DispatchQueue(label: "org.blake3swift.metal-staged-read")
             var stack = BLAKE3Core.CVStack()
             var fileOffset = 0
             var bufferIndex = 0
-            var pendingTileWork: MetalFileTileWork?
+            var pendingSlots = [MetalFileTileWork?](
+                repeating: nil,
+                count: stagedReadInflightCount
+            )
+            var pendingQueue = [MetalFileTileWork]()
+            pendingQueue.reserveCapacity(stagedReadInflightCount)
             defer {
-                _ = try? pendingTileWork?.wait()
+                for tileWork in pendingQueue {
+                    _ = try? tileWork.wait()
+                }
             }
 
             while fileOffset < fileSize {
                 try cancellationCheck?()
-                if stagedReadInflightCount == 1, let tileWork = pendingTileWork {
-                    pendingTileWork = nil
-                    pushMetalFileStackEntries(try tileWork.wait(), into: &stack)
-                }
+                try drainMetalFileTileWork(
+                    untilBufferAvailableAt: bufferIndex,
+                    pendingSlots: &pendingSlots,
+                    pendingQueue: &pendingQueue,
+                    into: &stack
+                )
+
                 let stagingBuffer = stagingBuffers[bufferIndex]
+                let chunkCVBuffer = chunkCVBuffers[bufferIndex]
                 let stagingPointer = stagingBuffer.metalBuffer.contents()
                 let remaining = fileSize - fileOffset
                 let tileLength = min(alignedTileByteCount, remaining)
@@ -764,31 +780,30 @@ public enum BLAKE3File {
                     tileLength
                 }
 
-                if stagedReadInflightCount > 1, let tileWork = pendingTileWork {
-                    pendingTileWork = nil
-                    pushMetalFileStackEntries(try tileWork.wait(), into: &stack)
-                }
-
                 if completeChunkByteCount > 0 {
                     let chunkRange = 0..<completeChunkByteCount
                     let completeChunkCount = completeChunkByteCount / BLAKE3.chunkByteCount
-                    pendingTileWork = startMetalFileTileWork(
+                    let tileWork = startMetalFileTileWork(
                         context: context,
+                        asyncWorkspace: asyncWorkspace,
                         buffer: stagingBuffer.metalBuffer,
                         range: chunkRange,
                         chunkCount: completeChunkCount,
                         baseChunkCounter: UInt64(fileOffset / BLAKE3.chunkByteCount),
                         chunkCVBuffer: chunkCVBuffer,
                         subtreeDecompositionChunkThreshold: metalStagedReadSubtreeDecompositionChunkThreshold,
-                        queue: workQueue
+                        bufferIndex: bufferIndex
                     )
+                    pendingSlots[bufferIndex] = tileWork
+                    pendingQueue.append(tileWork)
                 }
 
                 if isFinalTile {
-                    if let tileWork = pendingTileWork {
-                        pendingTileWork = nil
-                        pushMetalFileStackEntries(try tileWork.wait(), into: &stack)
-                    }
+                    try drainAllMetalFileTileWork(
+                        pendingSlots: &pendingSlots,
+                        pendingQueue: &pendingQueue,
+                        into: &stack
+                    )
                     let currentChunkLength = tileLength - completeChunkByteCount
                     let currentChunk = UnsafeRawBufferPointer(
                         start: stagingPointer.advanced(by: completeChunkByteCount),
@@ -835,9 +850,9 @@ public enum BLAKE3File {
             .environment["BLAKE3_SWIFT_METAL_STAGED_READ_INFLIGHT"],
               let parsed = Int(rawValue)
         else {
-            return 2
+            return 4
         }
-        return min(max(parsed, 1), 2)
+        return min(max(parsed, 1), 4)
     }
 
     private struct MetalFileStackEntry {
@@ -846,8 +861,13 @@ public enum BLAKE3File {
     }
 
     private final class MetalFileTileWork: @unchecked Sendable {
+        let bufferIndex: Int
         private let semaphore = DispatchSemaphore(value: 0)
         private var result: Result<[MetalFileStackEntry], Error>?
+
+        init(bufferIndex: Int) {
+            self.bufferIndex = bufferIndex
+        }
 
         func complete(_ result: Result<[MetalFileStackEntry], Error>) {
             self.result = result
@@ -869,20 +889,22 @@ public enum BLAKE3File {
 
     private static func startMetalFileTileWork(
         context: BLAKE3Metal.Context,
+        asyncWorkspace: BLAKE3Metal.AsyncWorkspace,
         buffer: MTLBuffer,
         range: Range<Int>,
         chunkCount: Int,
         baseChunkCounter: UInt64,
         chunkCVBuffer: BLAKE3Metal.ChunkChainingValueBuffer,
         subtreeDecompositionChunkThreshold: Int,
-        queue: DispatchQueue
+        bufferIndex: Int
     ) -> MetalFileTileWork {
-        let work = MetalFileTileWork()
+        let work = MetalFileTileWork(bufferIndex: bufferIndex)
         let bufferReference = MetalFileBufferReference(buffer: buffer)
-        queue.async {
+        Task.detached(priority: .userInitiated) {
             do {
-                let entries = try collectCompleteMetalChunkEntries(
+                let entries = try await collectCompleteMetalChunkEntriesAsync(
                     context: context,
+                    asyncWorkspace: asyncWorkspace,
                     buffer: bufferReference.buffer,
                     range: range,
                     chunkCount: chunkCount,
@@ -896,6 +918,48 @@ public enum BLAKE3File {
             }
         }
         return work
+    }
+
+    private static func drainMetalFileTileWork(
+        untilBufferAvailableAt bufferIndex: Int,
+        pendingSlots: inout [MetalFileTileWork?],
+        pendingQueue: inout [MetalFileTileWork],
+        into stack: inout BLAKE3Core.CVStack
+    ) throws {
+        while pendingSlots[bufferIndex] != nil {
+            try drainNextMetalFileTileWork(
+                pendingSlots: &pendingSlots,
+                pendingQueue: &pendingQueue,
+                into: &stack
+            )
+        }
+    }
+
+    private static func drainAllMetalFileTileWork(
+        pendingSlots: inout [MetalFileTileWork?],
+        pendingQueue: inout [MetalFileTileWork],
+        into stack: inout BLAKE3Core.CVStack
+    ) throws {
+        while !pendingQueue.isEmpty {
+            try drainNextMetalFileTileWork(
+                pendingSlots: &pendingSlots,
+                pendingQueue: &pendingQueue,
+                into: &stack
+            )
+        }
+    }
+
+    private static func drainNextMetalFileTileWork(
+        pendingSlots: inout [MetalFileTileWork?],
+        pendingQueue: inout [MetalFileTileWork],
+        into stack: inout BLAKE3Core.CVStack
+    ) throws {
+        guard !pendingQueue.isEmpty else {
+            return
+        }
+        let tileWork = pendingQueue.removeFirst()
+        pushMetalFileStackEntries(try tileWork.wait(), into: &stack)
+        pendingSlots[tileWork.bufferIndex] = nil
     }
     #endif
 
@@ -1370,6 +1434,68 @@ public enum BLAKE3File {
             range: range,
             baseChunkCounter: baseChunkCounter,
             into: chunkCVBuffer
+        )
+        var entries = [MetalFileStackEntry]()
+        entries.reserveCapacity(writtenChunkCount)
+        try chunkCVBuffer.withUnsafeBytes { raw in
+            guard raw.count >= writtenChunkCount * BLAKE3.digestByteCount else {
+                throw BLAKE3Error.metalCommandFailed("Metal chunk chaining value output is shorter than expected.")
+            }
+            for chunkIndex in 0..<writtenChunkCount {
+                let offset = chunkIndex * BLAKE3.digestByteCount
+                let cv = BLAKE3Core.chainingValue(from: raw, atByteOffset: offset)
+                entries.append(MetalFileStackEntry(cv: cv, chunkCount: 1))
+            }
+        }
+        return entries
+    }
+
+    private static func collectCompleteMetalChunkEntriesAsync(
+        context: BLAKE3Metal.Context,
+        asyncWorkspace: BLAKE3Metal.AsyncWorkspace,
+        buffer: MTLBuffer,
+        range: Range<Int>,
+        chunkCount: Int,
+        baseChunkCounter: UInt64,
+        chunkCVBuffer: BLAKE3Metal.ChunkChainingValueBuffer,
+        subtreeDecompositionChunkThreshold: Int
+    ) async throws -> [MetalFileStackEntry] {
+        guard chunkCount > 0 else {
+            return []
+        }
+        guard range.count == chunkCount * BLAKE3.chunkByteCount else {
+            throw BLAKE3Error.invalidBufferRange
+        }
+
+        if chunkCount.nonzeroBitCount == 1 || chunkCount >= subtreeDecompositionChunkThreshold {
+            var entries = [MetalFileStackEntry]()
+            entries.reserveCapacity(chunkCount.nonzeroBitCount)
+            var remainingChunkCount = chunkCount
+            var processedChunkCount = 0
+            while remainingChunkCount > 0 {
+                try Task.checkCancellation()
+                let subtreeChunkCount = largestPowerOfTwo(notExceeding: remainingChunkCount)
+                let subtreeLowerBound = range.lowerBound + processedChunkCount * BLAKE3.chunkByteCount
+                let subtreeRange = subtreeLowerBound..<(subtreeLowerBound + subtreeChunkCount * BLAKE3.chunkByteCount)
+                let cv = try await context.chunkSubtreeChainingValueAsync(
+                    buffer: buffer,
+                    range: subtreeRange,
+                    baseChunkCounter: baseChunkCounter + UInt64(processedChunkCount),
+                    workspace: asyncWorkspace
+                )
+                entries.append(MetalFileStackEntry(cv: cv, chunkCount: subtreeChunkCount))
+                processedChunkCount += subtreeChunkCount
+                remainingChunkCount -= subtreeChunkCount
+            }
+            return entries
+        }
+
+        let writtenChunkCount = try await context.writeChunkChainingValuesAsync(
+            buffer: buffer,
+            range: range,
+            baseChunkCounter: baseChunkCounter,
+            into: chunkCVBuffer,
+            workspace: asyncWorkspace
         )
         var entries = [MetalFileStackEntry]()
         entries.reserveCapacity(writtenChunkCount)
