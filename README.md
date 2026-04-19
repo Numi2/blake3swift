@@ -29,6 +29,39 @@ File rows are the reality check for allocation, copy, file-cache, mmap/page-in, 
 
 These rows run each file strategy in a separate benchmark process, with JSON validation and thermal snapshots around each mode. The staged-read row uses the 32 MiB staged tile default, four async read/GPU slots, a matching preallocated Metal async workspace, and the final-prefix CV merge threshold. A staged-only final-code repeat check at `/tmp/blake3swift-file-reality-async-workspace-default4` measured 10.44/11.58 and 10.15/11.27 GiB/s for 512 MiB/1 GiB. Full publication and file-path fixtures are kept under `benchmarks/results/`. File mmap timings are more page-in sensitive than resident-memory timings and are not used for staged/wrapped/resident overhead claims.
 
+### `flatkernels` optimization branch
+
+The `flatkernels` branch is the current CPU-side optimization experiment. The retained changes replace the streaming hasher's 1 KiB chunk staging with a one-block candidate-final state, collapse SIMD4 four-chunk batches locally before touching the CV stack, use uninitialized CV workspace arrays instead of zero-filled arrays in hot leaf/parent staging, unroll scalar full-chunk block processing, and make CPU regular-file read inflight buffering size-aware. These benchmarks were recorded on April 19, 2026 under `benchmarks/results/20260419T174416Z-flatkernels-streambench-final2`, `20260419T182711Z-flatkernels-uninitarrays-smoke`, and `20260419T183247Z-flatkernels-read-inflight`. Correctness checks passed in each benchmark row, and `swift test` passed 35 tests after the changes.
+
+Streaming update throughput improved most where the old chunk staging was most expensive. The table below compares median GiB/s against clean `main` for 16 MiB total input:
+
+| Update size | `main` | `flatkernels` | Change |
+| ---: | ---: | ---: | ---: |
+| 1 byte | 0.0666 | 0.1094 | +64.3% |
+| 64 bytes | 0.8451 | 0.8205 | -2.9% |
+| 1 KiB | 1.0253 | 1.0386 | +1.3% |
+| 64 KiB | 1.0831 | 1.0885 | +0.5% |
+
+The post-workspace CPU smoke run measured:
+
+| Input | Scalar CPU | SIMD4 single | CPU parallel | CPU context-auto |
+| --- | ---: | ---: | ---: | ---: |
+| 1 MiB | 1.11 GiB/s | 1.72 GiB/s | 5.36 GiB/s | 5.49 GiB/s |
+| 16 MiB | 1.16 GiB/s | 1.77 GiB/s | 9.09 GiB/s | 9.08 GiB/s |
+| 64 MiB | 1.16 GiB/s | 1.77 GiB/s | 10.11 GiB/s | 10.25 GiB/s |
+
+The uninitialized CV workspace change was a clear win in the short smoke comparison: 1 MiB `parallel` moved from 4.41 to 5.36 GiB/s and 1 MiB `context-auto` moved from 4.39 to 5.49 GiB/s. The scalar full-chunk unroll improved scalar throughput in focused runs, but it also made release compilation much slower in this branch, with benchmark product builds around 134-146 seconds. Treat that unroll as an explicit compile-time versus runtime tradeoff.
+
+CPU regular-file read inflight was swept with 2, 3, and 4 bounded read buffers:
+
+| File size | 2 buffers | 3 buffers | 4 buffers | Branch default |
+| --- | ---: | ---: | ---: | --- |
+| 16 MiB | 4.03 GiB/s | 3.80 GiB/s | 4.03 GiB/s | 2 buffers |
+| 64 MiB | 5.11 GiB/s | 5.03 GiB/s | 5.04 GiB/s | 2 buffers |
+| 256 MiB | 6.74 GiB/s | 7.06 GiB/s | 7.09 GiB/s | 4 buffers |
+
+An attempted CPU `XOF4` SIMD expander was correct but slower, so it was not retained. The recorded experiment under `benchmarks/results/20260419T175329Z-flatkernels-xof4` was roughly 25-45% slower than the scalar root-output path for the measured output sizes.
+
 ## Features
 
 - Native Swift BLAKE3 library target; vendored official C code remains under its upstream license and is isolated to benchmark support.
@@ -39,7 +72,7 @@ These rows run each file strategy in a separate benchmark process, with JSON val
 - CPU parallel hashing defaults to the active processor count, with explicit worker overrides for reproducible benchmarks.
 - Default one-shot hashing uses CPU parallelism for CPU-visible work and no-copy Metal for large unkeyed inputs when available.
 - Explicit `hashSerial`, `hashCPU`, and `hashParallel` APIs keep CPU-only benchmarking and backend selection reproducible.
-- Bounded-memory CV stack for streaming and multi-GB file hashing.
+- Bounded-memory CV stack for streaming and multi-GB file hashing; the `flatkernels` streaming state keeps only the current undecided 64-byte block.
 - CPU file strategies for buffered reads and memory-mapped hashing.
 - Metal resident-buffer, no-copy Swift input, staged-buffer, tuned private-staged, async pipeline, tiled mmap file, and staged-read file hashing APIs.
 - Fused Metal tile reduction for aligned full-chunk shared-memory inputs.
@@ -168,7 +201,7 @@ let digest = try await BLAKE3File.hashAsync(
 print(digest)
 ```
 
-The default tiled mmap Metal file tile is 64 MiB on this branch, while staged-read Metal now defaults to 32 MiB. `.metalTiledMemoryMapped()` remains available as the no-copy mmap path, but `.metalStagedRead()` is the preferred reality-check path when mmap page-in noise dominates. Staged-read Metal uses four bounded shared buffers and a matching async workspace by default so file reads can overlap multiple in-flight GPU reductions without sharing scratch or CV output buffers. CPU mapped parallel hashing uses the direct one-shot parallel tree for files up to 2 GiB, then falls back to the smaller 16 MiB subtree-tiled path to avoid unbounded CV workspace growth. CPU regular-file reads use bounded 64 MiB read tiles, two read buffers by default, and CPU subtree reductions overlapped with the next file read.
+The default tiled mmap Metal file tile is 64 MiB on this branch, while staged-read Metal now defaults to 32 MiB. `.metalTiledMemoryMapped()` remains available as the no-copy mmap path, but `.metalStagedRead()` is the preferred reality-check path when mmap page-in noise dominates. Staged-read Metal uses four bounded shared buffers and a matching async workspace by default so file reads can overlap multiple in-flight GPU reductions without sharing scratch or CV output buffers. CPU mapped parallel hashing uses the direct one-shot parallel tree for files up to 2 GiB, then falls back to the smaller 16 MiB subtree-tiled path to avoid unbounded CV workspace growth. CPU regular-file reads use bounded 64 MiB read tiles, two read buffers below 128 MiB, four read buffers at and above 128 MiB, and CPU subtree reductions overlapped with the next file read. Set `BLAKE3_SWIFT_READ_INFLIGHT` to `1`, `2`, `3`, or `4` to override that default for local sweeps.
 
 ## Metal Resident Hashing
 
@@ -304,7 +337,7 @@ Resident mode starts after the input is already in a Metal-accessible buffer and
 
 End-to-end mode starts from Swift-owned input and includes buffer creation, input transfer/setup, command submission, hashing, reduction, and digest extraction. It measures the application path.
 
-File modes include the selected file access strategy. Memory-mapped modes include mapping and digest extraction. CPU `read` uses bounded read tiles with CPU subtree reductions for regular files. CPU `mmap-parallel` uses a direct parallel tree up to the mapped one-shot cap and a bounded subtree-tiled fallback above it. Tiled Metal mmap mode includes tile mapping, Metal dispatches, per-tile CV extraction, and final canonical tree reduction. Staged-read Metal mode includes file reads into bounded shared Metal buffers, async tile dispatches, digest readback, and final canonical tree reduction. Set `BLAKE3_SWIFT_METAL_STAGED_READ_INFLIGHT=1` to force the older one-buffer staged-read timing shape; the default is four bounded read/GPU slots.
+File modes include the selected file access strategy. Memory-mapped modes include mapping and digest extraction. CPU `read` uses bounded read tiles with CPU subtree reductions for regular files and a size-aware read-inflight default. CPU `mmap-parallel` uses a direct parallel tree up to the mapped one-shot cap and a bounded subtree-tiled fallback above it. Tiled Metal mmap mode includes tile mapping, Metal dispatches, per-tile CV extraction, and final canonical tree reduction. Staged-read Metal mode includes file reads into bounded shared Metal buffers, async tile dispatches, digest readback, and final canonical tree reduction. Set `BLAKE3_SWIFT_READ_INFLIGHT=1`, `2`, `3`, or `4` to sweep CPU read buffering. Set `BLAKE3_SWIFT_METAL_STAGED_READ_INFLIGHT=1` to force the older one-buffer staged-read timing shape; the Metal staged-read default is four bounded read/GPU slots.
 
 Warmup runs should be kept separate from reported measurements. Pipeline compilation, first allocation, and first dispatch are excluded from resident headline numbers unless a benchmark mode explicitly states otherwise.
 

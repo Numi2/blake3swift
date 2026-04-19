@@ -237,7 +237,7 @@ public enum BLAKE3File {
     ) throws -> BLAKE3.Digest {
         enableReadAhead(fd: fd)
         let clampedBufferSize = max(1, min(bufferSize, fileSize))
-        let readInflightCount = configuredReadInflightCount()
+        let readInflightCount = configuredReadInflightCount(fileSize: fileSize)
         let buffers = (0..<readInflightCount).map { _ in
             UnsafeMutableRawPointer.allocate(
                 byteCount: clampedBufferSize,
@@ -1166,14 +1166,14 @@ public enum BLAKE3File {
         return 1 << (Int.bitWidth - value.leadingZeroBitCount - 1)
     }
 
-    private static func configuredReadInflightCount() -> Int {
+    private static func configuredReadInflightCount(fileSize: Int) -> Int {
         guard let rawValue = ProcessInfo.processInfo
             .environment["BLAKE3_SWIFT_READ_INFLIGHT"],
               let parsed = Int(rawValue)
         else {
-            return 2
+            return fileSize >= 128 * 1024 * 1024 ? 4 : 2
         }
-        return min(max(parsed, 1), 2)
+        return min(max(parsed, 1), 4)
     }
 
     private struct CPUFileStackEntry {

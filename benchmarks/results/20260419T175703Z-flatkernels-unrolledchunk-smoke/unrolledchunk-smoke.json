@@ -1,0 +1,547 @@
+{
+  "command_line" : [
+    "/Users/home/MetalCryptography/blake3swift/.build/release/blake3-bench",
+    "--sizes",
+    "64k,1m,16m,64m",
+    "--iterations",
+    "5",
+    "--metal-modes",
+    "none",
+    "--cryptokit-modes",
+    "none",
+    "--file-modes",
+    "none",
+    "--json-output",
+    "benchmarks/results/20260419T175703Z-flatkernels-unrolledchunk-smoke/unrolledchunk-smoke.json"
+  ],
+  "environment" : {
+    "backend" : "swift-simd4",
+    "cryptokit_modes" : [
+
+    ],
+    "default_backend_policy" : "automatic",
+    "default_metal_minimum_byte_count" : 16777216,
+    "default_parallel_workers" : 10,
+    "file_modes" : [
+
+    ],
+    "hasher_bytes" : 8,
+    "memory_stats" : false,
+    "metal_device" : "Apple M4",
+    "metal_library" : "runtime-source",
+    "metal_mapped_tile_byte_count" : 67108864,
+    "metal_minimum_gpu_byte_count" : 16777216,
+    "metal_modes" : [
+
+    ],
+    "metal_staged_read_tile_byte_count" : 33554432,
+    "metal_tile_byte_count" : 67108864,
+    "parallel_simd_degree" : 4,
+    "simd_degree" : 4
+  },
+  "generated_at_utc" : "2026-04-19T17:59:20.119Z",
+  "memory_samples" : [
+
+  ],
+  "request" : {
+    "iterations_override" : 5,
+    "sizes" : [
+      "64.0 KiB",
+      "1.0 MiB",
+      "16.0 MiB",
+      "64.0 MiB"
+    ],
+    "sizes_bytes" : [
+      65536,
+      1048576,
+      16777216,
+      67108864
+    ]
+  },
+  "rows" : [
+    {
+      "backend" : "cpu",
+      "byte_count" : 65536,
+      "correct" : true,
+      "digest" : "c15428724173e3056b7b6c6bf703039fb2f48059a8cb844b981d9f1adc8ad63f",
+      "iterations" : 5,
+      "maximum_gib_per_second" : 1.0802682522123894,
+      "median_gib_per_second" : 1.0739197707358272,
+      "minimum_gib_per_second" : 0.9605482397469391,
+      "mode" : "scalar",
+      "p95_gib_per_second" : 1.0802682522123894,
+      "sample_nanoseconds" : [
+        63542,
+        56750,
+        56834,
+        56500,
+        57041
+      ],
+      "size" : "64.0 KiB"
+    },
+    {
+      "backend" : "cpu",
+      "byte_count" : 65536,
+      "correct" : true,
+      "digest" : "c15428724173e3056b7b6c6bf703039fb2f48059a8cb844b981d9f1adc8ad63f",
+      "iterations" : 5,
+      "maximum_gib_per_second" : 1.6240096918819678,
+      "median_gib_per_second" : 1.6185832626163514,
+      "minimum_gib_per_second" : 1.5054796568990183,
+      "mode" : "single-simd",
+      "p95_gib_per_second" : 1.6240096918819678,
+      "sample_nanoseconds" : [
+        37709,
+        37625,
+        37583,
+        38958,
+        40542
+      ],
+      "size" : "64.0 KiB"
+    },
+    {
+      "backend" : "cpu",
+      "byte_count" : 65536,
+      "correct" : true,
+      "digest" : "c15428724173e3056b7b6c6bf703039fb2f48059a8cb844b981d9f1adc8ad63f",
+      "iterations" : 5,
+      "maximum_gib_per_second" : 1.6097467098322606,
+      "median_gib_per_second" : 1.6079231868595063,
+      "minimum_gib_per_second" : 1.2573679751555356,
+      "mode" : "parallel",
+      "p95_gib_per_second" : 1.6097467098322606,
+      "sample_nanoseconds" : [
+        37916,
+        37958,
+        37959,
+        38041,
+        48542
+      ],
+      "size" : "64.0 KiB"
+    },
+    {
+      "backend" : "official-c",
+      "byte_count" : 65536,
+      "correct" : true,
+      "digest" : "c15428724173e3056b7b6c6bf703039fb2f48059a8cb844b981d9f1adc8ad63f",
+      "iterations" : 5,
+      "maximum_gib_per_second" : 2.0176911157024793,
+      "median_gib_per_second" : 1.8565826996197718,
+      "minimum_gib_per_second" : 1.5921937770647465,
+      "mode" : "one-shot",
+      "p95_gib_per_second" : 2.0176911157024793,
+      "sample_nanoseconds" : [
+        32875,
+        35916,
+        32833,
+        38334,
+        30250
+      ],
+      "size" : "64.0 KiB"
+    },
+    {
+      "backend" : "cpu",
+      "byte_count" : 65536,
+      "correct" : true,
+      "digest" : "c15428724173e3056b7b6c6bf703039fb2f48059a8cb844b981d9f1adc8ad63f",
+      "iterations" : 5,
+      "maximum_gib_per_second" : 1.606188322368421,
+      "median_gib_per_second" : 1.6044150215551234,
+      "minimum_gib_per_second" : 1.2606141696098478,
+      "mode" : "context-auto",
+      "p95_gib_per_second" : 1.606188322368421,
+      "sample_nanoseconds" : [
+        48417,
+        38167,
+        38042,
+        38041,
+        38000
+      ],
+      "size" : "64.0 KiB"
+    },
+    {
+      "backend" : "blake3",
+      "byte_count" : 65536,
+      "correct" : true,
+      "digest" : "c15428724173e3056b7b6c6bf703039fb2f48059a8cb844b981d9f1adc8ad63f",
+      "iterations" : 5,
+      "maximum_gib_per_second" : 1.6114892739273927,
+      "median_gib_per_second" : 1.606188322368421,
+      "minimum_gib_per_second" : 1.6044150215551234,
+      "mode" : "default-auto",
+      "p95_gib_per_second" : 1.6114892739273927,
+      "sample_nanoseconds" : [
+        38042,
+        38000,
+        38000,
+        37959,
+        37875
+      ],
+      "size" : "64.0 KiB"
+    },
+    {
+      "backend" : "cpu",
+      "byte_count" : 1048576,
+      "correct" : true,
+      "digest" : "b06fa927b982abc279cc2d2148e337d09a3d20aa2e6095ee8d6eb9d9fdafd47c",
+      "iterations" : 5,
+      "maximum_gib_per_second" : 1.1134729009557125,
+      "median_gib_per_second" : 1.0923517897091721,
+      "minimum_gib_per_second" : 1.0711351660838777,
+      "mode" : "scalar",
+      "p95_gib_per_second" : 1.1134729009557125,
+      "sample_nanoseconds" : [
+        911541,
+        911708,
+        894000,
+        877958,
+        877042
+      ],
+      "size" : "1.0 MiB"
+    },
+    {
+      "backend" : "cpu",
+      "byte_count" : 1048576,
+      "correct" : true,
+      "digest" : "b06fa927b982abc279cc2d2148e337d09a3d20aa2e6095ee8d6eb9d9fdafd47c",
+      "iterations" : 5,
+      "maximum_gib_per_second" : 1.7115169922693103,
+      "median_gib_per_second" : 1.7092672587313202,
+      "minimum_gib_per_second" : 1.6755442811234091,
+      "mode" : "single-simd",
+      "p95_gib_per_second" : 1.7115169922693103,
+      "sample_nanoseconds" : [
+        582833,
+        579917,
+        571334,
+        570792,
+        570583
+      ],
+      "size" : "1.0 MiB"
+    },
+    {
+      "backend" : "cpu",
+      "byte_count" : 1048576,
+      "correct" : true,
+      "digest" : "b06fa927b982abc279cc2d2148e337d09a3d20aa2e6095ee8d6eb9d9fdafd47c",
+      "iterations" : 5,
+      "maximum_gib_per_second" : 5.653039073806078,
+      "median_gib_per_second" : 4.405558362581542,
+      "minimum_gib_per_second" : 4.229832160259881,
+      "mode" : "parallel",
+      "p95_gib_per_second" : 5.653039073806078,
+      "sample_nanoseconds" : [
+        172750,
+        195125,
+        229042,
+        230875,
+        221666
+      ],
+      "size" : "1.0 MiB"
+    },
+    {
+      "backend" : "official-c",
+      "byte_count" : 1048576,
+      "correct" : true,
+      "digest" : "b06fa927b982abc279cc2d2148e337d09a3d20aa2e6095ee8d6eb9d9fdafd47c",
+      "iterations" : 5,
+      "maximum_gib_per_second" : 2.1637246473786598,
+      "median_gib_per_second" : 2.1529962542687886,
+      "minimum_gib_per_second" : 2.1287465940054497,
+      "mode" : "one-shot",
+      "p95_gib_per_second" : 2.1637246473786598,
+      "sample_nanoseconds" : [
+        458750,
+        453583,
+        451334,
+        452583,
+        455500
+      ],
+      "size" : "1.0 MiB"
+    },
+    {
+      "backend" : "cpu",
+      "byte_count" : 1048576,
+      "correct" : true,
+      "digest" : "b06fa927b982abc279cc2d2148e337d09a3d20aa2e6095ee8d6eb9d9fdafd47c",
+      "iterations" : 5,
+      "maximum_gib_per_second" : 4.639251781472685,
+      "median_gib_per_second" : 4.388216606303529,
+      "minimum_gib_per_second" : 4.329060700496048,
+      "mode" : "context-auto",
+      "p95_gib_per_second" : 4.639251781472685,
+      "sample_nanoseconds" : [
+        219041,
+        225083,
+        210500,
+        225583,
+        222542
+      ],
+      "size" : "1.0 MiB"
+    },
+    {
+      "backend" : "blake3",
+      "byte_count" : 1048576,
+      "correct" : true,
+      "digest" : "b06fa927b982abc279cc2d2148e337d09a3d20aa2e6095ee8d6eb9d9fdafd47c",
+      "iterations" : 5,
+      "maximum_gib_per_second" : 5.296610169491526,
+      "median_gib_per_second" : 4.528985507246377,
+      "minimum_gib_per_second" : 4.16075506586908,
+      "mode" : "default-auto",
+      "p95_gib_per_second" : 5.296610169491526,
+      "sample_nanoseconds" : [
+        234708,
+        215625,
+        226917,
+        184375,
+        211167
+      ],
+      "size" : "1.0 MiB"
+    },
+    {
+      "backend" : "cpu",
+      "byte_count" : 16777216,
+      "correct" : true,
+      "digest" : "a97481ab8038f7282adc8a19b9342f5f22cb728aaf010854defc01a4ef4b4c64",
+      "iterations" : 5,
+      "maximum_gib_per_second" : 1.1633497981764929,
+      "median_gib_per_second" : 1.1599061890144524,
+      "minimum_gib_per_second" : 1.1556845813185899,
+      "mode" : "scalar",
+      "p95_gib_per_second" : 1.1633497981764929,
+      "sample_nanoseconds" : [
+        13470917,
+        13454375,
+        13492500,
+        13520125,
+        13431042
+      ],
+      "size" : "16.0 MiB"
+    },
+    {
+      "backend" : "cpu",
+      "byte_count" : 16777216,
+      "correct" : true,
+      "digest" : "a97481ab8038f7282adc8a19b9342f5f22cb728aaf010854defc01a4ef4b4c64",
+      "iterations" : 5,
+      "maximum_gib_per_second" : 1.7936148001861456,
+      "median_gib_per_second" : 1.768826340422261,
+      "minimum_gib_per_second" : 1.7471683572547239,
+      "mode" : "single-simd",
+      "p95_gib_per_second" : 1.7936148001861456,
+      "sample_nanoseconds" : [
+        8896416,
+        8729167,
+        8833541,
+        8711458,
+        8943042
+      ],
+      "size" : "16.0 MiB"
+    },
+    {
+      "backend" : "cpu",
+      "byte_count" : 16777216,
+      "correct" : true,
+      "digest" : "a97481ab8038f7282adc8a19b9342f5f22cb728aaf010854defc01a4ef4b4c64",
+      "iterations" : 5,
+      "maximum_gib_per_second" : 9.128085292828976,
+      "median_gib_per_second" : 8.953513358641931,
+      "minimum_gib_per_second" : 8.47266001397921,
+      "mode" : "parallel",
+      "p95_gib_per_second" : 9.128085292828976,
+      "sample_nanoseconds" : [
+        1715958,
+        1844167,
+        1836458,
+        1711750,
+        1745125
+      ],
+      "size" : "16.0 MiB"
+    },
+    {
+      "backend" : "official-c",
+      "byte_count" : 16777216,
+      "correct" : true,
+      "digest" : "a97481ab8038f7282adc8a19b9342f5f22cb728aaf010854defc01a4ef4b4c64",
+      "iterations" : 5,
+      "maximum_gib_per_second" : 2.1994520865726863,
+      "median_gib_per_second" : 2.185365728122601,
+      "minimum_gib_per_second" : 2.1715464732487018,
+      "mode" : "one-shot",
+      "p95_gib_per_second" : 2.1994520865726863,
+      "sample_nanoseconds" : [
+        7136458,
+        7173333,
+        7104042,
+        7195333,
+        7149833
+      ],
+      "size" : "16.0 MiB"
+    },
+    {
+      "backend" : "cpu",
+      "byte_count" : 16777216,
+      "correct" : true,
+      "digest" : "a97481ab8038f7282adc8a19b9342f5f22cb728aaf010854defc01a4ef4b4c64",
+      "iterations" : 5,
+      "maximum_gib_per_second" : 9.242144177449168,
+      "median_gib_per_second" : 9.016375468995786,
+      "minimum_gib_per_second" : 7.816243980866836,
+      "mode" : "context-auto",
+      "p95_gib_per_second" : 9.242144177449168,
+      "sample_nanoseconds" : [
+        1784958,
+        1719917,
+        1732958,
+        1690625,
+        1999042
+      ],
+      "size" : "16.0 MiB"
+    },
+    {
+      "backend" : "blake3",
+      "byte_count" : 16777216,
+      "correct" : true,
+      "digest" : "a97481ab8038f7282adc8a19b9342f5f22cb728aaf010854defc01a4ef4b4c64",
+      "iterations" : 5,
+      "maximum_gib_per_second" : 10.304457988807215,
+      "median_gib_per_second" : 9.619327059582574,
+      "minimum_gib_per_second" : 2.8354315526823184,
+      "mode" : "default-auto",
+      "p95_gib_per_second" : 10.304457988807215,
+      "sample_nanoseconds" : [
+        1863167,
+        1522250,
+        1516334,
+        5510625,
+        1624334
+      ],
+      "size" : "16.0 MiB"
+    },
+    {
+      "backend" : "cpu",
+      "byte_count" : 67108864,
+      "correct" : true,
+      "digest" : "5d963e2e3f79202057d92f955717fd730f5076b4995df8bdfc5c3d31cf07d69f",
+      "iterations" : 5,
+      "maximum_gib_per_second" : 1.162681632729447,
+      "median_gib_per_second" : 1.1614644673175514,
+      "minimum_gib_per_second" : 1.1570842166437105,
+      "mode" : "scalar",
+      "p95_gib_per_second" : 1.162681632729447,
+      "sample_nanoseconds" : [
+        54015083,
+        53935709,
+        53755042,
+        53808917,
+        53811375
+      ],
+      "size" : "64.0 MiB"
+    },
+    {
+      "backend" : "cpu",
+      "byte_count" : 67108864,
+      "correct" : true,
+      "digest" : "5d963e2e3f79202057d92f955717fd730f5076b4995df8bdfc5c3d31cf07d69f",
+      "iterations" : 5,
+      "maximum_gib_per_second" : 1.7749295097394786,
+      "median_gib_per_second" : 1.7647764734118776,
+      "minimum_gib_per_second" : 1.763011333934431,
+      "mode" : "single-simd",
+      "p95_gib_per_second" : 1.7749295097394786,
+      "sample_nanoseconds" : [
+        35415250,
+        35435333,
+        35212666,
+        35285459,
+        35450708
+      ],
+      "size" : "64.0 MiB"
+    },
+    {
+      "backend" : "cpu",
+      "byte_count" : 67108864,
+      "correct" : true,
+      "digest" : "5d963e2e3f79202057d92f955717fd730f5076b4995df8bdfc5c3d31cf07d69f",
+      "iterations" : 5,
+      "maximum_gib_per_second" : 10.347682119205297,
+      "median_gib_per_second" : 9.68260423323457,
+      "minimum_gib_per_second" : 9.2326446223612,
+      "mode" : "parallel",
+      "p95_gib_per_second" : 10.347682119205297,
+      "sample_nanoseconds" : [
+        6609417,
+        6454875,
+        6171625,
+        6040000,
+        6769458
+      ],
+      "size" : "64.0 MiB"
+    },
+    {
+      "backend" : "official-c",
+      "byte_count" : 67108864,
+      "correct" : true,
+      "digest" : "5d963e2e3f79202057d92f955717fd730f5076b4995df8bdfc5c3d31cf07d69f",
+      "iterations" : 5,
+      "maximum_gib_per_second" : 2.1887553168368656,
+      "median_gib_per_second" : 2.184248603976821,
+      "minimum_gib_per_second" : 2.1798904167343593,
+      "mode" : "one-shot",
+      "p95_gib_per_second" : 2.1887553168368656,
+      "sample_nanoseconds" : [
+        28671166,
+        28656000,
+        28555042,
+        28595541,
+        28613959
+      ],
+      "size" : "64.0 MiB"
+    },
+    {
+      "backend" : "cpu",
+      "byte_count" : 67108864,
+      "correct" : true,
+      "digest" : "5d963e2e3f79202057d92f955717fd730f5076b4995df8bdfc5c3d31cf07d69f",
+      "iterations" : 5,
+      "maximum_gib_per_second" : 10.201861374495966,
+      "median_gib_per_second" : 10.057867336247057,
+      "minimum_gib_per_second" : 8.961268537100871,
+      "mode" : "context-auto",
+      "p95_gib_per_second" : 10.201861374495966,
+      "sample_nanoseconds" : [
+        6214041,
+        6231417,
+        6127125,
+        6974459,
+        6126333
+      ],
+      "size" : "64.0 MiB"
+    },
+    {
+      "backend" : "blake3",
+      "byte_count" : 67108864,
+      "correct" : true,
+      "digest" : "5d963e2e3f79202057d92f955717fd730f5076b4995df8bdfc5c3d31cf07d69f",
+      "iterations" : 5,
+      "maximum_gib_per_second" : 44.82966877688883,
+      "median_gib_per_second" : 23.937188816545383,
+      "minimum_gib_per_second" : 14.687017311176069,
+      "mode" : "default-auto",
+      "p95_gib_per_second" : 44.82966877688883,
+      "sample_nanoseconds" : [
+        3873875,
+        4255459,
+        1572000,
+        1394166,
+        2611000
+      ],
+      "size" : "64.0 MiB"
+    }
+  ],
+  "schema_version" : 1,
+  "sustained_rows" : [
+
+  ]
+}

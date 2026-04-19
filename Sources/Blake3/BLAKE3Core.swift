@@ -743,10 +743,12 @@ enum BLAKE3Core {
                 key: key,
                 flags: flags
             )
-            stack.pushChunkCV(values.0, key: key, flags: flags)
-            stack.pushChunkCV(values.1, key: key, flags: flags)
-            stack.pushChunkCV(values.2, key: key, flags: flags)
-            stack.pushChunkCV(values.3, key: key, flags: flags)
+            stack.pushSubtreeCV(
+                fourChunkSubtreeCV(values, key: key, flags: flags),
+                chunkCount: 4,
+                key: key,
+                flags: flags
+            )
             chunkIndex += 4
         }
 
@@ -779,6 +781,25 @@ enum BLAKE3Core {
             flags: flags
         )
         return stack.rootOutput(currentChunkOutput: currentChunkOutput, key: key, flags: flags)
+    }
+
+    @inline(__always)
+    private static func fourChunkSubtreeCV(
+        _ values: (
+            ChainingValue,
+            ChainingValue,
+            ChainingValue,
+            ChainingValue
+        ),
+        key: ChainingValue,
+        flags: UInt32
+    ) -> ChainingValue {
+        parentCV(
+            left: parentCV(left: values.0, right: values.1, key: key, flags: flags),
+            right: parentCV(left: values.2, right: values.3, key: key, flags: flags),
+            key: key,
+            flags: flags
+        )
     }
 
     static func chunkOutput(
@@ -846,18 +867,104 @@ enum BLAKE3Core {
             counter: chunkCounter,
             flags: flags | chunkStart
         )
-
-        var blockIndex = 1
-        while blockIndex < 15 {
-            cv = blake3CompressWithPerm(
-                cv: cv,
-                blockBaseAddress: baseAddress.advanced(by: blockIndex * blockLen),
-                blockLength: UInt32(blockLen),
-                counter: chunkCounter,
-                flags: flags
-            )
-            blockIndex += 1
-        }
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: 1 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: 2 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: 3 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: 4 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: 5 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: 6 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: 7 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: 8 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: 9 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: 10 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: 11 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: 12 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: 13 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: 14 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
 
         return Output(
             inputCV: cv,
@@ -884,18 +991,104 @@ enum BLAKE3Core {
             counter: chunkCounter,
             flags: flags | chunkStart
         )
-
-        var blockIndex = 1
-        while blockIndex < 15 {
-            cv = blake3CompressWithPerm(
-                cv: cv,
-                blockBaseAddress: baseAddress.advanced(by: chunkByteOffset + blockIndex * blockLen),
-                blockLength: UInt32(blockLen),
-                counter: chunkCounter,
-                flags: flags
-            )
-            blockIndex += 1
-        }
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: chunkByteOffset + 1 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: chunkByteOffset + 2 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: chunkByteOffset + 3 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: chunkByteOffset + 4 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: chunkByteOffset + 5 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: chunkByteOffset + 6 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: chunkByteOffset + 7 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: chunkByteOffset + 8 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: chunkByteOffset + 9 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: chunkByteOffset + 10 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: chunkByteOffset + 11 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: chunkByteOffset + 12 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: chunkByteOffset + 13 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
+        cv = blake3CompressWithPerm(
+            cv: cv,
+            blockBaseAddress: baseAddress.advanced(by: chunkByteOffset + 14 * blockLen),
+            blockLength: UInt32(blockLen),
+            counter: chunkCounter,
+            flags: flags
+        )
         cv = blake3CompressWithPerm(
             cv: cv,
             blockBaseAddress: baseAddress.advanced(by: chunkByteOffset + 15 * blockLen),
@@ -953,9 +1146,6 @@ enum BLAKE3Core {
             return
         }
 
-        output.reserveCapacity(chunkCount)
-        output.append(contentsOf: repeatElement(ChainingValue(repeating: 0), count: chunkCount))
-
         let workerCount = clampedWorkerCount(
             requested: maxWorkers ?? scheduler?.workerCount,
             workItems: chunkCount
@@ -964,7 +1154,7 @@ enum BLAKE3Core {
         let fullChunkCount = input.count / chunkLen
         let inputBytes = SendableRawBuffer(baseAddress: baseAddress, count: input.count)
 
-        output.withUnsafeMutableBufferPointer { outputBuffer in
+        output = Array(unsafeUninitializedCapacity: chunkCount) { outputBuffer, initializedCount in
             let outputStorage = SendableCVStorage(baseAddress: outputBuffer.baseAddress!)
             if workerCount == 1 {
                 writeChunkChainingValueRange(
@@ -996,6 +1186,7 @@ enum BLAKE3Core {
                     )
                 }
             }
+            initializedCount = chunkCount
         }
     }
 
@@ -1085,12 +1276,10 @@ enum BLAKE3Core {
         let parentCount = count / 2
         let nextCount = parentCount + (count & 1)
         next.removeAll(keepingCapacity: true)
-        next.reserveCapacity(nextCount)
-        next.append(contentsOf: repeatElement(ChainingValue(repeating: 0), count: nextCount))
 
-        if parentCount < parallelParentMinCount || maxWorkers == 1 {
-            current.withUnsafeBufferPointer { currentBuffer in
-                next.withUnsafeMutableBufferPointer { nextBuffer in
+        next = Array(unsafeUninitializedCapacity: nextCount) { nextBuffer, initializedCount in
+            if parentCount < parallelParentMinCount || maxWorkers == 1 {
+                current.withUnsafeBufferPointer { currentBuffer in
                     reduceParentRange(
                         start: 0,
                         end: parentCount,
@@ -1100,42 +1289,37 @@ enum BLAKE3Core {
                         output: SendableCVStorage(baseAddress: nextBuffer.baseAddress!)
                     )
                 }
-            }
-            if !count.isMultiple(of: 2) {
-                next[nextCount - 1] = current[count - 1]
-            }
-            return nextCount
-        }
-
-        let workerCount = clampedWorkerCount(
-            requested: maxWorkers ?? scheduler?.workerCount,
-            workItems: parentCount
-        )
-        let parentsPerWorker = (parentCount + workerCount - 1) / workerCount
-        current.withUnsafeBufferPointer { currentBuffer in
-            next.withUnsafeMutableBufferPointer { nextBuffer in
-                let currentInput = SendableCVInput(baseAddress: currentBuffer.baseAddress!)
-                let nextStorage = SendableCVStorage(baseAddress: nextBuffer.baseAddress!)
-                parallelPerform(iterations: workerCount, scheduler: scheduler) { workerIndex in
-                    let start = workerIndex * parentsPerWorker
-                    let end = min(parentCount, start + parentsPerWorker)
-                    guard start < end else {
-                        return
+            } else {
+                let workerCount = clampedWorkerCount(
+                    requested: maxWorkers ?? scheduler?.workerCount,
+                    workItems: parentCount
+                )
+                let parentsPerWorker = (parentCount + workerCount - 1) / workerCount
+                current.withUnsafeBufferPointer { currentBuffer in
+                    let currentInput = SendableCVInput(baseAddress: currentBuffer.baseAddress!)
+                    let nextStorage = SendableCVStorage(baseAddress: nextBuffer.baseAddress!)
+                    parallelPerform(iterations: workerCount, scheduler: scheduler) { workerIndex in
+                        let start = workerIndex * parentsPerWorker
+                        let end = min(parentCount, start + parentsPerWorker)
+                        guard start < end else {
+                            return
+                        }
+                        reduceParentRange(
+                            start: start,
+                            end: end,
+                            current: currentInput,
+                            key: key,
+                            flags: flags,
+                            output: nextStorage
+                        )
                     }
-                    reduceParentRange(
-                        start: start,
-                        end: end,
-                        current: currentInput,
-                        key: key,
-                        flags: flags,
-                        output: nextStorage
-                    )
                 }
             }
-        }
 
-        if !count.isMultiple(of: 2) {
-            next[nextCount - 1] = current[count - 1]
+            if !count.isMultiple(of: 2) {
+                nextBuffer[nextCount - 1] = current[count - 1]
+            }
+            initializedCount = nextCount
         }
         return nextCount
     }
@@ -1243,7 +1427,7 @@ enum BLAKE3Core {
     }
 
     @inline(__always)
-    private static func canonicalLittleEndianWords(_ words: inout BlockWords) {
+    static func canonicalLittleEndianWords(_ words: inout BlockWords) {
         #if _endian(big)
         for index in 0..<16 {
             words[index] = UInt32(littleEndian: words[index])
@@ -1294,7 +1478,7 @@ enum BLAKE3Core {
     }
 
     @inline(__always)
-    private static func compressChainingValue(
+    static func compressChainingValue(
         cv: ChainingValue,
         blockWords: BlockWords,
         blockLength: UInt32,
@@ -1321,7 +1505,7 @@ enum BLAKE3Core {
     }
 
     @inline(__always)
-    private static func blake3CompressWithPerm(
+    static func blake3CompressWithPerm(
         cv: ChainingValue,
         blockBaseAddress: UnsafeRawPointer,
         blockLength: UInt32,
