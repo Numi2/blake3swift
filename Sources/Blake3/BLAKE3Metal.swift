@@ -40,7 +40,7 @@ public enum BLAKE3Metal {
     private static let fusedTileChunkCount = configuredFusedTileChunkCount()
     private static let fusedTileReductionStrategy = configuredFusedTileReductionStrategy()
 
-    private static let defaultDevice = MTLCreateSystemDefaultDevice()
+    private static let defaultDevice = BLAKE3MetalDeviceReference(MTLCreateSystemDefaultDevice())
     private static let contextCache = BLAKE3MetalContextCache()
 
     /// Source for Metal kernel library creation.
@@ -53,12 +53,12 @@ public enum BLAKE3Metal {
 
     /// Whether a system default Metal device was available when the module initialized.
     public static var isAvailable: Bool {
-        defaultDevice != nil
+        defaultDevice.device != nil
     }
 
     /// Name of the system default Metal device, if available.
     public static var deviceName: String? {
-        defaultDevice?.name
+        defaultDevice.device?.name
     }
 
     /// Creates a reusable Metal context.
@@ -126,7 +126,7 @@ public enum BLAKE3Metal {
         input: UnsafeRawBufferPointer,
         policy: ExecutionPolicy = .automatic
     ) throws -> BLAKE3.Digest {
-        guard let device = defaultDevice else {
+        guard let device = defaultDevice.device else {
             throw BLAKE3Error.metalUnavailable
         }
         return try contextCache.context(device: device).hash(input: input, policy: policy)
@@ -2660,6 +2660,14 @@ public enum BLAKE3Metal {
         return BLAKE3.hashParallel(
             UnsafeRawBufferPointer(start: start, count: range.count)
         )
+    }
+}
+
+private struct BLAKE3MetalDeviceReference: @unchecked Sendable {
+    let device: MTLDevice?
+
+    init(_ device: MTLDevice?) {
+        self.device = device
     }
 }
 
