@@ -10,6 +10,8 @@ Local release benchmarks on Apple M4 are used to tune the Swift CPU and Metal ba
 
 The official C row is a vendored in-process one-shot comparison point, not a claim about every upstream BLAKE3 configuration. Metal timing classes are reported separately: staged rows include copying Swift bytes into a reused shared Metal buffer plus hashing, wrapped rows include no-copy Metal buffer wrapping plus hashing, and resident rows start after input is already in Metal-accessible storage.
 
+A later targeted sanity check for the current 128-chunk ping-pong fused tile default is kept at `benchmarks/results/20260419T105700Z-pingpong-rested-sanity`.
+
 | Input | Official C one-shot | Swift CPU parallel | Default `BLAKE3.hash` | Metal staged GPU | Metal wrapped GPU | Metal resident GPU |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | 256 MiB | 2.28 GiB/s | 10.58 GiB/s | 42.96 GiB/s | 24.08 GiB/s | 55.62 GiB/s | 68.26 GiB/s |
@@ -314,11 +316,12 @@ Runtime backend overrides:
 ```bash
 BLAKE3_SWIFT_BACKEND=cpu             # force default BLAKE3.hash to CPU
 BLAKE3_SWIFT_BACKEND=metal           # prefer Metal above the threshold, with CPU fallback
-BLAKE3_SWIFT_METAL_MIN_BYTES=16777216
+BLAKE3_SWIFT_METAL_MIN_BYTES=16m
 BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS=0|128|256|512|1024
+BLAKE3_SWIFT_METAL_FUSED_TILE_REDUCTION=inplace|pingpong
 ```
 
-`BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS=256` is the default on this branch for exact full-chunk shared-memory inputs. Set it to `0` to disable fused tiling, `128` to test the smaller tile, or `512`/`1024` to test larger tiles. The fused path is skipped for private buffers, where the previous reduction path is faster on the local M4 measurements.
+`BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS=128` and `BLAKE3_SWIFT_METAL_FUSED_TILE_REDUCTION=pingpong` are the defaults on this branch for exact full-chunk shared-memory inputs. Set chunks to `0` to disable fused tiling, `256`/`512`/`1024` to test larger tiles, or reduction to `inplace` to force the older single-scratch reduction. The fused path is skipped for private buffers, where the previous reduction path is faster on the local M4 measurements.
 
 ## Examples
 

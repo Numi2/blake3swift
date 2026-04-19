@@ -38,6 +38,7 @@ public enum BLAKE3Metal {
     private static let smallGridSIMDGroupsPerThreadgroup = 8
     private static let largeGridSIMDGroupsPerThreadgroup = 4
     private static let fusedTileChunkCount = configuredFusedTileChunkCount()
+    private static let fusedTileReductionStrategy = configuredFusedTileReductionStrategy()
 
     private static let defaultDevice = MTLCreateSystemDefaultDevice()
     private static let contextCache = BLAKE3MetalContextCache()
@@ -2165,7 +2166,7 @@ public enum BLAKE3Metal {
             encoder.setBuffer(buffer, offset: 0, index: 0)
             encoder.setBuffer(cvBuffer, offset: 0, index: 1)
             encoder.setBuffer(parameterBuffer, offset: 0, index: 2)
-            encoder.setThreadgroupMemoryLength(tilePlan.chunkCount * BLAKE3.digestByteCount, index: 0)
+            encoder.setThreadgroupMemoryLength(tilePlan.threadgroupMemoryByteCount, index: 0)
             encoder.dispatchThreadgroups(
                 MTLSize(width: chunkCount / tilePlan.chunkCount, height: 1, depth: 1),
                 threadsPerThreadgroup: MTLSize(width: tilePlan.chunkCount, height: 1, depth: 1)
@@ -2391,7 +2392,7 @@ public enum BLAKE3Metal {
             encoder.setBuffer(buffer, offset: 0, index: 0)
             encoder.setBuffer(cvBuffer, offset: 0, index: 1)
             encoder.setBuffer(parameterBuffer, offset: 0, index: 2)
-            encoder.setThreadgroupMemoryLength(tilePlan.chunkCount * BLAKE3.digestByteCount, index: 0)
+            encoder.setThreadgroupMemoryLength(tilePlan.threadgroupMemoryByteCount, index: 0)
             encoder.dispatchThreadgroups(
                 MTLSize(width: chunkCount / tilePlan.chunkCount, height: 1, depth: 1),
                 threadsPerThreadgroup: MTLSize(width: tilePlan.chunkCount, height: 1, depth: 1)
@@ -2464,6 +2465,21 @@ public enum BLAKE3Metal {
     private struct FusedTilePlan {
         let chunkCount: Int
         let pipeline: MTLComputePipelineState
+        let threadgroupMemoryByteCount: Int
+    }
+
+    private enum FusedTileReductionStrategy {
+        case inPlace
+        case pingPong
+
+        var threadgroupMemoryMultiplier: Int {
+            switch self {
+            case .inPlace:
+                return 1
+            case .pingPong:
+                return 2
+            }
+        }
     }
 
     private static func fusedTilePlan(
@@ -2473,19 +2489,54 @@ public enum BLAKE3Metal {
         canLoadWords: Bool,
         pipelines: BLAKE3MetalPipelines
     ) -> FusedTilePlan? {
+        if let plan = fusedTilePlan(
+            buffer: buffer,
+            range: range,
+            chunkCount: chunkCount,
+            canLoadWords: canLoadWords,
+            reductionStrategy: fusedTileReductionStrategy,
+            pipelines: pipelines
+        ) {
+            return plan
+        }
+        if fusedTileReductionStrategy == .pingPong {
+            return fusedTilePlan(
+                buffer: buffer,
+                range: range,
+                chunkCount: chunkCount,
+                canLoadWords: canLoadWords,
+                reductionStrategy: .inPlace,
+                pipelines: pipelines
+            )
+        }
+        return nil
+    }
+
+    private static func fusedTilePlan(
+        buffer: MTLBuffer,
+        range: Range<Int>,
+        chunkCount: Int,
+        canLoadWords: Bool,
+        reductionStrategy: FusedTileReductionStrategy,
+        pipelines: BLAKE3MetalPipelines
+    ) -> FusedTilePlan? {
         let tileChunkCount = fusedTileChunkCount
         guard tileChunkCount > 0 else {
             return nil
         }
         let tileByteCount = tileChunkCount * BLAKE3.chunkByteCount
+        let threadgroupMemoryByteCount = tileChunkCount
+            * BLAKE3.digestByteCount
+            * reductionStrategy.threadgroupMemoryMultiplier
         guard tileByteCount > 0,
               buffer.storageMode != .private,
               range.count.isMultiple(of: tileByteCount),
               canLoadWords,
               chunkCount >= tileChunkCount * 2,
-              tileChunkCount * BLAKE3.digestByteCount <= buffer.device.maxThreadgroupMemoryLength,
+              threadgroupMemoryByteCount <= buffer.device.maxThreadgroupMemoryLength,
               let tilePipeline = fusedTilePipeline(
                 tileChunkCount: tileChunkCount,
+                reductionStrategy: reductionStrategy,
                 pipelines: pipelines
               ),
               tileChunkCount <= tilePipeline.maxTotalThreadsPerThreadgroup,
@@ -2493,7 +2544,11 @@ public enum BLAKE3Metal {
         else {
             return nil
         }
-        return FusedTilePlan(chunkCount: tileChunkCount, pipeline: tilePipeline)
+        return FusedTilePlan(
+            chunkCount: tileChunkCount,
+            pipeline: tilePipeline,
+            threadgroupMemoryByteCount: threadgroupMemoryByteCount
+        )
     }
 
     private static func canUseAlignedFullChunkKernel(buffer: MTLBuffer, range: Range<Int>) -> Bool {
@@ -2520,25 +2575,34 @@ public enum BLAKE3Metal {
 
     private static func fusedTilePipeline(
         tileChunkCount: Int,
+        reductionStrategy: FusedTileReductionStrategy,
         pipelines: BLAKE3MetalPipelines
     ) -> MTLComputePipelineState? {
-        switch tileChunkCount {
-        case 128:
-            pipelines.chunkTile128CVs
-        case 256:
-            pipelines.chunkTile256CVs
-        case 512:
-            pipelines.chunkTile512CVs
-        case 1024:
-            pipelines.chunkTile1024CVs
+        switch (tileChunkCount, reductionStrategy) {
+        case (128, .inPlace):
+            return pipelines.chunkTile128CVs
+        case (256, .inPlace):
+            return pipelines.chunkTile256CVs
+        case (512, .inPlace):
+            return pipelines.chunkTile512CVs
+        case (1024, .inPlace):
+            return pipelines.chunkTile1024CVs
+        case (128, .pingPong):
+            return pipelines.chunkTile128PingPongCVs
+        case (256, .pingPong):
+            return pipelines.chunkTile256PingPongCVs
+        case (512, .pingPong):
+            return pipelines.chunkTile512PingPongCVs
+        case (1024, .pingPong):
+            return pipelines.chunkTile1024PingPongCVs
         default:
-            nil
+            return nil
         }
     }
 
     private static func configuredFusedTileChunkCount() -> Int {
         guard let rawValue = ProcessInfo.processInfo.environment["BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS"] else {
-            return 256
+            return 128
         }
 
         switch rawValue.lowercased() {
@@ -2554,6 +2618,21 @@ public enum BLAKE3Metal {
             return 1024
         default:
             return 0
+        }
+    }
+
+    private static func configuredFusedTileReductionStrategy() -> FusedTileReductionStrategy {
+        guard let rawValue = ProcessInfo.processInfo
+            .environment["BLAKE3_SWIFT_METAL_FUSED_TILE_REDUCTION"]
+        else {
+            return .pingPong
+        }
+
+        switch rawValue.lowercased() {
+        case "pingpong", "ping-pong", "double", "double-buffered":
+            return .pingPong
+        default:
+            return .inPlace
         }
     }
 

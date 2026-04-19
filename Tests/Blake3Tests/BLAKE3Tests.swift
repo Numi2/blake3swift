@@ -732,6 +732,7 @@ final class BLAKE3Tests: XCTestCase {
         XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_chunk_cvs"))
         XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_chunk_full_aligned_cvs"))
         XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_chunk_tile256_cvs"))
+        XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_chunk_tile128_pingpong_cvs"))
         XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_chunk_tile512_cvs"))
         XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_root_digest"))
     }
@@ -892,16 +893,20 @@ final class BLAKE3Tests: XCTestCase {
         let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
         let pipelines = try BLAKE3MetalPipelineCache.shared.pipelines(device: device)
         let commandQueue = try XCTUnwrap(device.makeCommandQueue())
-        let cases: [(Int, MTLComputePipelineState)] = [
-            (128, pipelines.chunkTile128CVs),
-            (256, pipelines.chunkTile256CVs),
-            (512, pipelines.chunkTile512CVs),
-            (1024, pipelines.chunkTile1024CVs)
+        let cases: [(Int, MTLComputePipelineState, Int, String)] = [
+            (128, pipelines.chunkTile128CVs, 1, "in-place"),
+            (256, pipelines.chunkTile256CVs, 1, "in-place"),
+            (512, pipelines.chunkTile512CVs, 1, "in-place"),
+            (1024, pipelines.chunkTile1024CVs, 1, "in-place"),
+            (128, pipelines.chunkTile128PingPongCVs, 2, "ping-pong"),
+            (256, pipelines.chunkTile256PingPongCVs, 2, "ping-pong"),
+            (512, pipelines.chunkTile512PingPongCVs, 2, "ping-pong"),
+            (1024, pipelines.chunkTile1024PingPongCVs, 2, "ping-pong")
         ]
 
         var testedCaseCount = 0
-        for (tileChunkCount, pipeline) in cases {
-            let scratchByteCount = tileChunkCount * BLAKE3.digestByteCount
+        for (tileChunkCount, pipeline, scratchMultiplier, label) in cases {
+            let scratchByteCount = tileChunkCount * BLAKE3.digestByteCount * scratchMultiplier
             let executionWidth = max(1, pipeline.threadExecutionWidth)
             guard tileChunkCount <= pipeline.maxTotalThreadsPerThreadgroup,
                   scratchByteCount <= device.maxThreadgroupMemoryLength,
@@ -964,7 +969,7 @@ final class BLAKE3Tests: XCTestCase {
             let actual = BLAKE3Core.chainingValue(
                 from: UnsafeRawBufferPointer(start: outputBuffer.contents(), count: BLAKE3.digestByteCount)
             )
-            XCTAssertEqual(actual, expected, "fused tile subtree mismatch for tileChunkCount=\(tileChunkCount)")
+            XCTAssertEqual(actual, expected, "fused tile subtree mismatch for \(label) tileChunkCount=\(tileChunkCount)")
         }
         XCTAssertGreaterThan(testedCaseCount, 0)
     }

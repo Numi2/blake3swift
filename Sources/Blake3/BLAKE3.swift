@@ -405,7 +405,7 @@ private struct BLAKE3DefaultHashConfiguration: Sendable {
         let environment = ProcessInfo.processInfo.environment
         let backendPolicy = parseBackendPolicy(environment["BLAKE3_SWIFT_BACKEND"])
         let metalMinimumByteCount = environment["BLAKE3_SWIFT_METAL_MIN_BYTES"]
-            .flatMap { Int($0) }
+            .flatMap(parseByteCount)
             .map { max(0, $0) }
             ?? (16 * 1024 * 1024)
 
@@ -426,6 +426,35 @@ private struct BLAKE3DefaultHashConfiguration: Sendable {
         default:
             return .automatic
         }
+    }
+
+    private static func parseByteCount(_ rawValue: String) -> Int? {
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let byteCount = Int(value) {
+            return byteCount
+        }
+
+        let suffixes: [(String, Int)] = [
+            ("gib", 1024 * 1024 * 1024),
+            ("gb", 1024 * 1024 * 1024),
+            ("g", 1024 * 1024 * 1024),
+            ("mib", 1024 * 1024),
+            ("mb", 1024 * 1024),
+            ("m", 1024 * 1024),
+            ("kib", 1024),
+            ("kb", 1024),
+            ("k", 1024)
+        ]
+
+        for (suffix, multiplier) in suffixes where value.hasSuffix(suffix) {
+            let number = value.dropLast(suffix.count)
+            guard let count = Int(number) else {
+                return nil
+            }
+            let result = count.multipliedReportingOverflow(by: multiplier)
+            return result.overflow ? nil : result.partialValue
+        }
+        return nil
     }
 }
 

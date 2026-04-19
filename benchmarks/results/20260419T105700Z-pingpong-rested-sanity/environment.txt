@@ -1,0 +1,18 @@
+generated_at_utc=2026-04-19T10:53:56Z
+host=Mac.domain_not_set.invalid
+ProductName:		macOS
+ProductVersion:		26.5
+BuildVersion:		25F5042g
+Darwin Mac.domain_not_set.invalid 25.5.0 Darwin Kernel Version 25.5.0: Fri Mar 20 18:54:08 PDT 2026; root:xnu-12377.120.72.0.4~13/RELEASE_ARM64_T8132 arm64
+git_commit=bea7fa784f0ed423926ca7c7f93638c0ccc31914
+source_json=/tmp/blake3swift-pingpong-rested.json
+working_tree=dirty
+git_status= M README.md
+git_status= M Sources/Blake3/BLAKE3.swift
+git_status= M Sources/Blake3/BLAKE3Metal.swift
+git_status= M Sources/Blake3/BLAKE3MetalKernel.swift
+git_status= M Tests/Blake3Tests/BLAKE3Tests.swift
+git_status= M benchmarks/README.md
+git_status= M docs/m4-metal-performance-strategy.md
+git_status= M docs/performance-results.md
+git_status=?? benchmarks/results/20260419T105700Z-pingpong-rested-sanity/

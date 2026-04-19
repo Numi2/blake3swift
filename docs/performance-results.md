@@ -29,13 +29,23 @@ The table reports median GiB/s from validated JSON. The `staged-gpu` row include
 | 512 MiB | 2.24 | 11.18 | 51.09 | 25.84 | 55.19 | 80.53 |
 | 1 GiB | 2.20 | 11.33 | 54.18 | 24.76 | 54.05 | 76.80 |
 
+Subsequent ping-pong fused-tile sanity artifact:
+
+```sh
+benchmarks/results/20260419T105700Z-pingpong-rested-sanity
+```
+
+This targeted confirmation uses the new default `128`-chunk double-scratch ping-pong fused tile reduction. It is not a replacement publication table because an immediate full all-size rerun was thermally contaminated, but the validated rested sanity check kept the large overhead modes in the expected band: 512 MiB resident/staged/wrapped medians of 75.08/23.79/47.77 GiB/s and 1 GiB resident/staged/wrapped medians of 71.25/23.68/43.28 GiB/s.
+
 Follow-up experiments kept out of the default:
 
-- `BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS=128` was effectively tied with the 256 default on 1 GiB staged/wrapped timings, but emits twice as many tile roots.
+- The original in-place `BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS=128` and `256` settings were close, but the 128-chunk ping-pong reduction had the better overall 256 MiB to 1 GiB overhead-mode geometric mean and is now the default.
 - `512` and `1024` fused tiles are correct and available as tuning options, but were weaker in the no-copy wrapped path on the local M4.
 - A CPU-finalize-after-fused-tiles prototype did not beat the all-GPU finalization path.
 - Lowering the 4-way parent reduction threshold from 32K CVs to 1K CVs regressed large-buffer throughput.
 - Adding `madvise` read-ahead hints to mmap file hashing regressed the local Metal file benchmark and was removed.
+- Explicit unroll pragmas in the full-chunk Metal loop regressed large-buffer throughput and were removed.
+- Root8/root16 one-dispatch final digest kernels were correct, but not a durable win across staged/wrapped overhead modes, so the root2/3/4 path remains.
 
 A full all-mode/file fixture was also generated at `benchmarks/results/20260419T100143Z`. Its JSON validated, but late 1 GiB `e2e` and file rows were noisy after all large modes ran back-to-back.
 

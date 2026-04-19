@@ -125,7 +125,7 @@ path for the input:
 - file hashing: mmap, then CPU parallel or Metal depending on autotuned size;
 - existing `MTLBuffer`: Metal-first, because the data is already GPU-visible.
 
-Implementation note, April 18, 2026: `BLAKE3.hash` now uses an automatic unkeyed one-shot dispatcher. It chooses CPU-only hashing below `BLAKE3_SWIFT_METAL_MIN_BYTES` and uses the synchronous no-copy Metal wrapper above that threshold when Metal is available, falling back to CPU on failure. `BLAKE3_SWIFT_BACKEND=cpu|metal|auto` controls the default policy at process start.
+Implementation note, April 18, 2026: `BLAKE3.hash` now uses an automatic unkeyed one-shot dispatcher. It chooses CPU-only hashing below `BLAKE3_SWIFT_METAL_MIN_BYTES` and uses the synchronous no-copy Metal wrapper above that threshold when Metal is available, falling back to CPU on failure. `BLAKE3_SWIFT_METAL_MIN_BYTES` accepts raw bytes or `k`, `m`, `g` suffixes. `BLAKE3_SWIFT_BACKEND=cpu|metal|auto` controls the default policy at process start.
 
 ## Metal API Surface
 
@@ -239,18 +239,18 @@ parent levels without returning to the CPU.
 Initial tile candidates:
 
 ```text
-128 chunks -> 128 KiB input, 4 KiB CV scratch
-256 chunks -> 256 KiB input, 8 KiB CV scratch
-512 chunks -> 512 KiB input, 16 KiB CV scratch
-1024 chunks -> 1 MiB input, 32 KiB CV scratch
+128 chunks -> 128 KiB input, 4 KiB in-place CV scratch, 8 KiB ping-pong scratch
+256 chunks -> 256 KiB input, 8 KiB in-place CV scratch, 16 KiB ping-pong scratch
+512 chunks -> 512 KiB input, 16 KiB in-place CV scratch, 32 KiB ping-pong scratch
+1024 chunks -> 1 MiB input, 32 KiB in-place CV scratch, 64 KiB ping-pong scratch
 ```
 
 Autotune tile size. Do not assume 1024 is fastest. It may reduce dispatch count
 but hurt occupancy.
 
-Implementation note, April 19, 2026: 128-, 256-, 512-, and 1024-chunk fused tile kernels exist. The default is now `BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS=256` for exact full-chunk shared-memory inputs, after fixing an in-place threadgroup reduction race. Set the value to `0` to disable fused tiling, `128` to test the smaller tile, or `512`/`1024` to test larger tiles. Private buffers intentionally keep the prior global-CV reduction path on this M4 because the measured private-resident path was faster without fused tiles.
+Implementation note, April 19, 2026: 128-, 256-, 512-, and 1024-chunk fused tile kernels exist. The default is now `BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS=128` with `BLAKE3_SWIFT_METAL_FUSED_TILE_REDUCTION=pingpong` for exact full-chunk shared-memory inputs. Set chunks to `0` to disable fused tiling, `256`/`512`/`1024` to test larger tiles, or reduction to `inplace` to force the older single-scratch reduction. Ping-pong reduction falls back to the in-place kernel when the requested tile would exceed the device threadgroup-memory limit. Private buffers intentionally keep the prior global-CV reduction path on this M4 because the measured private-resident path was faster without fused tiles.
 
-April 19 follow-up sweep: 128 and 256 chunks were effectively tied for 1 GiB staged/wrapped throughput on the local M4, while 512 and 1024 were weaker in the no-copy wrapped path. Keep 256 as the conservative default because it emits half as many tile roots as 128 without losing measured throughput.
+April 19 follow-up sweep: the original in-place 128 and 256 chunk tiles were close, but a double-scratch ping-pong reduction improved the resident, staged, and wrapped geometric means from 512 MiB through 1 GiB. A 256 MiB confirmation favored the 128-chunk ping-pong tile overall, so it is now the default despite emitting more tile roots.
 
 ### Kernel 5: Final CV Reduction
 
