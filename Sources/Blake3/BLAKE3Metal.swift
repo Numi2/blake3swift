@@ -3874,6 +3874,7 @@ public enum BLAKE3Metal {
     private struct OneChunkBatchDescriptor {
         var entries: [BLAKE3MetalBatchEntry]
         var canLoadWords: Bool
+        var allFullChunks: Bool
     }
 
     private static func makeOneChunkBatchDescriptor(
@@ -3887,6 +3888,7 @@ public enum BLAKE3Metal {
         var entries = [BLAKE3MetalBatchEntry]()
         entries.reserveCapacity(ranges.count)
         var canLoadEveryRange = true
+        var allFullChunks = true
         for range in ranges {
             guard range.lowerBound >= 0,
                   range.upperBound <= buffer.length,
@@ -3906,9 +3908,14 @@ public enum BLAKE3Metal {
                 )
             )
             canLoadEveryRange = canLoadEveryRange && canLoadWords(buffer: buffer, range: range)
+            allFullChunks = allFullChunks && range.count == BLAKE3.chunkByteCount
         }
 
-        return OneChunkBatchDescriptor(entries: entries, canLoadWords: canLoadEveryRange)
+        return OneChunkBatchDescriptor(
+            entries: entries,
+            canLoadWords: canLoadEveryRange,
+            allFullChunks: allFullChunks
+        )
     }
 
     @discardableResult
@@ -3962,7 +3969,9 @@ public enum BLAKE3Metal {
             throw BLAKE3Error.metalCommandFailed("Unable to create BLAKE3 batch command buffer.")
         }
 
-        let pipeline = pipelines.batchOneChunkDigest
+        let pipeline = descriptor.allFullChunks
+            ? pipelines.batchOneFullChunkDigest
+            : pipelines.batchOneChunkDigest
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(buffer, offset: 0, index: 0)
         encoder.setBuffer(entriesBuffer, offset: 0, index: 1)
@@ -4040,7 +4049,9 @@ public enum BLAKE3Metal {
                 flags: mode.flags
             )
             copyParameter(batchParams, into: batchParameterBuffer, slot: 0)
-            let batchPipeline = pipelines.batchOneChunkDigest
+            let batchPipeline = descriptor.allFullChunks
+                ? pipelines.batchOneFullChunkDigest
+                : pipelines.batchOneChunkDigest
             batchEncoder.setComputePipelineState(batchPipeline)
             batchEncoder.setBuffer(buffer, offset: 0, index: 0)
             batchEncoder.setBuffer(entriesBuffer, offset: 0, index: 1)
@@ -4074,12 +4085,13 @@ public enum BLAKE3Metal {
                     flags: HashMode.unkeyed.flags
                 )
                 copyParameter(outputParams, into: outputHashParameterBuffer, slot: 0)
-                outputHashEncoder.setComputePipelineState(batchPipeline)
+                let outputHashPipeline = pipelines.batchOneChunkDigest
+                outputHashEncoder.setComputePipelineState(outputHashPipeline)
                 outputHashEncoder.setBuffer(outputBuffer, offset: 0, index: 0)
                 outputHashEncoder.setBuffer(outputEntryBuffer, offset: 0, index: 1)
                 outputHashEncoder.setBuffer(digestBuffer, offset: 0, index: 2)
                 outputHashEncoder.setBuffer(outputHashParameterBuffer, offset: 0, index: 3)
-                dispatchThreads(count: 1, pipeline: batchPipeline, encoder: outputHashEncoder)
+                dispatchThreads(count: 1, pipeline: outputHashPipeline, encoder: outputHashEncoder)
                 outputHashEncoder.endEncoding()
             } else {
                 try encodeHashCommands(
@@ -4183,7 +4195,14 @@ public enum BLAKE3Metal {
             encoder.setBuffer(entriesBuffer, offset: 0, index: 1)
             encoder.setBuffer(cvBuffer, offset: 0, index: 2)
             encoder.setBuffer(parameterBuffer, offset: 0, index: 3)
-            dispatchThreads(count: outputChunkCount, pipeline: pipeline, encoder: encoder)
+            encoder.setThreadgroupMemoryLength(
+                32 * 8 * MemoryLayout<UInt32>.stride,
+                index: 0
+            )
+            encoder.dispatchThreadgroups(
+                MTLSize(width: outputChunkCount, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
+            )
 
             try encodeCVReductionCommands(
                 currentBuffer: cvBuffer,

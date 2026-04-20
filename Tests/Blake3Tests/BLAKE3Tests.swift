@@ -1463,6 +1463,59 @@ final class BLAKE3Tests: XCTestCase {
             manyAggregateExpected
         )
 
+        let fullChunkInput = deterministicInput(byteCount: BLAKE3.chunkByteCount * 4)
+        let fullChunkRanges = (0..<4).map { index in
+            let lowerBound = index * BLAKE3.chunkByteCount
+            return lowerBound..<(lowerBound + BLAKE3.chunkByteCount)
+        }
+        let fullChunkBuffer = try XCTUnwrap(fullChunkInput.withUnsafeBytes { raw in
+            device.makeBuffer(bytes: raw.baseAddress!, length: raw.count, options: .storageModeShared)
+        })
+        let fullChunkExpected = fullChunkRanges.map { range in
+            fullChunkInput.withUnsafeBytes { raw in
+                BLAKE3.hash(
+                    UnsafeRawBufferPointer(
+                        start: raw.baseAddress!.advanced(by: range.lowerBound),
+                        count: range.count
+                    )
+                )
+            }
+        }
+        XCTAssertEqual(
+            try context.hashOneChunkBatch(buffer: fullChunkBuffer, ranges: fullChunkRanges),
+            fullChunkExpected
+        )
+        let fullChunkOutputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: fullChunkRanges.count * BLAKE3.digestByteCount,
+                options: .storageModeShared
+            )
+        )
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigests(
+                buffer: fullChunkBuffer,
+                ranges: fullChunkRanges,
+                into: fullChunkOutputBuffer
+            ),
+            fullChunkRanges.count
+        )
+        XCTAssertEqual(readDigests(fullChunkOutputBuffer, count: fullChunkRanges.count), fullChunkExpected)
+        let fullChunkAggregateExpected = BLAKE3.hashCPU(fullChunkExpected.flatMap(\.bytes))
+        let fullChunkPrivateOutputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: fullChunkRanges.count * BLAKE3.digestByteCount,
+                options: .storageModePrivate
+            )
+        )
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigestsAndHashOutput(
+                buffer: fullChunkBuffer,
+                ranges: fullChunkRanges,
+                into: fullChunkPrivateOutputBuffer
+            ),
+            fullChunkAggregateExpected
+        )
+
         let emptyOutputBuffer = try XCTUnwrap(device.makeBuffer(length: 1, options: .storageModeShared))
         XCTAssertEqual(
             try context.writeOneChunkBatchDigests(buffer: buffer, ranges: [], into: emptyOutputBuffer),
@@ -1489,9 +1542,24 @@ final class BLAKE3Tests: XCTestCase {
                 )
             }
         }
+        let fullChunkExpectedKeyed = fullChunkRanges.map { range in
+            fullChunkInput.withUnsafeBytes { raw in
+                try! BLAKE3.keyedHash(
+                    key: key,
+                    input: UnsafeRawBufferPointer(
+                        start: raw.baseAddress!.advanced(by: range.lowerBound),
+                        count: range.count
+                    )
+                )
+            }
+        }
         XCTAssertEqual(
             try context.keyedHashOneChunkBatch(key: key, buffer: buffer, ranges: ranges),
             expectedKeyed
+        )
+        XCTAssertEqual(
+            try context.keyedHashOneChunkBatch(key: key, buffer: fullChunkBuffer, ranges: fullChunkRanges),
+            fullChunkExpectedKeyed
         )
 
         let keyedOutputBuffer = try XCTUnwrap(
@@ -1576,6 +1644,21 @@ final class BLAKE3Tests: XCTestCase {
         XCTAssertEqual(
             try BLAKE3Metal.hashKeyedOneChunkBatchDigestBytes(key: key, buffer: buffer, ranges: ranges),
             aggregateExpectedKeyed
+        )
+        let fullChunkPrivateKeyedOutputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: fullChunkRanges.count * BLAKE3.digestByteCount,
+                options: .storageModePrivate
+            )
+        )
+        XCTAssertEqual(
+            try context.writeKeyedOneChunkBatchDigestsAndHashOutput(
+                key: key,
+                buffer: fullChunkBuffer,
+                ranges: fullChunkRanges,
+                into: fullChunkPrivateKeyedOutputBuffer
+            ),
+            BLAKE3.hashCPU(fullChunkExpectedKeyed.flatMap(\.bytes))
         )
 
         let tooSmallOutputBuffer = try XCTUnwrap(
