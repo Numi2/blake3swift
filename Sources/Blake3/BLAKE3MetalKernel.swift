@@ -58,6 +58,21 @@ struct BLAKE3MetalXOFParams {
     var padding2: UInt32 = 0
 }
 
+struct BLAKE3MetalBatchEntry {
+    var inputOffset: UInt64
+    var inputLength: UInt32
+    var padding0: UInt32 = 0
+}
+
+struct BLAKE3MetalBatchParams {
+    var entryCount: UInt32
+    var canLoadWords: UInt32
+    var key: BLAKE3MetalKeyWords = BLAKE3MetalKeyWords()
+    var flags: UInt32 = 0
+    var padding0: UInt32 = 0
+    var padding1: UInt32 = 0
+}
+
 struct BLAKE3MetalPipelines {
     let chunkCVs: MTLComputePipelineState
     let chunkFullCVs: MTLComputePipelineState
@@ -80,6 +95,7 @@ struct BLAKE3MetalPipelines {
     let root3Digest: MTLComputePipelineState
     let root4Digest: MTLComputePipelineState
     let rootXOF: MTLComputePipelineState
+    let batchOneChunkDigest: MTLComputePipelineState
 }
 
 final class BLAKE3MetalPipelineCache: @unchecked Sendable {
@@ -131,7 +147,8 @@ final class BLAKE3MetalPipelineCache: @unchecked Sendable {
               let rootFunction = library.makeFunction(name: "blake3_root_digest"),
               let root3Function = library.makeFunction(name: "blake3_root3_digest"),
               let root4Function = library.makeFunction(name: "blake3_root4_digest"),
-              let rootXOFFunction = library.makeFunction(name: "blake3_root_xof")
+              let rootXOFFunction = library.makeFunction(name: "blake3_root_xof"),
+              let batchOneChunkDigestFunction = library.makeFunction(name: "blake3_batch_one_chunk_digest")
         else {
             throw BLAKE3Error.metalCommandFailed("Unable to load BLAKE3 Metal kernels.")
         }
@@ -156,7 +173,8 @@ final class BLAKE3MetalPipelineCache: @unchecked Sendable {
             rootDigest: try device.makeComputePipelineState(function: rootFunction),
             root3Digest: try device.makeComputePipelineState(function: root3Function),
             root4Digest: try device.makeComputePipelineState(function: root4Function),
-            rootXOF: try device.makeComputePipelineState(function: rootXOFFunction)
+            rootXOF: try device.makeComputePipelineState(function: rootXOFFunction),
+            batchOneChunkDigest: try device.makeComputePipelineState(function: batchOneChunkDigestFunction)
         )
 
         lock.lock()
@@ -233,6 +251,21 @@ enum BLAKE3MetalKernelSource {
         uint padding0;
         uint padding1;
         uint padding2;
+    };
+
+    struct BLAKE3BatchEntry {
+        ulong inputOffset;
+        uint inputLength;
+        uint padding0;
+    };
+
+    struct BLAKE3BatchParams {
+        uint entryCount;
+        uint canLoadWords;
+        BLAKE3KeyWords key;
+        uint flags;
+        uint padding0;
+        uint padding1;
     };
 
     constant uint IV[8] = {
@@ -578,6 +611,77 @@ enum BLAKE3MetalKernelSource {
         device uint *out = reinterpret_cast<device uint *>(chunkCVs + ulong(gid) * 32UL);
         for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
             store32_aligned(out, wordIndex, cv[wordIndex]);
+        }
+    }
+
+    kernel void blake3_batch_one_chunk_digest(device const uchar *input [[buffer(0)]],
+                                              device const BLAKE3BatchEntry *entries [[buffer(1)]],
+                                              device uchar *digests [[buffer(2)]],
+                                              constant BLAKE3BatchParams &params [[buffer(3)]],
+                                              uint gid [[thread_position_in_grid]]) {
+        if (gid >= params.entryCount) {
+            return;
+        }
+
+        BLAKE3BatchEntry entry = entries[gid];
+        uint chunkLength = entry.inputLength;
+        device const uchar *chunk = input + entry.inputOffset;
+        device const uint *chunkWords32 = reinterpret_cast<device const uint *>(chunk);
+        bool canLoadWords = params.canLoadWords != 0u;
+
+        uint key[8];
+        load_key(key, params.key);
+        uint cv[8];
+        init_cv(cv, key);
+
+        uint blockCount = max(1u, (chunkLength + 63u) >> 6u);
+        for (uint blockIndex = 0u; blockIndex + 1u < blockCount; blockIndex++) {
+            uint blockOffset = blockIndex << 6u;
+            uint blockWords[16];
+            if (canLoadWords) {
+                uint wordBase = blockOffset >> 2u;
+                for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+                    blockWords[wordIndex] = load32_aligned(chunkWords32, wordBase + wordIndex);
+                }
+            } else {
+                for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+                    blockWords[wordIndex] = load32_chunk(chunk, blockOffset + wordIndex * 4u, chunkLength);
+                }
+            }
+
+            uint blockFlags = params.flags;
+            if (blockIndex == 0u) {
+                blockFlags |= 1u;
+            }
+            compress_in_place(cv, blockWords, 64u, 0UL, blockFlags);
+        }
+
+        uint lastBlockIndex = blockCount - 1u;
+        uint lastBlockOffset = lastBlockIndex << 6u;
+        uint lastBlockLength = chunkLength == 0u ? 0u : chunkLength - lastBlockOffset;
+        uint blockWords[16];
+        if (canLoadWords && lastBlockLength == 64u) {
+            uint wordBase = lastBlockOffset >> 2u;
+            for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+                blockWords[wordIndex] = load32_aligned(chunkWords32, wordBase + wordIndex);
+            }
+        } else {
+            for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+                blockWords[wordIndex] = load32_chunk(chunk, lastBlockOffset + wordIndex * 4u, chunkLength);
+            }
+        }
+
+        uint outputFlags = params.flags | 2u | 8u;
+        if (lastBlockIndex == 0u) {
+            outputFlags |= 1u;
+        }
+
+        uint outputWords[16];
+        compress_xof(cv, blockWords, lastBlockLength, 0UL, outputFlags, outputWords);
+
+        device uint *digestWords = reinterpret_cast<device uint *>(digests + ulong(gid) * 32UL);
+        for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+            store32_aligned(digestWords, wordIndex, outputWords[wordIndex]);
         }
     }
 

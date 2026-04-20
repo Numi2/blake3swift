@@ -102,6 +102,7 @@ private enum OperationTimingMode: String {
     case xof
     case keyedXOF = "keyed-xof"
     case deriveKey = "derive-key"
+    case batchOneChunk = "batch-one-chunk"
 
     var description: String {
         switch self {
@@ -113,6 +114,8 @@ private enum OperationTimingMode: String {
             return "timed BLAKE3 keyed XOF output over existing Swift bytes, with output length controlled by --xof-output-bytes"
         case .deriveKey:
             return "timed BLAKE3 derive-key material hashing over existing Swift bytes, with output length controlled by --xof-output-bytes"
+        case .batchOneChunk:
+            return "timed independent one-chunk BLAKE3 hashes over one resident buffer, aggregated for correctness"
         }
     }
 
@@ -126,6 +129,8 @@ private enum OperationTimingMode: String {
             return "timed BLAKE3 keyed XOF output over each requested file strategy, with output length controlled by --xof-output-bytes"
         case .deriveKey:
             return "timed BLAKE3 derive-key material hashing over each requested file strategy, with output length controlled by --xof-output-bytes"
+        case .batchOneChunk:
+            return "not supported for file strategy benchmarks"
         }
     }
 }
@@ -336,6 +341,8 @@ private func operationTimingModes() -> [OperationTimingMode] {
             return .keyedXOF
         case "derive-key", "derive", "kdf", "key-derivation", "derived-key":
             return .deriveKey
+        case "batch-one-chunk", "batch", "one-chunk-batch", "small-batch", "batched":
+            return .batchOneChunk
         default:
             return nil
         }
@@ -380,6 +387,15 @@ private func xofOutputByteCount() -> Int {
         return 1_024
     }
     return max(BLAKE3.digestByteCount, parsed)
+}
+
+private func batchOneChunkItemByteCount() -> Int {
+    guard let rawValue = argumentValue(named: "--batch-item-bytes"),
+          let parsed = parseByteCount(Substring(rawValue))
+    else {
+        return BLAKE3.chunkByteCount
+    }
+    return min(max(1, parsed), BLAKE3.chunkByteCount)
 }
 
 #if canImport(Metal)
@@ -603,6 +619,49 @@ private func deriveKeyCPUForBenchmark(
     return BLAKE3.hashCPU(output)
 }
 
+private func oneChunkBatchRanges(byteCount: Int, itemByteCount: Int) -> [Range<Int>] {
+    guard byteCount > 0 else {
+        return []
+    }
+    var ranges = [Range<Int>]()
+    ranges.reserveCapacity((byteCount + itemByteCount - 1) / itemByteCount)
+    var offset = 0
+    while offset < byteCount {
+        let upperBound = min(byteCount, offset + itemByteCount)
+        ranges.append(offset..<upperBound)
+        offset = upperBound
+    }
+    return ranges
+}
+
+private func aggregateBatchDigestsForBenchmark(_ digests: [BLAKE3.Digest]) -> BLAKE3.Digest {
+    var bytes = [UInt8]()
+    bytes.reserveCapacity(digests.count * BLAKE3.digestByteCount)
+    for digest in digests {
+        bytes.append(contentsOf: digest.bytes)
+    }
+    return BLAKE3.hashCPU(bytes)
+}
+
+@inline(never)
+private func batchOneChunkCPUForBenchmark(
+    _ input: UnsafeRawBufferPointer,
+    ranges: [Range<Int>]
+) -> BLAKE3.Digest {
+    guard let baseAddress = input.baseAddress else {
+        return aggregateBatchDigestsForBenchmark([])
+    }
+    let digests = ranges.map { range in
+        BLAKE3.hash(
+            UnsafeRawBufferPointer(
+                start: baseAddress.advanced(by: range.lowerBound),
+                count: range.count
+            )
+        )
+    }
+    return aggregateBatchDigestsForBenchmark(digests)
+}
+
 #if canImport(CryptoKit)
 @inline(never)
 private func hashCryptoKitSHA256ForBenchmark(_ input: UnsafeRawBufferPointer) -> BLAKE3.Digest {
@@ -628,6 +687,17 @@ private func hashMetalGPUForBenchmark(
     length: Int
 ) -> BLAKE3.Digest {
     try! context.hash(buffer: buffer, length: length, policy: .gpu)
+}
+
+@inline(never)
+private func batchOneChunkMetalGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    ranges: [Range<Int>]
+) -> BLAKE3.Digest {
+    aggregateBatchDigestsForBenchmark(
+        try! context.hashOneChunkBatch(buffer: buffer, ranges: ranges)
+    )
 }
 
 @inline(never)
@@ -2268,6 +2338,7 @@ private let requestedFileTimingModes = fileTimingModes()
 private let requestedOperationTimingModes = operationTimingModes()
 private let requestedFileOperationTimingModes = fileOperationTimingModes()
 private let requestedXOFOutputByteCount = xofOutputByteCount()
+private let requestedBatchOneChunkItemByteCount = batchOneChunkItemByteCount()
 #if canImport(CryptoKit)
 private let requestedCryptoKitTimingModes = cryptoKitTimingModes()
 #endif
@@ -2344,6 +2415,9 @@ if !requestedOperationTimingModes.isEmpty {
         || requestedOperationTimingModes.contains(.keyedXOF)
         || requestedOperationTimingModes.contains(.deriveKey) {
         print("xofOutputByteCount=\(requestedXOFOutputByteCount)")
+    }
+    if requestedOperationTimingModes.contains(.batchOneChunk) {
+        print("batchOneChunkItemByteCount=\(requestedBatchOneChunkItemByteCount)")
     }
     for mode in requestedOperationTimingModes {
         print("operation-\(mode.rawValue) includes: \(mode.description)")
@@ -2481,6 +2555,16 @@ for size in requestedSizes {
     } else {
         nil
     }
+    let batchOneChunkRanges = requestedOperationTimingModes.contains(.batchOneChunk)
+        ? oneChunkBatchRanges(byteCount: size, itemByteCount: requestedBatchOneChunkItemByteCount)
+        : []
+    let expectedBatchOneChunkDigest: BLAKE3.Digest? = if requestedOperationTimingModes.contains(.batchOneChunk) {
+        input.withUnsafeBytes { rawInput in
+            batchOneChunkCPUForBenchmark(rawInput, ranges: batchOneChunkRanges)
+        }
+    } else {
+        nil
+    }
 
     if let expectedKeyedDigest, requestedOperationTimingModes.contains(.keyed) {
         operationResults.append(
@@ -2530,6 +2614,19 @@ for size in requestedSizes {
                 expectedDigest: expectedDeriveKeyDigest
             ) { rawInput in
                 deriveKeyCPUForBenchmark(rawInput, outputByteCount: requestedXOFOutputByteCount)
+            }
+        )
+    }
+    if let expectedBatchOneChunkDigest, requestedOperationTimingModes.contains(.batchOneChunk) {
+        operationResults.append(
+            runRawBenchmark(
+                backend: "cpu",
+                mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)",
+                input: input,
+                iterations: iterations,
+                expectedDigest: expectedBatchOneChunkDigest
+            ) { rawInput in
+                batchOneChunkCPUForBenchmark(rawInput, ranges: batchOneChunkRanges)
             }
         )
     }
@@ -2984,6 +3081,25 @@ for size in requestedSizes {
                         buffer: metalBuffer,
                         length: size,
                         outputByteCount: requestedXOFOutputByteCount
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedBatchOneChunkDigest,
+           requestedOperationTimingModes.contains(.batchOneChunk) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedBatchOneChunkDigest
+                ) { _ in
+                    batchOneChunkMetalGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        ranges: batchOneChunkRanges
                     )
                 }
             )

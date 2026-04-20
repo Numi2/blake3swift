@@ -1306,6 +1306,74 @@ final class BLAKE3Tests: XCTestCase {
         }
     }
 
+    func testMetalOneChunkBatchMatchesCPUAcrossSmallRanges() throws {
+        guard BLAKE3Metal.isAvailable else {
+            throw XCTSkip("Metal is not available on this host.")
+        }
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let context = try BLAKE3Metal.makeContext(device: device)
+        let lengths = [0, 1, 2, 63, 64, 65, 255, 1_023, 1_024]
+        var input = [UInt8]()
+        var ranges = [Range<Int>]()
+        for (index, length) in lengths.enumerated() {
+            let lowerBound = input.count
+            input.append(
+                contentsOf: (0..<length).map { byteIndex in
+                    UInt8((byteIndex + index * 17) % 251)
+                }
+            )
+            ranges.append(lowerBound..<input.count)
+        }
+
+        let buffer = try XCTUnwrap(input.withUnsafeBytes { raw in
+            device.makeBuffer(bytes: raw.baseAddress!, length: raw.count, options: .storageModeShared)
+        })
+        let expected = ranges.map { range in
+            input.withUnsafeBytes { raw in
+                BLAKE3.hash(
+                    UnsafeRawBufferPointer(
+                        start: raw.baseAddress!.advanced(by: range.lowerBound),
+                        count: range.count
+                    )
+                )
+            }
+        }
+
+        XCTAssertEqual(
+            try context.hashOneChunkBatch(buffer: buffer, ranges: ranges),
+            expected
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.hashOneChunkBatch(buffer: buffer, ranges: ranges),
+            expected
+        )
+        XCTAssertEqual(try context.hashOneChunkBatch(buffer: buffer, ranges: []), [])
+
+        let key = deterministicInput(byteCount: BLAKE3.keyByteCount)
+        let expectedKeyed = ranges.map { range in
+            input.withUnsafeBytes { raw in
+                try! BLAKE3.keyedHash(
+                    key: key,
+                    input: UnsafeRawBufferPointer(
+                        start: raw.baseAddress!.advanced(by: range.lowerBound),
+                        count: range.count
+                    )
+                )
+            }
+        }
+        XCTAssertEqual(
+            try context.keyedHashOneChunkBatch(key: key, buffer: buffer, ranges: ranges),
+            expectedKeyed
+        )
+
+        XCTAssertThrowsError(
+            try context.hashOneChunkBatch(buffer: buffer, ranges: [0..<(BLAKE3.chunkByteCount + 1)])
+        )
+        XCTAssertThrowsError(
+            try context.hashOneChunkBatch(buffer: buffer, ranges: [0..<(buffer.length + 1)])
+        )
+    }
+
     func testMetalKeyedHashMatchesCPUAcrossTreeShapes() throws {
         guard BLAKE3Metal.isAvailable else {
             throw XCTSkip("Metal is not available on this host.")

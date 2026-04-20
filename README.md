@@ -65,7 +65,7 @@ The current `flatkernels` branch includes the block-state streaming hasher, loca
 - Bounded-memory CV stack for streaming and multi-GB file hashing; the `flatkernels` streaming state keeps only the current undecided 64-byte block.
 - CPU file strategies for buffered reads and memory-mapped hashing.
 - File APIs cover unkeyed digest/XOF, keyed digest/XOF, and derive-key material output across CPU and Metal strategies.
-- Metal resident-buffer, no-copy Swift input, keyed hashing, derive-key material hashing, XOF, staged-buffer, tuned private-staged, async pipeline, tiled mmap file, and staged-read file hashing APIs.
+- Metal resident-buffer, no-copy Swift input, one-chunk batch hashing, keyed hashing, derive-key material hashing, XOF, staged-buffer, tuned private-staged, async pipeline, tiled mmap file, and staged-read file hashing APIs.
 - Fused Metal tile reduction for aligned full-chunk shared-memory inputs.
 - Metal file hashing can use no-copy mmap pages or staged reads into bounded shared buffers; large complete prefixes reduce to GPU subtree chaining values before CPU stack merge.
 - Runtime Metal compilation fallback plus precompiled `.metallib` loading for production startup control.
@@ -256,6 +256,22 @@ For synchronous Swift-owned input on Apple Silicon unified memory, use the no-co
 let digest = try context.hash(input: input, policy: .gpu)
 ```
 
+For many independent small objects already packed into one resident buffer, use the one-chunk batch path. Each range must be at most `BLAKE3.chunkByteCount` bytes and produces one digest:
+
+```swift
+let ranges = [
+    0..<1024,
+    1024..<1536,
+    1536..<2048
+]
+
+let digests = try context.hashOneChunkBatch(
+    buffer: buffer,
+    ranges: ranges
+)
+print(digests)
+```
+
 For repeated Swift-owned uploads into reusable private GPU storage:
 
 ```swift
@@ -334,6 +350,19 @@ swift run -c release blake3-bench \
   --metal-modes resident,wrapped \
   --operation-modes keyed,xof,keyed-xof,derive-key \
   --xof-output-bytes 1024 \
+  --file-modes none \
+  --cryptokit-modes none
+```
+
+Measure independent one-chunk batch hashing:
+
+```bash
+swift run -c release blake3-bench \
+  --sizes 16m,64m \
+  --iterations 5 \
+  --metal-modes resident \
+  --operation-modes batch-one-chunk \
+  --batch-item-bytes 1024 \
   --file-modes none \
   --cryptokit-modes none
 ```
