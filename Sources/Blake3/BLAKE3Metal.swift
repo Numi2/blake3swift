@@ -667,9 +667,11 @@ public enum BLAKE3Metal {
         private var parentCVBuffer: MTLBuffer?
         private var digestBuffer: MTLBuffer?
         private var parameterBuffer: MTLBuffer?
+        private var auxiliaryParameterBuffer: MTLBuffer?
         private var chunkCVCapacity = 0
         private var parentCVCapacity = 0
         private var parameterSlotCapacity = 0
+        private var auxiliaryParameterSlotCapacity = 0
 
         /// Creates a Metal context for a device.
         ///
@@ -1356,6 +1358,48 @@ public enum BLAKE3Metal {
             )
         }
 
+        /// Writes BLAKE3 XOF output and returns a BLAKE3 digest of the produced output bytes.
+        ///
+        /// For GPU-sized inputs and outputs, this encodes the XOF generation and output digest into one
+        /// Metal command buffer so the output can remain private to the GPU.
+        public func writeXOFAndHashOutput(
+            buffer: MTLBuffer,
+            length: Int,
+            outputByteCount: Int,
+            seek: UInt64 = 0,
+            policy: ExecutionPolicy = .automatic,
+            into outputBuffer: MTLBuffer
+        ) throws -> BLAKE3.Digest {
+            try writeXOFAndHashOutput(
+                buffer: buffer,
+                range: 0..<length,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                policy: policy,
+                into: outputBuffer
+            )
+        }
+
+        /// Writes BLAKE3 XOF output for a range and returns a BLAKE3 digest of the produced output bytes.
+        public func writeXOFAndHashOutput(
+            buffer: MTLBuffer,
+            range: Range<Int>,
+            outputByteCount: Int,
+            seek: UInt64 = 0,
+            policy: ExecutionPolicy = .automatic,
+            into outputBuffer: MTLBuffer
+        ) throws -> BLAKE3.Digest {
+            try writeXOFAndHashOutput(
+                buffer: buffer,
+                range: range,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                policy: policy,
+                into: outputBuffer,
+                mode: .unkeyed
+            )
+        }
+
         func hash(
             buffer: MTLBuffer,
             range: Range<Int>,
@@ -1398,6 +1442,36 @@ public enum BLAKE3Metal {
                 throw BLAKE3Error.metalCommandFailed("Output buffer belongs to a different Metal device.")
             }
             return try BLAKE3Metal.writeXOF(
+                buffer: buffer,
+                range: range,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                policy: policy,
+                mode: mode,
+                minimumGPUByteCount: minimumGPUByteCount,
+                pipelines: pipelines,
+                commandQueue: commandQueue,
+                workspace: self,
+                outputBuffer: outputBuffer
+            )
+        }
+
+        func writeXOFAndHashOutput(
+            buffer: MTLBuffer,
+            range: Range<Int>,
+            outputByteCount: Int,
+            seek: UInt64,
+            policy: ExecutionPolicy,
+            into outputBuffer: MTLBuffer,
+            mode: HashMode
+        ) throws -> BLAKE3.Digest {
+            guard buffer.device.registryID == device.registryID else {
+                throw BLAKE3Error.metalCommandFailed("Buffer belongs to a different Metal device.")
+            }
+            guard outputBuffer.device.registryID == device.registryID else {
+                throw BLAKE3Error.metalCommandFailed("Output buffer belongs to a different Metal device.")
+            }
+            return try BLAKE3Metal.writeXOFAndHashOutput(
                 buffer: buffer,
                 range: range,
                 outputByteCount: outputByteCount,
@@ -1673,6 +1747,51 @@ public enum BLAKE3Metal {
             }
         }
 
+        /// Writes keyed BLAKE3 XOF output and returns a digest of the produced output bytes.
+        public func writeKeyedXOFAndHashOutput(
+            key: some ContiguousBytes,
+            buffer: MTLBuffer,
+            length: Int,
+            outputByteCount: Int,
+            seek: UInt64 = 0,
+            policy: ExecutionPolicy = .automatic,
+            into outputBuffer: MTLBuffer
+        ) throws -> BLAKE3.Digest {
+            try writeKeyedXOFAndHashOutput(
+                key: key,
+                buffer: buffer,
+                range: 0..<length,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                policy: policy,
+                into: outputBuffer
+            )
+        }
+
+        /// Writes keyed BLAKE3 XOF output for a range and returns a digest of the produced output bytes.
+        public func writeKeyedXOFAndHashOutput(
+            key: some ContiguousBytes,
+            buffer: MTLBuffer,
+            range: Range<Int>,
+            outputByteCount: Int,
+            seek: UInt64 = 0,
+            policy: ExecutionPolicy = .automatic,
+            into outputBuffer: MTLBuffer
+        ) throws -> BLAKE3.Digest {
+            try key.withUnsafeBytes { keyBytes in
+                let mode = try BLAKE3Metal.keyedHashMode(keyBytes)
+                return try writeXOFAndHashOutput(
+                    buffer: buffer,
+                    range: range,
+                    outputByteCount: outputByteCount,
+                    seek: seek,
+                    policy: policy,
+                    into: outputBuffer,
+                    mode: mode
+                )
+            }
+        }
+
         /// Derives BLAKE3 key material through this context.
         public func deriveKey(
             context: String,
@@ -1791,6 +1910,49 @@ public enum BLAKE3Metal {
         ) throws -> Int {
             let mode = BLAKE3Metal.deriveKeyMaterialMode(context: context)
             return try writeXOF(
+                buffer: buffer,
+                range: range,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                policy: policy,
+                into: outputBuffer,
+                mode: mode
+            )
+        }
+
+        /// Writes derived key material and returns a digest of the produced output bytes.
+        public func writeDerivedKeyAndHashOutput(
+            context: String,
+            buffer: MTLBuffer,
+            length: Int,
+            outputByteCount: Int = BLAKE3.digestByteCount,
+            seek: UInt64 = 0,
+            policy: ExecutionPolicy = .automatic,
+            into outputBuffer: MTLBuffer
+        ) throws -> BLAKE3.Digest {
+            try writeDerivedKeyAndHashOutput(
+                context: context,
+                buffer: buffer,
+                range: 0..<length,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                policy: policy,
+                into: outputBuffer
+            )
+        }
+
+        /// Writes derived key material for a range and returns a digest of the produced output bytes.
+        public func writeDerivedKeyAndHashOutput(
+            context: String,
+            buffer: MTLBuffer,
+            range: Range<Int>,
+            outputByteCount: Int = BLAKE3.digestByteCount,
+            seek: UInt64 = 0,
+            policy: ExecutionPolicy = .automatic,
+            into outputBuffer: MTLBuffer
+        ) throws -> BLAKE3.Digest {
+            let mode = BLAKE3Metal.deriveKeyMaterialMode(context: context)
+            return try writeXOFAndHashOutput(
                 buffer: buffer,
                 range: range,
                 outputByteCount: outputByteCount,
@@ -2363,6 +2525,45 @@ public enum BLAKE3Metal {
                 throw BLAKE3Error.metalCommandFailed("Metal workspace buffers are unavailable.")
             }
             return try body(chunkCVBuffer, parentCVBuffer, digestBuffer, parameterBuffer)
+        }
+
+        fileprivate func withDualParameterWorkspace<R>(
+            chunkCount: Int,
+            _ body: (MTLBuffer, MTLBuffer, MTLBuffer, MTLBuffer, MTLBuffer) throws -> R
+        ) throws -> R {
+            lock.lock()
+            defer {
+                lock.unlock()
+            }
+
+            try ensureBuffers(chunkCount: chunkCount)
+            let parameterSlotCount = 1 + Self.parentReductionStepCount(for: chunkCount)
+            if auxiliaryParameterSlotCapacity < parameterSlotCount {
+                guard let buffer = device.makeBuffer(
+                    length: parameterSlotCount * Self.parameterSlotStride,
+                    options: .storageModeShared
+                ) else {
+                    throw BLAKE3Error.metalCommandFailed("Unable to allocate auxiliary Metal parameter buffer.")
+                }
+                auxiliaryParameterBuffer = buffer
+                auxiliaryParameterSlotCapacity = parameterSlotCount
+            }
+
+            guard let chunkCVBuffer,
+                  let parentCVBuffer,
+                  let digestBuffer,
+                  let parameterBuffer,
+                  let auxiliaryParameterBuffer
+            else {
+                throw BLAKE3Error.metalCommandFailed("Metal workspace buffers are unavailable.")
+            }
+            return try body(
+                chunkCVBuffer,
+                parentCVBuffer,
+                digestBuffer,
+                parameterBuffer,
+                auxiliaryParameterBuffer
+            )
         }
 
         private func ensureBuffers(chunkCount: Int) throws {
@@ -3274,6 +3475,213 @@ public enum BLAKE3Metal {
             }
         }
         return outputByteCount
+    }
+
+    private static func writeXOFAndHashOutput(
+        buffer: MTLBuffer,
+        range: Range<Int>,
+        outputByteCount: Int,
+        seek: UInt64,
+        policy: ExecutionPolicy,
+        mode: HashMode,
+        minimumGPUByteCount: Int,
+        pipelines: BLAKE3MetalPipelines,
+        commandQueue: MTLCommandQueue,
+        workspace: Context,
+        outputBuffer: MTLBuffer
+    ) throws -> BLAKE3.Digest {
+        guard buffer.device.registryID == outputBuffer.device.registryID else {
+            throw BLAKE3Error.metalCommandFailed("Output buffer belongs to a different Metal device.")
+        }
+        guard range.lowerBound >= 0,
+              range.upperBound <= buffer.length,
+              range.lowerBound <= range.upperBound
+        else {
+            throw BLAKE3Error.invalidBufferRange
+        }
+        try validateOutputByteCount(outputByteCount)
+        guard outputBuffer.length >= outputByteCount else {
+            throw BLAKE3Error.metalCommandFailed(
+                "BLAKE3 XOF output buffer must hold \(outputByteCount) bytes."
+            )
+        }
+        guard outputByteCount > 0 else {
+            return BLAKE3.hashCPU([UInt8]())
+        }
+        let outputByteCount64 = UInt64(outputByteCount)
+        guard UInt64.max - seek >= outputByteCount64 else {
+            throw BLAKE3Error.metalCommandFailed("BLAKE3 XOF output range overflows UInt64.")
+        }
+
+        switch policy {
+        case .cpu:
+            try writeXOF(
+                buffer: buffer,
+                range: range,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                policy: policy,
+                mode: mode,
+                minimumGPUByteCount: minimumGPUByteCount,
+                pipelines: pipelines,
+                commandQueue: commandQueue,
+                workspace: workspace,
+                outputBuffer: outputBuffer
+            )
+            return try hashOnCPU(buffer: outputBuffer, range: 0..<outputByteCount, mode: .unkeyed)
+        case .automatic:
+            let canUseCPUFallback = buffer.storageMode != .private && outputBuffer.storageMode != .private
+            if range.count < minimumGPUByteCount && canUseCPUFallback {
+                try writeXOF(
+                    buffer: buffer,
+                    range: range,
+                    outputByteCount: outputByteCount,
+                    seek: seek,
+                    policy: policy,
+                    mode: mode,
+                    minimumGPUByteCount: minimumGPUByteCount,
+                    pipelines: pipelines,
+                    commandQueue: commandQueue,
+                    workspace: workspace,
+                    outputBuffer: outputBuffer
+                )
+                return try hashOnCPU(buffer: outputBuffer, range: 0..<outputByteCount, mode: .unkeyed)
+            }
+        case .gpu:
+            break
+        }
+
+        guard range.count > BLAKE3.chunkByteCount else {
+            try writeXOF(
+                buffer: buffer,
+                range: range,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                policy: policy,
+                mode: mode,
+                minimumGPUByteCount: minimumGPUByteCount,
+                pipelines: pipelines,
+                commandQueue: commandQueue,
+                workspace: workspace,
+                outputBuffer: outputBuffer
+            )
+            if outputByteCount <= BLAKE3.chunkByteCount {
+                return try hashOneChunkBatch(
+                    buffer: outputBuffer,
+                    ranges: [0..<outputByteCount],
+                    mode: .unkeyed,
+                    pipelines: pipelines,
+                    commandQueue: commandQueue
+                ).first!
+            }
+            return try hash(
+                buffer: outputBuffer,
+                range: 0..<outputByteCount,
+                policy: .gpu,
+                mode: .unkeyed,
+                minimumGPUByteCount: 0,
+                pipelines: pipelines,
+                commandQueue: commandQueue,
+                workspace: workspace
+            )
+        }
+
+        let inputChunkCount = (range.count + BLAKE3.chunkByteCount - 1) / BLAKE3.chunkByteCount
+        let outputChunkCount = (outputByteCount + BLAKE3.chunkByteCount - 1) / BLAKE3.chunkByteCount
+        let workspaceChunkCount = max(inputChunkCount, outputChunkCount)
+
+        return try workspace.withDualParameterWorkspace(chunkCount: workspaceChunkCount) {
+            cvBuffer,
+            scratchBuffer,
+            digestBuffer,
+            xofParameterBuffer,
+            outputHashParameterBuffer in
+            let commandBuffer = commandQueue.makeCommandBuffer()
+            guard let commandBuffer,
+                  let xofEncoder = commandBuffer.makeComputeCommandEncoder()
+            else {
+                throw BLAKE3Error.metalCommandFailed(
+                    "Unable to create BLAKE3 chained XOF command buffer or encoder."
+                )
+            }
+
+            try encodeXOFCommands(
+                buffer: buffer,
+                range: range,
+                chunkCount: inputChunkCount,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                pipelines: pipelines,
+                mode: mode,
+                cvBuffer: cvBuffer,
+                scratchBuffer: scratchBuffer,
+                outputBuffer: outputBuffer,
+                parameterBuffer: xofParameterBuffer,
+                encoder: xofEncoder
+            )
+
+            guard let outputHashEncoder = commandBuffer.makeComputeCommandEncoder() else {
+                throw BLAKE3Error.metalCommandFailed("Unable to create BLAKE3 output digest encoder.")
+            }
+            if outputByteCount <= BLAKE3.chunkByteCount {
+                var entry = BLAKE3MetalBatchEntry(
+                    inputOffset: 0,
+                    inputLength: UInt32(outputByteCount)
+                )
+                guard let entriesBuffer = withUnsafeBytes(of: &entry, { raw in
+                    buffer.device.makeBuffer(
+                        bytes: raw.baseAddress!,
+                        length: raw.count,
+                        options: .storageModeShared
+                    )
+                }) else {
+                    outputHashEncoder.endEncoding()
+                    throw BLAKE3Error.metalCommandFailed("Unable to allocate BLAKE3 output digest entry buffer.")
+                }
+                let params = BLAKE3MetalBatchParams(
+                    entryCount: 1,
+                    canLoadWords: canLoadWords(buffer: outputBuffer, range: 0..<outputByteCount) ? 1 : 0,
+                    key: HashMode.unkeyed.metalKey,
+                    flags: HashMode.unkeyed.flags
+                )
+                copyParameter(params, into: outputHashParameterBuffer, slot: 0)
+                let pipeline = pipelines.batchOneChunkDigest
+                outputHashEncoder.setComputePipelineState(pipeline)
+                outputHashEncoder.setBuffer(outputBuffer, offset: 0, index: 0)
+                outputHashEncoder.setBuffer(entriesBuffer, offset: 0, index: 1)
+                outputHashEncoder.setBuffer(digestBuffer, offset: 0, index: 2)
+                outputHashEncoder.setBuffer(outputHashParameterBuffer, offset: 0, index: 3)
+                dispatchThreads(count: 1, pipeline: pipeline, encoder: outputHashEncoder)
+                outputHashEncoder.endEncoding()
+            } else {
+                try encodeHashCommands(
+                    buffer: outputBuffer,
+                    range: 0..<outputByteCount,
+                    chunkCount: outputChunkCount,
+                    pipelines: pipelines,
+                    mode: .unkeyed,
+                    cvBuffer: cvBuffer,
+                    scratchBuffer: scratchBuffer,
+                    digestBuffer: digestBuffer,
+                    parameterBuffer: outputHashParameterBuffer,
+                    encoder: outputHashEncoder
+                )
+            }
+
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
+
+            if let error = commandBuffer.error {
+                throw BLAKE3Error.metalCommandFailed(error.localizedDescription)
+            }
+
+            return BLAKE3.Digest(
+                UnsafeRawBufferPointer(
+                    start: digestBuffer.contents(),
+                    count: BLAKE3.digestByteCount
+                )
+            )
+        }
     }
 
     private static func hashOneChunkBatch(

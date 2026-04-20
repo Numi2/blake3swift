@@ -1689,6 +1689,33 @@ final class BLAKE3Tests: XCTestCase {
             try context.hashOneChunkBatch(buffer: privateOutputBuffer, ranges: [0..<513]).first,
             BLAKE3.hashCPU(expectedResidentXOF)
         )
+        XCTAssertEqual(
+            try context.writeXOFAndHashOutput(
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu,
+                into: privateOutputBuffer
+            ),
+            BLAKE3.hashCPU(expectedResidentXOF)
+        )
+
+        var largeOutputHasher = BLAKE3.Hasher()
+        largeOutputHasher.update(input)
+        let expectedLargeResidentXOF = xofBytes(from: largeOutputHasher, count: 4_096, seek: 17)
+        let largePrivateOutputBuffer = try XCTUnwrap(device.makeBuffer(length: 4_096, options: .storageModePrivate))
+        XCTAssertEqual(
+            try context.writeXOFAndHashOutput(
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 4_096,
+                seek: 17,
+                policy: .gpu,
+                into: largePrivateOutputBuffer
+            ),
+            BLAKE3.hashCPU(expectedLargeResidentXOF)
+        )
 
         var keyedHasher = try BLAKE3.Hasher(key: key)
         keyedHasher.update(input)
@@ -1733,6 +1760,19 @@ final class BLAKE3Tests: XCTestCase {
             513
         )
         XCTAssertEqual(readOutput(staticKeyedOutputBuffer, count: 513), expectedResidentKeyedXOF)
+        let privateKeyedOutputBuffer = try XCTUnwrap(device.makeBuffer(length: 513, options: .storageModePrivate))
+        XCTAssertEqual(
+            try context.writeKeyedXOFAndHashOutput(
+                key: key,
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu,
+                into: privateKeyedOutputBuffer
+            ),
+            BLAKE3.hashCPU(expectedResidentKeyedXOF)
+        )
 
         let tooSmallOutputBuffer = try XCTUnwrap(device.makeBuffer(length: 512, options: .storageModeShared))
         XCTAssertThrowsError(
@@ -1867,6 +1907,20 @@ final class BLAKE3Tests: XCTestCase {
             513
         )
         XCTAssertEqual(readOutput(staticOutputBuffer, count: 513), expectedResidentDerived)
+
+        let privateOutputBuffer = try XCTUnwrap(device.makeBuffer(length: 513, options: .storageModePrivate))
+        XCTAssertEqual(
+            try metalContext.writeDerivedKeyAndHashOutput(
+                context: kdfContext,
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu,
+                into: privateOutputBuffer
+            ),
+            BLAKE3.hashCPU(expectedResidentDerived)
+        )
 
         XCTAssertEqual(
             try BLAKE3Metal.deriveKey(

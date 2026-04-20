@@ -279,6 +279,9 @@ The same pattern is available for keyed XOF and derive-key material with `writeK
 Private output buffers can be consumed by later Metal passes without CPU readback. When a compact CPU-visible
 check is needed, hash the private output buffer with Metal and read only the final 32-byte digest.
 
+When the output digest is needed immediately, `writeXOFAndHashOutput`, `writeKeyedXOFAndHashOutput`, and
+`writeDerivedKeyAndHashOutput` chain the writer and output digest in one Metal submission.
+
 For many independent small objects already packed into one resident buffer, use the one-chunk batch path. Each range must be at most `BLAKE3.chunkByteCount` bytes and produces one digest:
 
 ```swift
@@ -396,7 +399,8 @@ swift run -c release blake3-bench \
 ```
 
 Resident Metal XOF rows also include `resident-write-gpu` variants for caller-owned shared output buffers and
-`resident-write-private-gpu` variants that write to private output buffers and reduce them with Metal.
+`resident-write-private-gpu` variants that write to private output buffers and reduce them with Metal. The
+`resident-write-private-chained-gpu` rows encode the private write and output digest in one command buffer.
 
 Measure independent one-chunk batch hashing:
 
