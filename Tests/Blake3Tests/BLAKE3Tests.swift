@@ -1349,6 +1349,56 @@ final class BLAKE3Tests: XCTestCase {
         )
         XCTAssertEqual(try context.hashOneChunkBatch(buffer: buffer, ranges: []), [])
 
+        func readDigests(_ outputBuffer: MTLBuffer, count: Int) -> [BLAKE3.Digest] {
+            let rawOutput = UnsafeRawBufferPointer(
+                start: outputBuffer.contents(),
+                count: count * BLAKE3.digestByteCount
+            )
+            let baseAddress = rawOutput.baseAddress!
+            return (0..<count).map { index in
+                BLAKE3.Digest(
+                    UnsafeRawBufferPointer(
+                        start: baseAddress.advanced(by: index * BLAKE3.digestByteCount),
+                        count: BLAKE3.digestByteCount
+                    )
+                )
+            }
+        }
+
+        let outputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: ranges.count * BLAKE3.digestByteCount,
+                options: .storageModeShared
+            )
+        )
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigests(buffer: buffer, ranges: ranges, into: outputBuffer),
+            ranges.count
+        )
+        XCTAssertEqual(readDigests(outputBuffer, count: ranges.count), expected)
+
+        let staticOutputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: ranges.count * BLAKE3.digestByteCount,
+                options: .storageModeShared
+            )
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.writeOneChunkBatchDigests(
+                buffer: buffer,
+                ranges: ranges,
+                into: staticOutputBuffer
+            ),
+            ranges.count
+        )
+        XCTAssertEqual(readDigests(staticOutputBuffer, count: ranges.count), expected)
+
+        let emptyOutputBuffer = try XCTUnwrap(device.makeBuffer(length: 1, options: .storageModeShared))
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigests(buffer: buffer, ranges: [], into: emptyOutputBuffer),
+            0
+        )
+
         let key = deterministicInput(byteCount: BLAKE3.keyByteCount)
         let expectedKeyed = ranges.map { range in
             input.withUnsafeBytes { raw in
@@ -1364,6 +1414,50 @@ final class BLAKE3Tests: XCTestCase {
         XCTAssertEqual(
             try context.keyedHashOneChunkBatch(key: key, buffer: buffer, ranges: ranges),
             expectedKeyed
+        )
+
+        let keyedOutputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: ranges.count * BLAKE3.digestByteCount,
+                options: .storageModeShared
+            )
+        )
+        XCTAssertEqual(
+            try context.writeKeyedOneChunkBatchDigests(
+                key: key,
+                buffer: buffer,
+                ranges: ranges,
+                into: keyedOutputBuffer
+            ),
+            ranges.count
+        )
+        XCTAssertEqual(readDigests(keyedOutputBuffer, count: ranges.count), expectedKeyed)
+
+        let staticKeyedOutputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: ranges.count * BLAKE3.digestByteCount,
+                options: .storageModeShared
+            )
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.writeKeyedOneChunkBatchDigests(
+                key: key,
+                buffer: buffer,
+                ranges: ranges,
+                into: staticKeyedOutputBuffer
+            ),
+            ranges.count
+        )
+        XCTAssertEqual(readDigests(staticKeyedOutputBuffer, count: ranges.count), expectedKeyed)
+
+        let tooSmallOutputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: ranges.count * BLAKE3.digestByteCount - 1,
+                options: .storageModeShared
+            )
+        )
+        XCTAssertThrowsError(
+            try context.writeOneChunkBatchDigests(buffer: buffer, ranges: ranges, into: tooSmallOutputBuffer)
         )
 
         XCTAssertThrowsError(

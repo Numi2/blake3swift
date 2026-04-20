@@ -643,6 +643,21 @@ private func aggregateBatchDigestsForBenchmark(_ digests: [BLAKE3.Digest]) -> BL
     return BLAKE3.hashCPU(bytes)
 }
 
+private func aggregateBatchDigestBufferForBenchmark(
+    _ outputBuffer: MTLBuffer,
+    digestCount: Int
+) -> BLAKE3.Digest {
+    guard digestCount > 0 else {
+        return aggregateBatchDigestsForBenchmark([])
+    }
+    return BLAKE3.hashCPU(
+        UnsafeRawBufferPointer(
+            start: outputBuffer.contents(),
+            count: digestCount * BLAKE3.digestByteCount
+        )
+    )
+}
+
 @inline(never)
 private func batchOneChunkCPUForBenchmark(
     _ input: UnsafeRawBufferPointer,
@@ -698,6 +713,22 @@ private func batchOneChunkMetalGPUForBenchmark(
     aggregateBatchDigestsForBenchmark(
         try! context.hashOneChunkBatch(buffer: buffer, ranges: ranges)
     )
+}
+
+@inline(never)
+private func batchOneChunkMetalWriteGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    ranges: [Range<Int>],
+    outputBuffer: MTLBuffer
+) -> BLAKE3.Digest {
+    let digestCount = try! context.writeOneChunkBatchDigests(
+        buffer: buffer,
+        ranges: ranges,
+        into: outputBuffer
+    )
+    precondition(digestCount == ranges.count)
+    return aggregateBatchDigestBufferForBenchmark(outputBuffer, digestCount: digestCount)
 }
 
 @inline(never)
@@ -2848,6 +2879,13 @@ for size in requestedSizes {
     if let metalDevice,
        let metalContext,
        let metalBuffer = makeMetalBuffer(device: metalDevice, input: input) {
+        let batchOneChunkOutputBuffer = requestedMetalTimingModes.contains(.resident)
+            && requestedOperationTimingModes.contains(.batchOneChunk)
+            ? metalDevice.makeBuffer(
+                length: max(1, batchOneChunkRanges.count * BLAKE3.digestByteCount),
+                options: .storageModeShared
+            )
+            : nil
         if requestedMetalTimingModes.contains(.resident) {
             metalAuto = runBenchmark(
                 backend: "metal",
@@ -3100,6 +3138,27 @@ for size in requestedSizes {
                         context: metalContext,
                         buffer: metalBuffer,
                         ranges: batchOneChunkRanges
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedBatchOneChunkDigest,
+           let batchOneChunkOutputBuffer,
+           requestedOperationTimingModes.contains(.batchOneChunk) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-write-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedBatchOneChunkDigest
+                ) { _ in
+                    batchOneChunkMetalWriteGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        ranges: batchOneChunkRanges,
+                        outputBuffer: batchOneChunkOutputBuffer
                     )
                 }
             )

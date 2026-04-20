@@ -272,6 +272,24 @@ let digests = try context.hashOneChunkBatch(
 print(digests)
 ```
 
+When another GPU pass consumes the digests, write directly into a caller-owned Metal buffer and skip the
+Swift `[Digest]` materialization:
+
+```swift
+let outputBuffer = device.makeBuffer(
+    length: ranges.count * BLAKE3.digestByteCount,
+    options: .storageModePrivate
+)!
+
+try context.writeOneChunkBatchDigests(
+    buffer: buffer,
+    ranges: ranges,
+    into: outputBuffer
+)
+```
+
+Use `.storageModeShared` instead when the CPU needs to inspect the digest bytes.
+
 For repeated Swift-owned uploads into reusable private GPU storage:
 
 ```swift
@@ -366,6 +384,9 @@ swift run -c release blake3-bench \
   --file-modes none \
   --cryptokit-modes none
 ```
+
+The benchmark emits both the array-returning row and a `resident-write-gpu` row that writes digests into a
+reused output `MTLBuffer`.
 
 By default, `blake3-bench` also includes a `cryptokit sha256` row as a familiar Apple platform baseline. CryptoKit does not provide BLAKE3, so this is a cross-algorithm comparison against Apple's built-in SHA-256 implementation, not a BLAKE3 parity row. CryptoKit rows are emitted after BLAKE3 CPU/Metal rows to avoid perturbing Metal timings. Use `--cryptokit-modes none` when tuning only BLAKE3 backends.
 

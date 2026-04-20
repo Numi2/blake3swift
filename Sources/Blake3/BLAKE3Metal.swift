@@ -151,6 +151,22 @@ public enum BLAKE3Metal {
         try contextCache.context(device: buffer.device).hashOneChunkBatch(buffer: buffer, ranges: ranges)
     }
 
+    /// Writes one digest per independent one-chunk resident-buffer range into `outputBuffer`.
+    ///
+    /// `outputBuffer` must have capacity for `ranges.count * BLAKE3.digestByteCount` bytes.
+    @discardableResult
+    public static func writeOneChunkBatchDigests(
+        buffer: MTLBuffer,
+        ranges: [Range<Int>],
+        into outputBuffer: MTLBuffer
+    ) throws -> Int {
+        try contextCache.context(device: buffer.device).writeOneChunkBatchDigests(
+            buffer: buffer,
+            ranges: ranges,
+            into: outputBuffer
+        )
+    }
+
     /// Hashes a resident Metal buffer and returns `outputByteCount` bytes of BLAKE3 XOF output.
     public static func hash(
         buffer: MTLBuffer,
@@ -253,6 +269,25 @@ public enum BLAKE3Metal {
             return try contextCache.context(device: buffer.device).hashOneChunkBatch(
                 buffer: buffer,
                 ranges: ranges,
+                mode: mode
+            )
+        }
+    }
+
+    /// Writes keyed BLAKE3 digests for many independent one-chunk ranges into `outputBuffer`.
+    @discardableResult
+    public static func writeKeyedOneChunkBatchDigests(
+        key: some ContiguousBytes,
+        buffer: MTLBuffer,
+        ranges: [Range<Int>],
+        into outputBuffer: MTLBuffer
+    ) throws -> Int {
+        try key.withUnsafeBytes { keyBytes in
+            let mode = try keyedHashMode(keyBytes)
+            return try contextCache.context(device: buffer.device).writeOneChunkBatchDigests(
+                buffer: buffer,
+                ranges: ranges,
+                into: outputBuffer,
                 mode: mode
             )
         }
@@ -1017,6 +1052,39 @@ public enum BLAKE3Metal {
             }
         }
 
+        /// Writes one digest per independent one-chunk resident-buffer range into `outputBuffer`.
+        @discardableResult
+        public func writeOneChunkBatchDigests(
+            buffer: MTLBuffer,
+            ranges: [Range<Int>],
+            into outputBuffer: MTLBuffer
+        ) throws -> Int {
+            try writeOneChunkBatchDigests(
+                buffer: buffer,
+                ranges: ranges,
+                into: outputBuffer,
+                mode: .unkeyed
+            )
+        }
+
+        /// Writes keyed BLAKE3 digests for many independent one-chunk resident-buffer ranges.
+        @discardableResult
+        public func writeKeyedOneChunkBatchDigests(
+            key: some ContiguousBytes,
+            buffer: MTLBuffer,
+            ranges: [Range<Int>],
+            into outputBuffer: MTLBuffer
+        ) throws -> Int {
+            try key.withUnsafeBytes { keyBytes in
+                try writeOneChunkBatchDigests(
+                    buffer: buffer,
+                    ranges: ranges,
+                    into: outputBuffer,
+                    mode: BLAKE3Metal.keyedHashMode(keyBytes)
+                )
+            }
+        }
+
         func hashOneChunkBatch(
             buffer: MTLBuffer,
             ranges: [Range<Int>],
@@ -1031,6 +1099,29 @@ public enum BLAKE3Metal {
                 mode: mode,
                 pipelines: pipelines,
                 commandQueue: commandQueue
+            )
+        }
+
+        @discardableResult
+        func writeOneChunkBatchDigests(
+            buffer: MTLBuffer,
+            ranges: [Range<Int>],
+            into outputBuffer: MTLBuffer,
+            mode: HashMode
+        ) throws -> Int {
+            guard buffer.device.registryID == device.registryID else {
+                throw BLAKE3Error.metalCommandFailed("Buffer belongs to a different Metal device.")
+            }
+            guard outputBuffer.device.registryID == device.registryID else {
+                throw BLAKE3Error.metalCommandFailed("Output buffer belongs to a different Metal device.")
+            }
+            return try BLAKE3Metal.writeOneChunkBatchDigests(
+                buffer: buffer,
+                ranges: ranges,
+                mode: mode,
+                pipelines: pipelines,
+                commandQueue: commandQueue,
+                outputBuffer: outputBuffer
             )
         }
 
@@ -2851,12 +2942,42 @@ public enum BLAKE3Metal {
         guard !ranges.isEmpty else {
             return []
         }
+
+        guard let digestBuffer = buffer.device.makeBuffer(
+            length: ranges.count * BLAKE3.digestByteCount,
+            options: .storageModeShared
+        ) else {
+            throw BLAKE3Error.metalCommandFailed("Unable to allocate BLAKE3 batch digest buffer.")
+        }
+
+        try writeOneChunkBatchDigests(
+            buffer: buffer,
+            ranges: ranges,
+            mode: mode,
+            pipelines: pipelines,
+            commandQueue: commandQueue,
+            outputBuffer: digestBuffer
+        )
+
+        return readBatchDigests(from: digestBuffer, count: ranges.count)
+    }
+
+    private struct OneChunkBatchDescriptor {
+        var entries: [BLAKE3MetalBatchEntry]
+        var canLoadWords: Bool
+    }
+
+    private static func makeOneChunkBatchDescriptor(
+        buffer: MTLBuffer,
+        ranges: [Range<Int>]
+    ) throws -> OneChunkBatchDescriptor {
         guard ranges.count <= Int(UInt32.max) else {
             throw BLAKE3Error.metalCommandFailed("BLAKE3 batch entry count exceeds UInt32 capacity.")
         }
 
         var entries = [BLAKE3MetalBatchEntry]()
         entries.reserveCapacity(ranges.count)
+        var canLoadEveryRange = true
         for range in ranges {
             guard range.lowerBound >= 0,
                   range.upperBound <= buffer.length,
@@ -2875,9 +2996,34 @@ public enum BLAKE3Metal {
                     inputLength: UInt32(range.count)
                 )
             )
+            canLoadEveryRange = canLoadEveryRange && canLoadWords(buffer: buffer, range: range)
         }
 
-        guard let entriesBuffer = entries.withUnsafeBytes({ raw in
+        return OneChunkBatchDescriptor(entries: entries, canLoadWords: canLoadEveryRange)
+    }
+
+    @discardableResult
+    private static func writeOneChunkBatchDigests(
+        buffer: MTLBuffer,
+        ranges: [Range<Int>],
+        mode: HashMode,
+        pipelines: BLAKE3MetalPipelines,
+        commandQueue: MTLCommandQueue,
+        outputBuffer: MTLBuffer
+    ) throws -> Int {
+        guard !ranges.isEmpty else {
+            return 0
+        }
+        let requiredOutputByteCount = ranges.count * BLAKE3.digestByteCount
+        guard outputBuffer.length >= requiredOutputByteCount else {
+            throw BLAKE3Error.metalCommandFailed(
+                "BLAKE3 batch output buffer must hold \(requiredOutputByteCount) bytes."
+            )
+        }
+
+        let descriptor = try makeOneChunkBatchDescriptor(buffer: buffer, ranges: ranges)
+
+        guard let entriesBuffer = descriptor.entries.withUnsafeBytes({ raw in
             buffer.device.makeBuffer(
                 bytes: raw.baseAddress!,
                 length: raw.count,
@@ -2885,12 +3031,6 @@ public enum BLAKE3Metal {
             )
         }) else {
             throw BLAKE3Error.metalCommandFailed("Unable to allocate BLAKE3 batch entry buffer.")
-        }
-        guard let digestBuffer = buffer.device.makeBuffer(
-            length: ranges.count * BLAKE3.digestByteCount,
-            options: .storageModeShared
-        ) else {
-            throw BLAKE3Error.metalCommandFailed("Unable to allocate BLAKE3 batch digest buffer.")
         }
         guard let parameterBuffer = buffer.device.makeBuffer(
             length: Context.parameterSlotStride,
@@ -2901,7 +3041,7 @@ public enum BLAKE3Metal {
 
         let params = BLAKE3MetalBatchParams(
             entryCount: UInt32(ranges.count),
-            canLoadWords: ranges.allSatisfy { canLoadWords(buffer: buffer, range: $0) } ? 1 : 0,
+            canLoadWords: descriptor.canLoadWords ? 1 : 0,
             key: mode.metalKey,
             flags: mode.flags
         )
@@ -2917,7 +3057,7 @@ public enum BLAKE3Metal {
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(buffer, offset: 0, index: 0)
         encoder.setBuffer(entriesBuffer, offset: 0, index: 1)
-        encoder.setBuffer(digestBuffer, offset: 0, index: 2)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 2)
         encoder.setBuffer(parameterBuffer, offset: 0, index: 3)
         dispatchThreads(count: ranges.count, pipeline: pipeline, encoder: encoder)
         encoder.endEncoding()
@@ -2929,14 +3069,18 @@ public enum BLAKE3Metal {
             throw BLAKE3Error.metalCommandFailed(error.localizedDescription)
         }
 
+        return ranges.count
+    }
+
+    private static func readBatchDigests(from digestBuffer: MTLBuffer, count: Int) -> [BLAKE3.Digest] {
         let rawDigests = UnsafeRawBufferPointer(
             start: digestBuffer.contents(),
-            count: ranges.count * BLAKE3.digestByteCount
+            count: count * BLAKE3.digestByteCount
         )
         let digestBase = rawDigests.baseAddress!
         var digests = [BLAKE3.Digest]()
-        digests.reserveCapacity(ranges.count)
-        for index in 0..<ranges.count {
+        digests.reserveCapacity(count)
+        for index in 0..<count {
             let offset = index * BLAKE3.digestByteCount
             digests.append(
                 BLAKE3.Digest(
