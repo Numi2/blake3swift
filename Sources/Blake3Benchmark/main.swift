@@ -412,6 +412,28 @@ private func batchPipelineWidth() -> Int {
     return parsed
 }
 
+private func batchPipelineWidths() -> [Int] {
+    if let rawValue = argumentValue(named: "--batch-pipeline-widths") {
+        let normalized = rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized == "none" || normalized == "off" || normalized == "disabled" {
+            return []
+        }
+        var seen = Set<Int>()
+        return normalized
+            .split(separator: ",")
+            .compactMap { token -> Int? in
+                let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let width = Int(trimmed), width > 1 else {
+                    return nil
+                }
+                return seen.insert(width).inserted ? width : nil
+            }
+    }
+
+    let width = batchPipelineWidth()
+    return width > 1 ? [width] : []
+}
+
 #if canImport(Metal)
 private func metalTimingModes() -> [MetalTimingMode] {
     guard let rawValue = argumentValue(named: "--metal-modes") else {
@@ -2757,7 +2779,7 @@ private let requestedOperationTimingModes = operationTimingModes()
 private let requestedFileOperationTimingModes = fileOperationTimingModes()
 private let requestedXOFOutputByteCount = xofOutputByteCount()
 private let requestedBatchOneChunkItemByteCount = batchOneChunkItemByteCount()
-private let requestedBatchPipelineWidth = batchPipelineWidth()
+private let requestedBatchPipelineWidths = batchPipelineWidths()
 #if canImport(CryptoKit)
 private let requestedCryptoKitTimingModes = cryptoKitTimingModes()
 #endif
@@ -2837,8 +2859,10 @@ if !requestedOperationTimingModes.isEmpty {
     }
     if requestedOperationTimingModes.contains(.batchOneChunk) {
         print("batchOneChunkItemByteCount=\(requestedBatchOneChunkItemByteCount)")
-        if requestedBatchPipelineWidth > 1 {
-            print("batchPipelineWidth=\(requestedBatchPipelineWidth)")
+        if requestedBatchPipelineWidths.count == 1, let width = requestedBatchPipelineWidths.first {
+            print("batchPipelineWidth=\(width)")
+        } else if !requestedBatchPipelineWidths.isEmpty {
+            print("batchPipelineWidths=\(requestedBatchPipelineWidths.map(String.init).joined(separator: ","))")
         }
     }
     for mode in requestedOperationTimingModes {
@@ -3290,74 +3314,23 @@ for size in requestedSizes {
         } else {
             nil
         }
-        let batchOneChunkPipelinedOutputBuffers: [MTLBuffer]? = {
-            guard requestedMetalTimingModes.contains(.resident),
-                  requestedOperationTimingModes.contains(.batchOneChunk),
-                  requestedBatchPipelineWidth > 1
-            else {
+        func makeBatchOneChunkOutputBuffers(width: Int, options: MTLResourceOptions) -> [MTLBuffer]? {
+            guard width > 1 else {
                 return nil
             }
             var buffers = [MTLBuffer]()
-            buffers.reserveCapacity(requestedBatchPipelineWidth)
-            for _ in 0..<requestedBatchPipelineWidth {
+            buffers.reserveCapacity(width)
+            for _ in 0..<width {
                 guard let buffer = metalDevice.makeBuffer(
                     length: max(1, batchOneChunkRanges.count * BLAKE3.digestByteCount),
-                    options: .storageModeShared
+                    options: options
                 ) else {
                     return nil
                 }
                 buffers.append(buffer)
             }
             return buffers
-        }()
-        let batchOneChunkPrivatePipelinedOutputBuffers: [MTLBuffer]? = {
-            guard requestedMetalTimingModes.contains(.resident),
-                  requestedOperationTimingModes.contains(.batchOneChunk),
-                  requestedBatchPipelineWidth > 1
-            else {
-                return nil
-            }
-            var buffers = [MTLBuffer]()
-            buffers.reserveCapacity(requestedBatchPipelineWidth)
-            for _ in 0..<requestedBatchPipelineWidth {
-                guard let buffer = metalDevice.makeBuffer(
-                    length: max(1, batchOneChunkRanges.count * BLAKE3.digestByteCount),
-                    options: .storageModePrivate
-                ) else {
-                    return nil
-                }
-                buffers.append(buffer)
-            }
-            return buffers
-        }()
-        let batchOneChunkWritePipeline: BLAKE3Metal.OneChunkBatchWritePipeline? = if let batchOneChunkPlan,
-            let batchOneChunkPipelinedOutputBuffers {
-            try? metalContext.makeOneChunkBatchWritePipeline(
-                plan: batchOneChunkPlan,
-                outputBuffers: batchOneChunkPipelinedOutputBuffers
-            )
-        } else {
-            nil
         }
-        let batchOneChunkPrivateWritePipeline: BLAKE3Metal.OneChunkBatchWritePipeline? = if let batchOneChunkPlan,
-            let batchOneChunkPrivatePipelinedOutputBuffers {
-            try? metalContext.makeOneChunkBatchWritePipeline(
-                plan: batchOneChunkPlan,
-                outputBuffers: batchOneChunkPrivatePipelinedOutputBuffers
-            )
-        } else {
-            nil
-        }
-        let batchOneChunkPrivateChainedPipeline: BLAKE3Metal.OneChunkBatchChainedPipeline? =
-            if let batchOneChunkPlan,
-               let batchOneChunkPrivatePipelinedOutputBuffers {
-                try? metalContext.makeOneChunkBatchChainedPipeline(
-                    plan: batchOneChunkPlan,
-                    outputBuffers: batchOneChunkPrivatePipelinedOutputBuffers
-                )
-            } else {
-                nil
-            }
         let xofOutputBuffer = requestedMetalTimingModes.contains(.resident)
             && (
                 requestedOperationTimingModes.contains(.xof)
@@ -3897,23 +3870,33 @@ for size in requestedSizes {
         }
         if requestedMetalTimingModes.contains(.resident),
            let expectedBatchOneChunkDigest,
-           let batchOneChunkWritePipeline,
+           let batchOneChunkPlan,
            requestedOperationTimingModes.contains(.batchOneChunk) {
-            operationResults.append(
-                runPipelinedBenchmark(
-                    backend: "metal",
-                    mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-plan-write-pipeline-\(requestedBatchPipelineWidth)-gpu",
-                    input: input,
-                    iterations: iterations,
-                    operationsPerSample: requestedBatchPipelineWidth,
-                    expectedDigest: expectedBatchOneChunkDigest
-                ) { _ in
-                    batchOneChunkMetalPlanWritePipelinedGPUForBenchmark(
-                        context: metalContext,
-                        pipeline: batchOneChunkWritePipeline
-                    )
+            for width in requestedBatchPipelineWidths {
+                guard let outputBuffers = makeBatchOneChunkOutputBuffers(width: width, options: .storageModeShared),
+                      let pipeline = try? metalContext.makeOneChunkBatchWritePipeline(
+                        plan: batchOneChunkPlan,
+                        outputBuffers: outputBuffers
+                      )
+                else {
+                    continue
                 }
-            )
+                operationResults.append(
+                    runPipelinedBenchmark(
+                        backend: "metal",
+                        mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-plan-write-pipeline-\(width)-gpu",
+                        input: input,
+                        iterations: iterations,
+                        operationsPerSample: width,
+                        expectedDigest: expectedBatchOneChunkDigest
+                    ) { _ in
+                        batchOneChunkMetalPlanWritePipelinedGPUForBenchmark(
+                            context: metalContext,
+                            pipeline: pipeline
+                        )
+                    }
+                )
+            }
         }
         if requestedMetalTimingModes.contains(.resident),
            let expectedBatchOneChunkDigest,
@@ -3959,23 +3942,33 @@ for size in requestedSizes {
         }
         if requestedMetalTimingModes.contains(.resident),
            let expectedBatchOneChunkDigest,
-           let batchOneChunkPrivateWritePipeline,
+           let batchOneChunkPlan,
            requestedOperationTimingModes.contains(.batchOneChunk) {
-            operationResults.append(
-                runPipelinedBenchmark(
-                    backend: "metal",
-                    mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-plan-write-private-pipeline-\(requestedBatchPipelineWidth)-gpu",
-                    input: input,
-                    iterations: iterations,
-                    operationsPerSample: requestedBatchPipelineWidth,
-                    expectedDigest: expectedBatchOneChunkDigest
-                ) { _ in
-                    batchOneChunkMetalPlanWritePrivatePipelinedGPUForBenchmark(
-                        context: metalContext,
-                        pipeline: batchOneChunkPrivateWritePipeline
-                    )
+            for width in requestedBatchPipelineWidths {
+                guard let outputBuffers = makeBatchOneChunkOutputBuffers(width: width, options: .storageModePrivate),
+                      let pipeline = try? metalContext.makeOneChunkBatchWritePipeline(
+                        plan: batchOneChunkPlan,
+                        outputBuffers: outputBuffers
+                      )
+                else {
+                    continue
                 }
-            )
+                operationResults.append(
+                    runPipelinedBenchmark(
+                        backend: "metal",
+                        mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-plan-write-private-pipeline-\(width)-gpu",
+                        input: input,
+                        iterations: iterations,
+                        operationsPerSample: width,
+                        expectedDigest: expectedBatchOneChunkDigest
+                    ) { _ in
+                        batchOneChunkMetalPlanWritePrivatePipelinedGPUForBenchmark(
+                            context: metalContext,
+                            pipeline: pipeline
+                        )
+                    }
+                )
+            }
         }
         if requestedMetalTimingModes.contains(.resident),
            let expectedBatchOneChunkDigest,
@@ -4021,23 +4014,33 @@ for size in requestedSizes {
         }
         if requestedMetalTimingModes.contains(.resident),
            let expectedBatchOneChunkDigest,
-           let batchOneChunkPrivateChainedPipeline,
+           let batchOneChunkPlan,
            requestedOperationTimingModes.contains(.batchOneChunk) {
-            operationResults.append(
-                runPipelinedBenchmark(
-                    backend: "metal",
-                    mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-plan-write-private-chained-pipeline-\(requestedBatchPipelineWidth)-gpu",
-                    input: input,
-                    iterations: iterations,
-                    operationsPerSample: requestedBatchPipelineWidth,
-                    expectedDigest: expectedBatchOneChunkDigest
-                ) { _ in
-                    batchOneChunkMetalPlanWritePrivateChainedPipelinedGPUForBenchmark(
-                        context: metalContext,
-                        pipeline: batchOneChunkPrivateChainedPipeline
-                    )
+            for width in requestedBatchPipelineWidths {
+                guard let outputBuffers = makeBatchOneChunkOutputBuffers(width: width, options: .storageModePrivate),
+                      let pipeline = try? metalContext.makeOneChunkBatchChainedPipeline(
+                        plan: batchOneChunkPlan,
+                        outputBuffers: outputBuffers
+                      )
+                else {
+                    continue
                 }
-            )
+                operationResults.append(
+                    runPipelinedBenchmark(
+                        backend: "metal",
+                        mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-plan-write-private-chained-pipeline-\(width)-gpu",
+                        input: input,
+                        iterations: iterations,
+                        operationsPerSample: width,
+                        expectedDigest: expectedBatchOneChunkDigest
+                    ) { _ in
+                        batchOneChunkMetalPlanWritePrivateChainedPipelinedGPUForBenchmark(
+                            context: metalContext,
+                            pipeline: pipeline
+                        )
+                    }
+                )
+            }
         }
         if requestedMetalTimingModes.contains(.resident),
            let expectedBatchOneChunkDigest,

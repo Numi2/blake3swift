@@ -472,6 +472,22 @@ and reduces them with Metal. The `resident-write-private-chained-gpu` row writes
 storage and reduces them in the same command buffer. The `resident-fused-aggregate-gpu` row hashes the
 concatenated digest bytes without materializing that intermediate output.
 
+Use `--batch-pipeline-widths` to emit several pipelined rows into one JSON artifact while keeping the existing
+single-width `--batch-pipeline-width` flag available:
+
+```bash
+swift run -c release blake3-bench \
+  --sizes 64m \
+  --iterations 5 \
+  --metal-modes resident \
+  --operation-modes batch-one-chunk \
+  --batch-item-bytes 64 \
+  --batch-pipeline-widths 18,22,26,28 \
+  --file-modes none \
+  --cryptokit-modes none \
+  --json-output /tmp/blake3-batch-width-matrix.json
+```
+
 By default, `blake3-bench` also includes a `cryptokit sha256` row as a familiar Apple platform baseline. CryptoKit does not provide BLAKE3, so this is a cross-algorithm comparison against Apple's built-in SHA-256 implementation, not a BLAKE3 parity row. CryptoKit rows are emitted after BLAKE3 CPU/Metal rows to avoid perturbing Metal timings. Use `--cryptokit-modes none` when tuning only BLAKE3 backends.
 
 Focused CryptoKit comparison command:
