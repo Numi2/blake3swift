@@ -1566,6 +1566,7 @@ final class BLAKE3Tests: XCTestCase {
         }
         var unkeyedHasher = BLAKE3.Hasher()
         unkeyedHasher.update(input)
+        let expectedResidentXOF = xofBytes(from: unkeyedHasher, count: 513, seek: 17)
         XCTAssertEqual(
             try context.hash(
                 buffer: buffer,
@@ -1574,10 +1575,77 @@ final class BLAKE3Tests: XCTestCase {
                 seek: 17,
                 policy: .gpu
             ),
-            xofBytes(from: unkeyedHasher, count: 513, seek: 17)
+            expectedResidentXOF
         )
+        func readOutput(_ outputBuffer: MTLBuffer, count: Int) -> [UInt8] {
+            Array(
+                UnsafeRawBufferPointer(
+                    start: outputBuffer.contents(),
+                    count: count
+                )
+            )
+        }
+
+        let outputBuffer = try XCTUnwrap(device.makeBuffer(length: 513, options: .storageModeShared))
+        XCTAssertEqual(
+            try context.writeXOF(
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu,
+                into: outputBuffer
+            ),
+            513
+        )
+        XCTAssertEqual(readOutput(outputBuffer, count: 513), expectedResidentXOF)
+
+        let staticOutputBuffer = try XCTUnwrap(device.makeBuffer(length: 513, options: .storageModeShared))
+        XCTAssertEqual(
+            try BLAKE3Metal.writeXOF(
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu,
+                into: staticOutputBuffer
+            ),
+            513
+        )
+        XCTAssertEqual(readOutput(staticOutputBuffer, count: 513), expectedResidentXOF)
+
+        let privateOutputBuffer = try XCTUnwrap(device.makeBuffer(length: 513, options: .storageModePrivate))
+        XCTAssertEqual(
+            try context.writeXOF(
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu,
+                into: privateOutputBuffer
+            ),
+            513
+        )
+        let readbackBuffer = try XCTUnwrap(device.makeBuffer(length: 513, options: .storageModeShared))
+        let commandQueue = try XCTUnwrap(device.makeCommandQueue())
+        let commandBuffer = try XCTUnwrap(commandQueue.makeCommandBuffer())
+        let blitEncoder = try XCTUnwrap(commandBuffer.makeBlitCommandEncoder())
+        blitEncoder.copy(
+            from: privateOutputBuffer,
+            sourceOffset: 0,
+            to: readbackBuffer,
+            destinationOffset: 0,
+            size: 513
+        )
+        blitEncoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        XCTAssertNil(commandBuffer.error)
+        XCTAssertEqual(readOutput(readbackBuffer, count: 513), expectedResidentXOF)
+
         var keyedHasher = try BLAKE3.Hasher(key: key)
         keyedHasher.update(input)
+        let expectedResidentKeyedXOF = xofBytes(from: keyedHasher, count: 513, seek: 17)
         XCTAssertEqual(
             try context.keyedHash(
                 key: key,
@@ -1587,7 +1655,48 @@ final class BLAKE3Tests: XCTestCase {
                 seek: 17,
                 policy: .gpu
             ),
-            xofBytes(from: keyedHasher, count: 513, seek: 17)
+            expectedResidentKeyedXOF
+        )
+        let keyedOutputBuffer = try XCTUnwrap(device.makeBuffer(length: 513, options: .storageModeShared))
+        XCTAssertEqual(
+            try context.writeKeyedXOF(
+                key: key,
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu,
+                into: keyedOutputBuffer
+            ),
+            513
+        )
+        XCTAssertEqual(readOutput(keyedOutputBuffer, count: 513), expectedResidentKeyedXOF)
+
+        let staticKeyedOutputBuffer = try XCTUnwrap(device.makeBuffer(length: 513, options: .storageModeShared))
+        XCTAssertEqual(
+            try BLAKE3Metal.writeKeyedXOF(
+                key: key,
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu,
+                into: staticKeyedOutputBuffer
+            ),
+            513
+        )
+        XCTAssertEqual(readOutput(staticKeyedOutputBuffer, count: 513), expectedResidentKeyedXOF)
+
+        let tooSmallOutputBuffer = try XCTUnwrap(device.makeBuffer(length: 512, options: .storageModeShared))
+        XCTAssertThrowsError(
+            try context.writeXOF(
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu,
+                into: tooSmallOutputBuffer
+            )
         )
         XCTAssertEqual(
             try BLAKE3Metal.hash(input: input, outputByteCount: 0, policy: .gpu),
@@ -1596,6 +1705,16 @@ final class BLAKE3Tests: XCTestCase {
         XCTAssertEqual(
             try BLAKE3Metal.keyedHash(key: key, input: input, outputByteCount: 0, policy: .gpu),
             []
+        )
+        XCTAssertEqual(
+            try context.writeXOF(
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 0,
+                policy: .gpu,
+                into: tooSmallOutputBuffer
+            ),
+            0
         )
     }
 
@@ -1650,6 +1769,7 @@ final class BLAKE3Tests: XCTestCase {
         }
         var hasher = BLAKE3.Hasher(deriveKeyContext: kdfContext)
         hasher.update(input)
+        let expectedResidentDerived = xofBytes(from: hasher, count: 513, seek: 17)
         XCTAssertEqual(
             try metalContext.deriveKey(
                 context: kdfContext,
@@ -1659,8 +1779,48 @@ final class BLAKE3Tests: XCTestCase {
                 seek: 17,
                 policy: .gpu
             ),
-            xofBytes(from: hasher, count: 513, seek: 17)
+            expectedResidentDerived
         )
+
+        func readOutput(_ outputBuffer: MTLBuffer, count: Int) -> [UInt8] {
+            Array(
+                UnsafeRawBufferPointer(
+                    start: outputBuffer.contents(),
+                    count: count
+                )
+            )
+        }
+
+        let outputBuffer = try XCTUnwrap(device.makeBuffer(length: 513, options: .storageModeShared))
+        XCTAssertEqual(
+            try metalContext.writeDerivedKey(
+                context: kdfContext,
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu,
+                into: outputBuffer
+            ),
+            513
+        )
+        XCTAssertEqual(readOutput(outputBuffer, count: 513), expectedResidentDerived)
+
+        let staticOutputBuffer = try XCTUnwrap(device.makeBuffer(length: 513, options: .storageModeShared))
+        XCTAssertEqual(
+            try BLAKE3Metal.writeDerivedKey(
+                context: kdfContext,
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu,
+                into: staticOutputBuffer
+            ),
+            513
+        )
+        XCTAssertEqual(readOutput(staticOutputBuffer, count: 513), expectedResidentDerived)
+
         XCTAssertEqual(
             try BLAKE3Metal.deriveKey(
                 context: kdfContext,
@@ -1669,6 +1829,17 @@ final class BLAKE3Tests: XCTestCase {
                 policy: .gpu
             ),
             []
+        )
+        XCTAssertEqual(
+            try metalContext.writeDerivedKey(
+                context: kdfContext,
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 0,
+                policy: .gpu,
+                into: outputBuffer
+            ),
+            0
         )
     }
 

@@ -201,6 +201,48 @@ public enum BLAKE3Metal {
         )
     }
 
+    /// Writes BLAKE3 XOF output for a resident Metal buffer into `outputBuffer`.
+    ///
+    /// `outputBuffer` must have capacity for `outputByteCount` bytes.
+    @discardableResult
+    public static func writeXOF(
+        buffer: MTLBuffer,
+        length: Int,
+        outputByteCount: Int,
+        seek: UInt64 = 0,
+        policy: ExecutionPolicy = .automatic,
+        into outputBuffer: MTLBuffer
+    ) throws -> Int {
+        try writeXOF(
+            buffer: buffer,
+            range: 0..<length,
+            outputByteCount: outputByteCount,
+            seek: seek,
+            policy: policy,
+            into: outputBuffer
+        )
+    }
+
+    /// Writes BLAKE3 XOF output for a resident Metal buffer range into `outputBuffer`.
+    @discardableResult
+    public static func writeXOF(
+        buffer: MTLBuffer,
+        range: Range<Int>,
+        outputByteCount: Int,
+        seek: UInt64 = 0,
+        policy: ExecutionPolicy = .automatic,
+        into outputBuffer: MTLBuffer
+    ) throws -> Int {
+        try contextCache.context(device: buffer.device).writeXOF(
+            buffer: buffer,
+            range: range,
+            outputByteCount: outputByteCount,
+            seek: seek,
+            policy: policy,
+            into: outputBuffer
+        )
+    }
+
     /// Hashes Swift-owned contiguous input by temporarily wrapping it in a shared Metal buffer.
     ///
     /// The synchronous call waits for GPU completion before returning, so the wrapped pointer remains valid
@@ -398,6 +440,53 @@ public enum BLAKE3Metal {
         }
     }
 
+    /// Writes keyed BLAKE3 XOF output for a resident Metal buffer into `outputBuffer`.
+    @discardableResult
+    public static func writeKeyedXOF(
+        key: some ContiguousBytes,
+        buffer: MTLBuffer,
+        length: Int,
+        outputByteCount: Int,
+        seek: UInt64 = 0,
+        policy: ExecutionPolicy = .automatic,
+        into outputBuffer: MTLBuffer
+    ) throws -> Int {
+        try writeKeyedXOF(
+            key: key,
+            buffer: buffer,
+            range: 0..<length,
+            outputByteCount: outputByteCount,
+            seek: seek,
+            policy: policy,
+            into: outputBuffer
+        )
+    }
+
+    /// Writes keyed BLAKE3 XOF output for a resident Metal buffer range into `outputBuffer`.
+    @discardableResult
+    public static func writeKeyedXOF(
+        key: some ContiguousBytes,
+        buffer: MTLBuffer,
+        range: Range<Int>,
+        outputByteCount: Int,
+        seek: UInt64 = 0,
+        policy: ExecutionPolicy = .automatic,
+        into outputBuffer: MTLBuffer
+    ) throws -> Int {
+        try key.withUnsafeBytes { keyBytes in
+            let mode = try keyedHashMode(keyBytes)
+            return try contextCache.context(device: buffer.device).writeXOF(
+                buffer: buffer,
+                range: range,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                policy: policy,
+                into: outputBuffer,
+                mode: mode
+            )
+        }
+    }
+
     /// Derives BLAKE3 key material using Metal for the material hash when selected by `policy`.
     public static func deriveKey(
         context: String,
@@ -483,6 +572,51 @@ public enum BLAKE3Metal {
             outputByteCount: outputByteCount,
             seek: seek,
             policy: policy,
+            mode: mode
+        )
+    }
+
+    /// Writes derived BLAKE3 key material for a resident Metal buffer into `outputBuffer`.
+    @discardableResult
+    public static func writeDerivedKey(
+        context: String,
+        buffer: MTLBuffer,
+        length: Int,
+        outputByteCount: Int = BLAKE3.digestByteCount,
+        seek: UInt64 = 0,
+        policy: ExecutionPolicy = .automatic,
+        into outputBuffer: MTLBuffer
+    ) throws -> Int {
+        try writeDerivedKey(
+            context: context,
+            buffer: buffer,
+            range: 0..<length,
+            outputByteCount: outputByteCount,
+            seek: seek,
+            policy: policy,
+            into: outputBuffer
+        )
+    }
+
+    /// Writes derived BLAKE3 key material for a resident Metal buffer range into `outputBuffer`.
+    @discardableResult
+    public static func writeDerivedKey(
+        context: String,
+        buffer: MTLBuffer,
+        range: Range<Int>,
+        outputByteCount: Int = BLAKE3.digestByteCount,
+        seek: UInt64 = 0,
+        policy: ExecutionPolicy = .automatic,
+        into outputBuffer: MTLBuffer
+    ) throws -> Int {
+        let mode = deriveKeyMaterialMode(context: context)
+        return try contextCache.context(device: buffer.device).writeXOF(
+            buffer: buffer,
+            range: range,
+            outputByteCount: outputByteCount,
+            seek: seek,
+            policy: policy,
+            into: outputBuffer,
             mode: mode
         )
     }
@@ -1181,6 +1315,47 @@ public enum BLAKE3Metal {
             )
         }
 
+        /// Writes BLAKE3 XOF output for a resident Metal buffer through this context.
+        @discardableResult
+        public func writeXOF(
+            buffer: MTLBuffer,
+            length: Int,
+            outputByteCount: Int,
+            seek: UInt64 = 0,
+            policy: ExecutionPolicy = .automatic,
+            into outputBuffer: MTLBuffer
+        ) throws -> Int {
+            try writeXOF(
+                buffer: buffer,
+                range: 0..<length,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                policy: policy,
+                into: outputBuffer
+            )
+        }
+
+        /// Writes BLAKE3 XOF output for a resident Metal buffer range through this context.
+        @discardableResult
+        public func writeXOF(
+            buffer: MTLBuffer,
+            range: Range<Int>,
+            outputByteCount: Int,
+            seek: UInt64 = 0,
+            policy: ExecutionPolicy = .automatic,
+            into outputBuffer: MTLBuffer
+        ) throws -> Int {
+            try writeXOF(
+                buffer: buffer,
+                range: range,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                policy: policy,
+                into: outputBuffer,
+                mode: .unkeyed
+            )
+        }
+
         func hash(
             buffer: MTLBuffer,
             range: Range<Int>,
@@ -1203,6 +1378,37 @@ public enum BLAKE3Metal {
                 pipelines: pipelines,
                 commandQueue: commandQueue,
                 workspace: self
+            )
+        }
+
+        @discardableResult
+        func writeXOF(
+            buffer: MTLBuffer,
+            range: Range<Int>,
+            outputByteCount: Int,
+            seek: UInt64,
+            policy: ExecutionPolicy,
+            into outputBuffer: MTLBuffer,
+            mode: HashMode
+        ) throws -> Int {
+            guard buffer.device.registryID == device.registryID else {
+                throw BLAKE3Error.metalCommandFailed("Buffer belongs to a different Metal device.")
+            }
+            guard outputBuffer.device.registryID == device.registryID else {
+                throw BLAKE3Error.metalCommandFailed("Output buffer belongs to a different Metal device.")
+            }
+            return try BLAKE3Metal.writeXOF(
+                buffer: buffer,
+                range: range,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                policy: policy,
+                mode: mode,
+                minimumGPUByteCount: minimumGPUByteCount,
+                pipelines: pipelines,
+                commandQueue: commandQueue,
+                workspace: self,
+                outputBuffer: outputBuffer
             )
         }
 
@@ -1420,6 +1626,53 @@ public enum BLAKE3Metal {
             }
         }
 
+        /// Writes keyed BLAKE3 XOF output for a resident Metal buffer through this context.
+        @discardableResult
+        public func writeKeyedXOF(
+            key: some ContiguousBytes,
+            buffer: MTLBuffer,
+            length: Int,
+            outputByteCount: Int,
+            seek: UInt64 = 0,
+            policy: ExecutionPolicy = .automatic,
+            into outputBuffer: MTLBuffer
+        ) throws -> Int {
+            try writeKeyedXOF(
+                key: key,
+                buffer: buffer,
+                range: 0..<length,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                policy: policy,
+                into: outputBuffer
+            )
+        }
+
+        /// Writes keyed BLAKE3 XOF output for a resident Metal buffer range through this context.
+        @discardableResult
+        public func writeKeyedXOF(
+            key: some ContiguousBytes,
+            buffer: MTLBuffer,
+            range: Range<Int>,
+            outputByteCount: Int,
+            seek: UInt64 = 0,
+            policy: ExecutionPolicy = .automatic,
+            into outputBuffer: MTLBuffer
+        ) throws -> Int {
+            try key.withUnsafeBytes { keyBytes in
+                let mode = try BLAKE3Metal.keyedHashMode(keyBytes)
+                return try writeXOF(
+                    buffer: buffer,
+                    range: range,
+                    outputByteCount: outputByteCount,
+                    seek: seek,
+                    policy: policy,
+                    into: outputBuffer,
+                    mode: mode
+                )
+            }
+        }
+
         /// Derives BLAKE3 key material through this context.
         public func deriveKey(
             context: String,
@@ -1499,6 +1752,51 @@ public enum BLAKE3Metal {
                 outputByteCount: outputByteCount,
                 seek: seek,
                 policy: policy,
+                mode: mode
+            )
+        }
+
+        /// Writes derived BLAKE3 key material for a resident Metal buffer through this context.
+        @discardableResult
+        public func writeDerivedKey(
+            context: String,
+            buffer: MTLBuffer,
+            length: Int,
+            outputByteCount: Int = BLAKE3.digestByteCount,
+            seek: UInt64 = 0,
+            policy: ExecutionPolicy = .automatic,
+            into outputBuffer: MTLBuffer
+        ) throws -> Int {
+            try writeDerivedKey(
+                context: context,
+                buffer: buffer,
+                range: 0..<length,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                policy: policy,
+                into: outputBuffer
+            )
+        }
+
+        /// Writes derived BLAKE3 key material for a resident Metal buffer range through this context.
+        @discardableResult
+        public func writeDerivedKey(
+            context: String,
+            buffer: MTLBuffer,
+            range: Range<Int>,
+            outputByteCount: Int = BLAKE3.digestByteCount,
+            seek: UInt64 = 0,
+            policy: ExecutionPolicy = .automatic,
+            into outputBuffer: MTLBuffer
+        ) throws -> Int {
+            let mode = BLAKE3Metal.deriveKeyMaterialMode(context: context)
+            return try writeXOF(
+                buffer: buffer,
+                range: range,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                policy: policy,
+                into: outputBuffer,
                 mode: mode
             )
         }
@@ -2842,6 +3140,58 @@ public enum BLAKE3Metal {
         commandQueue: MTLCommandQueue,
         workspace: Context
     ) throws -> [UInt8] {
+        try validateOutputByteCount(outputByteCount)
+        guard outputByteCount > 0 else {
+            return []
+        }
+
+        var output = [UInt8](repeating: 0, count: outputByteCount)
+        try output.withUnsafeMutableBytes { rawOutput in
+            guard let baseAddress = rawOutput.baseAddress,
+                  let outputBuffer = buffer.device.makeBuffer(
+                    bytesNoCopy: baseAddress,
+                    length: outputByteCount,
+                    options: .storageModeShared,
+                    deallocator: nil
+                  )
+            else {
+                throw BLAKE3Error.metalCommandFailed("Unable to wrap BLAKE3 XOF output in a Metal buffer.")
+            }
+
+            try writeXOF(
+                buffer: buffer,
+                range: range,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                policy: policy,
+                mode: mode,
+                minimumGPUByteCount: minimumGPUByteCount,
+                pipelines: pipelines,
+                commandQueue: commandQueue,
+                workspace: workspace,
+                outputBuffer: outputBuffer
+            )
+        }
+        return output
+    }
+
+    @discardableResult
+    private static func writeXOF(
+        buffer: MTLBuffer,
+        range: Range<Int>,
+        outputByteCount: Int,
+        seek: UInt64,
+        policy: ExecutionPolicy,
+        mode: HashMode,
+        minimumGPUByteCount: Int,
+        pipelines: BLAKE3MetalPipelines,
+        commandQueue: MTLCommandQueue,
+        workspace: Context,
+        outputBuffer: MTLBuffer
+    ) throws -> Int {
+        guard buffer.device.registryID == outputBuffer.device.registryID else {
+            throw BLAKE3Error.metalCommandFailed("Output buffer belongs to a different Metal device.")
+        }
         guard range.lowerBound >= 0,
               range.upperBound <= buffer.length,
               range.lowerBound <= range.upperBound
@@ -2849,8 +3199,13 @@ public enum BLAKE3Metal {
             throw BLAKE3Error.invalidBufferRange
         }
         try validateOutputByteCount(outputByteCount)
+        guard outputBuffer.length >= outputByteCount else {
+            throw BLAKE3Error.metalCommandFailed(
+                "BLAKE3 XOF output buffer must hold \(outputByteCount) bytes."
+            )
+        }
         guard outputByteCount > 0 else {
-            return []
+            return 0
         }
         let outputByteCount64 = UInt64(outputByteCount)
         guard UInt64.max - seek >= outputByteCount64 else {
@@ -2859,21 +3214,24 @@ public enum BLAKE3Metal {
 
         switch policy {
         case .cpu:
-            return try xofOnCPU(
+            return try writeXOFOnCPU(
                 buffer: buffer,
                 range: range,
                 mode: mode,
                 outputByteCount: outputByteCount,
-                seek: seek
+                seek: seek,
+                outputBuffer: outputBuffer
             )
         case .automatic:
-            guard range.count >= minimumGPUByteCount || buffer.storageMode == .private else {
-                return try xofOnCPU(
+            let canUseCPUFallback = buffer.storageMode != .private && outputBuffer.storageMode != .private
+            guard range.count >= minimumGPUByteCount || buffer.storageMode == .private || !canUseCPUFallback else {
+                return try writeXOFOnCPU(
                     buffer: buffer,
                     range: range,
                     mode: mode,
                     outputByteCount: outputByteCount,
-                    seek: seek
+                    seek: seek,
+                    outputBuffer: outputBuffer
                 )
             }
         case .gpu:
@@ -2881,55 +3239,41 @@ public enum BLAKE3Metal {
         }
 
         guard range.count > BLAKE3.chunkByteCount else {
-            return try xofOnCPU(
+            return try writeXOFOnCPU(
                 buffer: buffer,
                 range: range,
                 mode: mode,
                 outputByteCount: outputByteCount,
-                seek: seek
+                seek: seek,
+                outputBuffer: outputBuffer
             )
         }
 
         let chunkCount = (range.count + BLAKE3.chunkByteCount - 1) / BLAKE3.chunkByteCount
-        var output = [UInt8](repeating: 0, count: outputByteCount)
+        try workspace.withWorkspace(chunkCount: chunkCount) { cvBuffer, scratchBuffer, _, parameterBuffer in
+            let commandBuffer = try makeXOFCommandBuffer(
+                buffer: buffer,
+                range: range,
+                chunkCount: chunkCount,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                pipelines: pipelines,
+                commandQueue: commandQueue,
+                retainsReferences: false,
+                mode: mode,
+                cvBuffer: cvBuffer,
+                scratchBuffer: scratchBuffer,
+                outputBuffer: outputBuffer,
+                parameterBuffer: parameterBuffer
+            )
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
 
-        return try workspace.withWorkspace(chunkCount: chunkCount) { cvBuffer, scratchBuffer, _, parameterBuffer in
-            try output.withUnsafeMutableBytes { rawOutput in
-                guard let baseAddress = rawOutput.baseAddress,
-                      let outputBuffer = buffer.device.makeBuffer(
-                        bytesNoCopy: baseAddress,
-                        length: outputByteCount,
-                        options: .storageModeShared,
-                        deallocator: nil
-                      )
-                else {
-                    throw BLAKE3Error.metalCommandFailed("Unable to wrap BLAKE3 XOF output in a Metal buffer.")
-                }
-
-                let commandBuffer = try makeXOFCommandBuffer(
-                    buffer: buffer,
-                    range: range,
-                    chunkCount: chunkCount,
-                    outputByteCount: outputByteCount,
-                    seek: seek,
-                    pipelines: pipelines,
-                    commandQueue: commandQueue,
-                    retainsReferences: false,
-                    mode: mode,
-                    cvBuffer: cvBuffer,
-                    scratchBuffer: scratchBuffer,
-                    outputBuffer: outputBuffer,
-                    parameterBuffer: parameterBuffer
-                )
-                commandBuffer.commit()
-                commandBuffer.waitUntilCompleted()
-
-                if let error = commandBuffer.error {
-                    throw BLAKE3Error.metalCommandFailed(error.localizedDescription)
-                }
+            if let error = commandBuffer.error {
+                throw BLAKE3Error.metalCommandFailed(error.localizedDescription)
             }
-            return output
         }
+        return outputByteCount
     }
 
     private static func hashOneChunkBatch(
@@ -4009,6 +4353,36 @@ public enum BLAKE3Metal {
             outputByteCount: outputByteCount,
             seek: seek
         )
+    }
+
+    @discardableResult
+    private static func writeXOFOnCPU(
+        buffer: MTLBuffer,
+        range: Range<Int>,
+        mode: HashMode,
+        outputByteCount: Int,
+        seek: UInt64,
+        outputBuffer: MTLBuffer
+    ) throws -> Int {
+        guard outputBuffer.storageMode != .private else {
+            throw BLAKE3Error.metalCommandFailed("CPU fallback requires a CPU-visible Metal output buffer.")
+        }
+        let output = try xofOnCPU(
+            buffer: buffer,
+            range: range,
+            mode: mode,
+            outputByteCount: outputByteCount,
+            seek: seek
+        )
+        output.withUnsafeBytes { rawOutput in
+            if let baseAddress = rawOutput.baseAddress {
+                outputBuffer.contents().copyMemory(from: baseAddress, byteCount: rawOutput.count)
+            }
+        }
+        if outputBuffer.storageMode == .managed {
+            outputBuffer.didModifyRange(0..<outputByteCount)
+        }
+        return outputByteCount
     }
 
     private static func hashOnCPU(input: UnsafeRawBufferPointer, mode: HashMode) -> BLAKE3.Digest {

@@ -256,6 +256,26 @@ For synchronous Swift-owned input on Apple Silicon unified memory, use the no-co
 let digest = try context.hash(input: input, policy: .gpu)
 ```
 
+For XOF output that another GPU pass will consume, write directly into a caller-owned output buffer:
+
+```swift
+let xofOutputBuffer = device.makeBuffer(
+    length: 4096,
+    options: .storageModePrivate
+)!
+
+try context.writeXOF(
+    buffer: buffer,
+    length: input.count,
+    outputByteCount: 4096,
+    policy: .gpu,
+    into: xofOutputBuffer
+)
+```
+
+The same pattern is available for keyed XOF and derive-key material with `writeKeyedXOF` and
+`writeDerivedKey`.
+
 For many independent small objects already packed into one resident buffer, use the one-chunk batch path. Each range must be at most `BLAKE3.chunkByteCount` bytes and produces one digest:
 
 ```swift
@@ -371,6 +391,8 @@ swift run -c release blake3-bench \
   --file-modes none \
   --cryptokit-modes none
 ```
+
+Resident Metal XOF rows also include `resident-write-gpu` variants for caller-owned output buffers.
 
 Measure independent one-chunk batch hashing:
 
