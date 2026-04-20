@@ -78,7 +78,7 @@ private enum FileTimingMode: String {
         case .metalTiledMemoryMapped:
             return "timed file open/stat, mmap, no-copy Metal buffer wrapper, tiled GPU chunk-CV dispatches, CPU CV-stack merge, digest read, munmap, close; benchmark file creation excluded"
         case .metalStagedRead:
-            return "timed file open/stat, bounded read directly into shared Metal staging buffers, async tiled GPU chunk-CV dispatches, CPU CV-stack merge, digest read, close; benchmark file creation excluded"
+            return "timed file open/stat, bounded reads directly into shared Metal staging buffers, tiled GPU chunk-CV dispatches, CPU CV-stack merge, digest read, close; benchmark file creation excluded"
         #endif
         }
     }
@@ -113,6 +113,19 @@ private enum OperationTimingMode: String {
             return "timed BLAKE3 keyed XOF output over existing Swift bytes, with output length controlled by --xof-output-bytes"
         case .deriveKey:
             return "timed BLAKE3 derive-key material hashing over existing Swift bytes, with output length controlled by --xof-output-bytes"
+        }
+    }
+
+    var fileDescription: String {
+        switch self {
+        case .keyed:
+            return "timed BLAKE3 keyed digest over each requested file strategy"
+        case .xof:
+            return "timed BLAKE3 XOF output over each requested file strategy, with output length controlled by --xof-output-bytes"
+        case .keyedXOF:
+            return "timed BLAKE3 keyed XOF output over each requested file strategy, with output length controlled by --xof-output-bytes"
+        case .deriveKey:
+            return "timed BLAKE3 derive-key material hashing over each requested file strategy, with output length controlled by --xof-output-bytes"
         }
     }
 }
@@ -329,6 +342,35 @@ private func operationTimingModes() -> [OperationTimingMode] {
     }
 
     return modes
+}
+
+private func fileOperationTimingModes() -> [OperationTimingMode] {
+    guard let rawValue = argumentValue(named: "--file-operation-modes") else {
+        return []
+    }
+
+    let tokens = rawValue
+        .split(separator: ",")
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+
+    if tokens.contains("none") || tokens.contains("off") || tokens.contains("disabled") {
+        return []
+    }
+
+    return tokens.compactMap { token -> OperationTimingMode? in
+        switch token {
+        case "keyed", "keyed-hash", "keyed-digest":
+            return .keyed
+        case "xof", "extendable", "extendable-output":
+            return .xof
+        case "keyed-xof", "xof-keyed", "keyed-extendable", "keyed-extendable-output":
+            return .keyedXOF
+        case "derive-key", "derive", "kdf", "key-derivation", "derived-key":
+            return .deriveKey
+        default:
+            return nil
+        }
+    }
 }
 
 private func xofOutputByteCount() -> Int {
@@ -663,6 +705,58 @@ private func keyedXOFMetalWrappedGPUForBenchmark(
         input: input,
         outputByteCount: outputByteCount,
         policy: .gpu
+    )
+    return BLAKE3.hashCPU(output)
+}
+
+@inline(never)
+private func xofFileForBenchmark(
+    path: String,
+    strategy: BLAKE3File.Strategy,
+    outputByteCount: Int
+) throws -> BLAKE3.Digest {
+    let output = try BLAKE3File.hash(
+        path: path,
+        strategy: strategy,
+        outputByteCount: outputByteCount
+    )
+    return BLAKE3.hashCPU(output)
+}
+
+@inline(never)
+private func keyedHashFileForBenchmark(
+    path: String,
+    strategy: BLAKE3File.Strategy
+) throws -> BLAKE3.Digest {
+    try BLAKE3File.keyedHash(key: benchmarkKey, path: path, strategy: strategy)
+}
+
+@inline(never)
+private func keyedXOFFileForBenchmark(
+    path: String,
+    strategy: BLAKE3File.Strategy,
+    outputByteCount: Int
+) throws -> BLAKE3.Digest {
+    let output = try BLAKE3File.keyedHash(
+        key: benchmarkKey,
+        path: path,
+        strategy: strategy,
+        outputByteCount: outputByteCount
+    )
+    return BLAKE3.hashCPU(output)
+}
+
+@inline(never)
+private func deriveKeyFileForBenchmark(
+    path: String,
+    strategy: BLAKE3File.Strategy,
+    outputByteCount: Int
+) throws -> BLAKE3.Digest {
+    let output = try BLAKE3File.deriveKey(
+        context: benchmarkDeriveKeyContext,
+        path: path,
+        strategy: strategy,
+        outputByteCount: outputByteCount
     )
     return BLAKE3.hashCPU(output)
 }
@@ -2172,6 +2266,7 @@ private let requestedIterationsOverride = iterationsOverride()
 private let requestedJSONOutputPath = jsonOutputPath()
 private let requestedFileTimingModes = fileTimingModes()
 private let requestedOperationTimingModes = operationTimingModes()
+private let requestedFileOperationTimingModes = fileOperationTimingModes()
 private let requestedXOFOutputByteCount = xofOutputByteCount()
 #if canImport(CryptoKit)
 private let requestedCryptoKitTimingModes = cryptoKitTimingModes()
@@ -2273,6 +2368,13 @@ if !requestedFileTimingModes.isEmpty {
         print("file-\(mode.rawValue) includes: \(mode.description)")
     }
 }
+if !requestedFileOperationTimingModes.isEmpty {
+    print("fileOperationModes=\(requestedFileOperationTimingModes.map(\.rawValue).joined(separator: ","))")
+    print("fileOperationXOFOutputByteCount=\(requestedXOFOutputByteCount)")
+    for mode in requestedFileOperationTimingModes {
+        print("file-operation-\(mode.rawValue) includes: \(mode.fileDescription)")
+    }
+}
 if let cpuWorkers = cpuWorkerCount() {
     print("cpuWorkers=\(cpuWorkers)")
 }
@@ -2346,28 +2448,33 @@ for size in requestedSizes {
 
     var operationResults = [BenchmarkResult]()
     let expectedKeyedDigest: BLAKE3.Digest? = if requestedOperationTimingModes.contains(.keyed)
-        || requestedOperationTimingModes.contains(.keyedXOF) {
+        || requestedOperationTimingModes.contains(.keyedXOF)
+        || requestedFileOperationTimingModes.contains(.keyed)
+        || requestedFileOperationTimingModes.contains(.keyedXOF) {
         input.withUnsafeBytes { rawInput in
             keyedHashCPUForBenchmark(rawInput)
         }
     } else {
         nil
     }
-    let expectedXOFDigest: BLAKE3.Digest? = if requestedOperationTimingModes.contains(.xof) {
+    let expectedXOFDigest: BLAKE3.Digest? = if requestedOperationTimingModes.contains(.xof)
+        || requestedFileOperationTimingModes.contains(.xof) {
         input.withUnsafeBytes { rawInput in
             xofCPUForBenchmark(rawInput, outputByteCount: requestedXOFOutputByteCount)
         }
     } else {
         nil
     }
-    let expectedKeyedXOFDigest: BLAKE3.Digest? = if requestedOperationTimingModes.contains(.keyedXOF) {
+    let expectedKeyedXOFDigest: BLAKE3.Digest? = if requestedOperationTimingModes.contains(.keyedXOF)
+        || requestedFileOperationTimingModes.contains(.keyedXOF) {
         input.withUnsafeBytes { rawInput in
             keyedXOFCPUForBenchmark(rawInput, outputByteCount: requestedXOFOutputByteCount)
         }
     } else {
         nil
     }
-    let expectedDeriveKeyDigest: BLAKE3.Digest? = if requestedOperationTimingModes.contains(.deriveKey) {
+    let expectedDeriveKeyDigest: BLAKE3.Digest? = if requestedOperationTimingModes.contains(.deriveKey)
+        || requestedFileOperationTimingModes.contains(.deriveKey) {
         input.withUnsafeBytes { rawInput in
             deriveKeyCPUForBenchmark(rawInput, outputByteCount: requestedXOFOutputByteCount)
         }
@@ -2442,7 +2549,86 @@ for size in requestedSizes {
 
         let path = fileURL.path
         do {
+            func appendFileOperationRows(
+                backend: String,
+                modePrefix: String,
+                strategy: BLAKE3File.Strategy
+            ) throws {
+                guard !requestedFileOperationTimingModes.isEmpty else {
+                    return
+                }
+                if let expectedKeyedDigest, requestedFileOperationTimingModes.contains(.keyed) {
+                    fileResults.append(
+                        try runFileBenchmark(
+                            backend: backend,
+                            mode: "\(modePrefix)-keyed",
+                            path: path,
+                            byteCount: size,
+                            iterations: iterations,
+                            expectedDigest: expectedKeyedDigest
+                        ) { path in
+                            try keyedHashFileForBenchmark(path: path, strategy: strategy)
+                        }
+                    )
+                }
+                if let expectedXOFDigest, requestedFileOperationTimingModes.contains(.xof) {
+                    fileResults.append(
+                        try runFileBenchmark(
+                            backend: backend,
+                            mode: "\(modePrefix)-xof-\(requestedXOFOutputByteCount)",
+                            path: path,
+                            byteCount: size,
+                            iterations: iterations,
+                            expectedDigest: expectedXOFDigest
+                        ) { path in
+                            try xofFileForBenchmark(
+                                path: path,
+                                strategy: strategy,
+                                outputByteCount: requestedXOFOutputByteCount
+                            )
+                        }
+                    )
+                }
+                if let expectedKeyedXOFDigest, requestedFileOperationTimingModes.contains(.keyedXOF) {
+                    fileResults.append(
+                        try runFileBenchmark(
+                            backend: backend,
+                            mode: "\(modePrefix)-keyed-xof-\(requestedXOFOutputByteCount)",
+                            path: path,
+                            byteCount: size,
+                            iterations: iterations,
+                            expectedDigest: expectedKeyedXOFDigest
+                        ) { path in
+                            try keyedXOFFileForBenchmark(
+                                path: path,
+                                strategy: strategy,
+                                outputByteCount: requestedXOFOutputByteCount
+                            )
+                        }
+                    )
+                }
+                if let expectedDeriveKeyDigest, requestedFileOperationTimingModes.contains(.deriveKey) {
+                    fileResults.append(
+                        try runFileBenchmark(
+                            backend: backend,
+                            mode: "\(modePrefix)-derive-key-\(requestedXOFOutputByteCount)",
+                            path: path,
+                            byteCount: size,
+                            iterations: iterations,
+                            expectedDigest: expectedDeriveKeyDigest
+                        ) { path in
+                            try deriveKeyFileForBenchmark(
+                                path: path,
+                                strategy: strategy,
+                                outputByteCount: requestedXOFOutputByteCount
+                            )
+                        }
+                    )
+                }
+            }
+
             if requestedFileTimingModes.contains(.read) {
+                let strategy = BLAKE3File.Strategy.read()
                 fileResults.append(
                     try runFileBenchmark(
                         backend: "cpu-file",
@@ -2451,11 +2637,13 @@ for size in requestedSizes {
                         byteCount: size,
                         iterations: iterations
                     ) { path in
-                        try BLAKE3File.hash(path: path, strategy: .read())
+                        try BLAKE3File.hash(path: path, strategy: strategy)
                     }
                 )
+                try appendFileOperationRows(backend: "cpu-file", modePrefix: "read", strategy: strategy)
             }
             if requestedFileTimingModes.contains(.memoryMapped) {
+                let strategy = BLAKE3File.Strategy.memoryMapped
                 fileResults.append(
                     try runFileBenchmark(
                         backend: "cpu-file",
@@ -2464,28 +2652,34 @@ for size in requestedSizes {
                         byteCount: size,
                         iterations: iterations
                     ) { path in
-                        try BLAKE3File.hash(path: path, strategy: .memoryMapped)
+                        try BLAKE3File.hash(path: path, strategy: strategy)
                     }
                 )
+                try appendFileOperationRows(backend: "cpu-file", modePrefix: "mmap", strategy: strategy)
             }
             if requestedFileTimingModes.contains(.memoryMappedParallel) {
+                let strategy = BLAKE3File.Strategy.memoryMappedParallel(maxThreads: cpuWorkers)
+                let modePrefix = cpuWorkers.map { "mmap-parallel-\($0)" } ?? "mmap-parallel"
                 fileResults.append(
                     try runFileBenchmark(
                         backend: "cpu-file",
-                        mode: cpuWorkers.map { "mmap-parallel-\($0)" } ?? "mmap-parallel",
+                        mode: modePrefix,
                         path: path,
                         byteCount: size,
                         iterations: iterations
                     ) { path in
-                        try BLAKE3File.hash(
-                            path: path,
-                            strategy: .memoryMappedParallel(maxThreads: cpuWorkers)
-                        )
+                        try BLAKE3File.hash(path: path, strategy: strategy)
                     }
                 )
+                try appendFileOperationRows(backend: "cpu-file", modePrefix: modePrefix, strategy: strategy)
             }
             #if canImport(Metal)
             if requestedFileTimingModes.contains(.metalMemoryMapped), metalDevice != nil {
+                let strategy = BLAKE3File.Strategy.metalMemoryMapped(
+                    policy: .gpu,
+                    fallbackToCPU: false,
+                    librarySource: requestedMetalLibrarySource
+                )
                 fileResults.append(
                     try runFileBenchmark(
                         backend: "metal-file",
@@ -2494,18 +2688,17 @@ for size in requestedSizes {
                         byteCount: size,
                         iterations: iterations
                     ) { path in
-                        try BLAKE3File.hash(
-                            path: path,
-                            strategy: .metalMemoryMapped(
-                                policy: .gpu,
-                                fallbackToCPU: false,
-                                librarySource: requestedMetalLibrarySource
-                            )
-                        )
+                        try BLAKE3File.hash(path: path, strategy: strategy)
                     }
                 )
+                try appendFileOperationRows(backend: "metal-file", modePrefix: "metal-mmap-gpu", strategy: strategy)
             }
             if requestedFileTimingModes.contains(.metalTiledMemoryMapped), metalDevice != nil {
+                let strategy = BLAKE3File.Strategy.metalTiledMemoryMapped(
+                    tileByteCount: requestedMetalMappedTileByteCount,
+                    fallbackToCPU: false,
+                    librarySource: requestedMetalLibrarySource
+                )
                 fileResults.append(
                     try runFileBenchmark(
                         backend: "metal-file",
@@ -2514,18 +2707,17 @@ for size in requestedSizes {
                         byteCount: size,
                         iterations: iterations
                     ) { path in
-                        try BLAKE3File.hash(
-                            path: path,
-                            strategy: .metalTiledMemoryMapped(
-                                tileByteCount: requestedMetalMappedTileByteCount,
-                                fallbackToCPU: false,
-                                librarySource: requestedMetalLibrarySource
-                            )
-                        )
+                        try BLAKE3File.hash(path: path, strategy: strategy)
                     }
                 )
+                try appendFileOperationRows(backend: "metal-file", modePrefix: "metal-tiled-mmap-gpu", strategy: strategy)
             }
             if requestedFileTimingModes.contains(.metalStagedRead), metalDevice != nil {
+                let strategy = BLAKE3File.Strategy.metalStagedRead(
+                    tileByteCount: requestedMetalStagedReadTileByteCount,
+                    fallbackToCPU: false,
+                    librarySource: requestedMetalLibrarySource
+                )
                 fileResults.append(
                     try runFileBenchmark(
                         backend: "metal-file",
@@ -2534,16 +2726,10 @@ for size in requestedSizes {
                         byteCount: size,
                         iterations: iterations
                     ) { path in
-                        try BLAKE3File.hash(
-                            path: path,
-                            strategy: .metalStagedRead(
-                                tileByteCount: requestedMetalStagedReadTileByteCount,
-                                fallbackToCPU: false,
-                                librarySource: requestedMetalLibrarySource
-                            )
-                        )
+                        try BLAKE3File.hash(path: path, strategy: strategy)
                     }
                 )
+                try appendFileOperationRows(backend: "metal-file", modePrefix: "metal-staged-read-gpu", strategy: strategy)
             }
             #endif
         } catch {

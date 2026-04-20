@@ -43,7 +43,19 @@ public enum BLAKE3Metal {
     private static let defaultDevice = BLAKE3MetalDeviceReference(MTLCreateSystemDefaultDevice())
     private static let contextCache = BLAKE3MetalContextCache()
 
-    fileprivate struct HashMode: Sendable {
+    fileprivate final class CrossThreadResourceLock: @unchecked Sendable {
+        private let semaphore = DispatchSemaphore(value: 1)
+
+        func lock() {
+            semaphore.wait()
+        }
+
+        func unlock() {
+            semaphore.signal()
+        }
+    }
+
+    struct HashMode: Sendable {
         let key: BLAKE3Core.ChainingValue
         let flags: UInt32
 
@@ -953,7 +965,7 @@ public enum BLAKE3Metal {
             try hash(buffer: buffer, range: range, policy: policy, mode: .unkeyed)
         }
 
-        fileprivate func hash(
+        func hash(
             buffer: MTLBuffer,
             range: Range<Int>,
             policy: ExecutionPolicy,
@@ -1009,7 +1021,7 @@ public enum BLAKE3Metal {
             )
         }
 
-        fileprivate func hash(
+        func hash(
             buffer: MTLBuffer,
             range: Range<Int>,
             outputByteCount: Int,
@@ -1342,6 +1354,23 @@ public enum BLAKE3Metal {
             baseChunkCounter: UInt64,
             into outputBuffer: ChunkChainingValueBuffer
         ) throws -> Int {
+            try writeChunkChainingValues(
+                buffer: buffer,
+                range: range,
+                baseChunkCounter: baseChunkCounter,
+                into: outputBuffer,
+                mode: .unkeyed
+            )
+        }
+
+        @discardableResult
+        func writeChunkChainingValues(
+            buffer: MTLBuffer,
+            range: Range<Int>,
+            baseChunkCounter: UInt64,
+            into outputBuffer: ChunkChainingValueBuffer,
+            mode: HashMode
+        ) throws -> Int {
             guard buffer.device.registryID == device.registryID else {
                 throw BLAKE3Error.metalCommandFailed("Buffer belongs to a different Metal device.")
             }
@@ -1381,6 +1410,7 @@ public enum BLAKE3Metal {
                     chunkCount: chunkCount,
                     baseChunkCounter: baseChunkCounter,
                     pipelines: pipelines,
+                    mode: mode,
                     commandQueue: commandQueue,
                     retainsReferences: false,
                     outputBuffer: outputBuffer.buffer,
@@ -1401,7 +1431,8 @@ public enum BLAKE3Metal {
         func chunkSubtreeChainingValue(
             buffer: MTLBuffer,
             range: Range<Int>,
-            baseChunkCounter: UInt64
+            baseChunkCounter: UInt64,
+            mode: HashMode = .unkeyed
         ) throws -> BLAKE3Core.ChainingValue {
             guard buffer.device.registryID == device.registryID else {
                 throw BLAKE3Error.metalCommandFailed("Buffer belongs to a different Metal device.")
@@ -1428,6 +1459,7 @@ public enum BLAKE3Metal {
                     chunkCount: chunkCount,
                     baseChunkCounter: baseChunkCounter,
                     pipelines: pipelines,
+                    mode: mode,
                     commandQueue: commandQueue,
                     retainsReferences: false,
                     cvBuffer: cvBuffer,
@@ -1451,16 +1483,21 @@ public enum BLAKE3Metal {
             }
         }
 
+        /// Async-compatible subtree-CV entry point.
+        ///
+        /// This currently uses the stable synchronous chunk-CV command path after checking cancellation.
         func chunkSubtreeChainingValueAsync(
             buffer: MTLBuffer,
             range: Range<Int>,
-            baseChunkCounter: UInt64
+            baseChunkCounter: UInt64,
+            mode: HashMode = .unkeyed
         ) async throws -> BLAKE3Core.ChainingValue {
-            try await chunkSubtreeChainingValueAsync(
+            try Task.checkCancellation()
+            return try chunkSubtreeChainingValue(
                 buffer: buffer,
                 range: range,
                 baseChunkCounter: baseChunkCounter,
-                workspace: defaultAsyncWorkspace
+                mode: mode
             )
         }
 
@@ -1468,85 +1505,22 @@ public enum BLAKE3Metal {
             buffer: MTLBuffer,
             range: Range<Int>,
             baseChunkCounter: UInt64,
+            mode: HashMode = .unkeyed,
             workspace asyncWorkspace: AsyncWorkspace
         ) async throws -> BLAKE3Core.ChainingValue {
+            _ = asyncWorkspace
             try Task.checkCancellation()
-            guard buffer.device.registryID == device.registryID else {
-                throw BLAKE3Error.metalCommandFailed("Buffer belongs to a different Metal device.")
-            }
-            guard asyncWorkspace.deviceRegistryID == device.registryID else {
-                throw BLAKE3Error.metalCommandFailed("Async workspace belongs to a different Metal device.")
-            }
-            guard range.lowerBound >= 0,
-                  range.upperBound <= buffer.length,
-                  range.lowerBound <= range.upperBound
-            else {
-                throw BLAKE3Error.invalidBufferRange
-            }
-            guard range.count.isMultiple(of: BLAKE3.chunkByteCount) else {
-                throw BLAKE3Error.metalCommandFailed("Subtree chaining value ranges must contain only complete BLAKE3 chunks.")
-            }
-
-            let chunkCount = range.count / BLAKE3.chunkByteCount
-            guard chunkCount > 0, chunkCount.nonzeroBitCount == 1 else {
-                throw BLAKE3Error.metalCommandFailed("Subtree chaining value ranges must contain a power-of-two chunk count.")
-            }
-
-            let lease = try asyncWorkspace.lease(chunkCount: chunkCount)
-            let buffers: AsyncHashBuffers
-            do {
-                buffers = try lease.resources.buffers()
-            } catch {
-                asyncWorkspace.release(lease)
-                throw error
-            }
-
-            let commandBuffer: MTLCommandBuffer
-            do {
-                commandBuffer = try BLAKE3Metal.makeSubtreeChainingValueCommandBuffer(
-                    buffer: buffer,
-                    range: range,
-                    chunkCount: chunkCount,
-                    baseChunkCounter: baseChunkCounter,
-                    pipelines: pipelines,
-                    commandQueue: commandQueue,
-                    retainsReferences: true,
-                    cvBuffer: buffers.chunkCVBuffer,
-                    scratchBuffer: buffers.parentCVBuffer,
-                    digestBuffer: buffers.digestBuffer,
-                    parameterBuffer: buffers.parameterBuffer
-                )
-            } catch {
-                asyncWorkspace.release(lease)
-                throw error
-            }
-
-            let cv = try await withCheckedThrowingContinuation {
-                (continuation: CheckedContinuation<BLAKE3Core.ChainingValue, Error>) in
-                commandBuffer.addCompletedHandler { completedBuffer in
-                    defer {
-                        asyncWorkspace.release(lease)
-                    }
-                    if let error = completedBuffer.error {
-                        continuation.resume(throwing: BLAKE3Error.metalCommandFailed(error.localizedDescription))
-                        return
-                    }
-                    continuation.resume(
-                        returning: BLAKE3Core.chainingValue(
-                            from: UnsafeRawBufferPointer(
-                                start: buffers.digestBuffer.contents(),
-                                count: BLAKE3.digestByteCount
-                            )
-                        )
-                    )
-                }
-                commandBuffer.commit()
-            }
-            try Task.checkCancellation()
-            return cv
+            return try chunkSubtreeChainingValue(
+                buffer: buffer,
+                range: range,
+                baseChunkCounter: baseChunkCounter,
+                mode: mode
+            )
         }
 
-        /// Asynchronously writes chaining values using the context's default async workspace.
+        /// Async-compatible chaining-value write using the context's default async workspace.
+        ///
+        /// This currently uses the stable synchronous chunk-CV command path after checking cancellation.
         @discardableResult
         public func writeChunkChainingValuesAsync(
             buffer: MTLBuffer,
@@ -1554,16 +1528,37 @@ public enum BLAKE3Metal {
             baseChunkCounter: UInt64,
             into outputBuffer: ChunkChainingValueBuffer
         ) async throws -> Int {
-            try await writeChunkChainingValuesAsync(
+            try Task.checkCancellation()
+            return try writeChunkChainingValues(
                 buffer: buffer,
                 range: range,
                 baseChunkCounter: baseChunkCounter,
                 into: outputBuffer,
-                workspace: defaultAsyncWorkspace
+                mode: .unkeyed
             )
         }
 
-        /// Asynchronously writes chaining values using a caller-provided async workspace.
+        @discardableResult
+        func writeChunkChainingValuesAsync(
+            buffer: MTLBuffer,
+            range: Range<Int>,
+            baseChunkCounter: UInt64,
+            into outputBuffer: ChunkChainingValueBuffer,
+            mode: HashMode
+        ) async throws -> Int {
+            try Task.checkCancellation()
+            return try writeChunkChainingValues(
+                buffer: buffer,
+                range: range,
+                baseChunkCounter: baseChunkCounter,
+                into: outputBuffer,
+                mode: mode
+            )
+        }
+
+        /// Async-compatible chaining-value write using a caller-provided async workspace.
+        ///
+        /// This currently uses the stable synchronous chunk-CV command path after checking cancellation.
         @discardableResult
         public func writeChunkChainingValuesAsync(
             buffer: MTLBuffer,
@@ -1572,85 +1567,35 @@ public enum BLAKE3Metal {
             into outputBuffer: ChunkChainingValueBuffer,
             workspace asyncWorkspace: AsyncWorkspace
         ) async throws -> Int {
+            _ = asyncWorkspace
             try Task.checkCancellation()
-            guard buffer.device.registryID == device.registryID else {
-                throw BLAKE3Error.metalCommandFailed("Buffer belongs to a different Metal device.")
-            }
-            guard outputBuffer.buffer.device.registryID == device.registryID else {
-                throw BLAKE3Error.metalCommandFailed("Chunk chaining value buffer belongs to a different Metal device.")
-            }
-            guard asyncWorkspace.deviceRegistryID == device.registryID else {
-                throw BLAKE3Error.metalCommandFailed("Async workspace belongs to a different Metal device.")
-            }
-            guard range.lowerBound >= 0,
-                  range.upperBound <= buffer.length,
-                  range.lowerBound <= range.upperBound
-            else {
-                throw BLAKE3Error.invalidBufferRange
-            }
-            guard range.count.isMultiple(of: BLAKE3.chunkByteCount) else {
-                throw BLAKE3Error.metalCommandFailed("Chunk chaining value ranges must contain only complete BLAKE3 chunks.")
-            }
+            return try writeChunkChainingValues(
+                buffer: buffer,
+                range: range,
+                baseChunkCounter: baseChunkCounter,
+                into: outputBuffer,
+                mode: .unkeyed
+            )
+        }
 
-            let chunkCount = range.count / BLAKE3.chunkByteCount
-            guard chunkCount <= outputBuffer.chunkCapacity else {
-                throw BLAKE3Error.metalCommandFailed(
-                    "Chunk chaining value output capacity \(outputBuffer.chunkCapacity) is smaller than required chunk count \(chunkCount)."
-                )
-            }
-            guard chunkCount > 0 else {
-                outputBuffer.setWrittenChunkCount(0)
-                return 0
-            }
-
-            let lease = try asyncWorkspace.lease(chunkCount: chunkCount)
-            let buffers: AsyncHashBuffers
-            do {
-                buffers = try lease.resources.buffers()
-            } catch {
-                asyncWorkspace.release(lease)
-                throw error
-            }
-
-            outputBuffer.lockForAsyncUse()
-            let commandBuffer: MTLCommandBuffer
-            do {
-                commandBuffer = try BLAKE3Metal.makeChunkChainingValuesCommandBuffer(
-                    buffer: buffer,
-                    range: range,
-                    chunkCount: chunkCount,
-                    baseChunkCounter: baseChunkCounter,
-                    pipelines: pipelines,
-                    commandQueue: commandQueue,
-                    retainsReferences: true,
-                    outputBuffer: outputBuffer.buffer,
-                    parameterBuffer: buffers.parameterBuffer
-                )
-            } catch {
-                outputBuffer.unlockForAsyncUse()
-                asyncWorkspace.release(lease)
-                throw error
-            }
-
-            let completedChunkCount = chunkCount
-            let writtenCount = try await withCheckedThrowingContinuation {
-                (continuation: CheckedContinuation<Int, Error>) in
-                commandBuffer.addCompletedHandler { completedBuffer in
-                    defer {
-                        outputBuffer.unlockForAsyncUse()
-                        asyncWorkspace.release(lease)
-                    }
-                    if let error = completedBuffer.error {
-                        continuation.resume(throwing: BLAKE3Error.metalCommandFailed(error.localizedDescription))
-                        return
-                    }
-                    outputBuffer.writtenChunkCount = completedChunkCount
-                    continuation.resume(returning: completedChunkCount)
-                }
-                commandBuffer.commit()
-            }
+        @discardableResult
+        func writeChunkChainingValuesAsync(
+            buffer: MTLBuffer,
+            range: Range<Int>,
+            baseChunkCounter: UInt64,
+            into outputBuffer: ChunkChainingValueBuffer,
+            workspace asyncWorkspace: AsyncWorkspace,
+            mode: HashMode
+        ) async throws -> Int {
+            _ = asyncWorkspace
             try Task.checkCancellation()
-            return writtenCount
+            return try writeChunkChainingValues(
+                buffer: buffer,
+                range: range,
+                baseChunkCounter: baseChunkCounter,
+                into: outputBuffer,
+                mode: mode
+            )
         }
 
         /// Asynchronously hashes a resident Metal buffer through this context.
@@ -2098,7 +2043,7 @@ public enum BLAKE3Metal {
         public let chunkCapacity: Int
 
         fileprivate let buffer: MTLBuffer
-        fileprivate let lock = NSLock()
+        fileprivate let lock = CrossThreadResourceLock()
         fileprivate var writtenChunkCount = 0
 
         /// Underlying shared Metal buffer.
@@ -2312,7 +2257,7 @@ public enum BLAKE3Metal {
         /// Maximum number of input bytes accepted by helpers using this buffer.
         public let capacity: Int
         fileprivate let buffer: MTLBuffer
-        fileprivate let lock = NSLock()
+        fileprivate let lock = CrossThreadResourceLock()
 
         /// Underlying shared Metal buffer.
         public var metalBuffer: MTLBuffer {
@@ -2341,7 +2286,7 @@ public enum BLAKE3Metal {
         /// Maximum number of bytes this private buffer can hold.
         public let capacity: Int
         fileprivate let buffer: MTLBuffer
-        fileprivate let lock = NSLock()
+        fileprivate let lock = CrossThreadResourceLock()
         fileprivate var length: Int
 
         /// Underlying private Metal buffer.
@@ -3204,6 +3149,7 @@ public enum BLAKE3Metal {
         chunkCount: Int,
         baseChunkCounter: UInt64,
         pipelines: BLAKE3MetalPipelines,
+        mode: HashMode,
         commandQueue: MTLCommandQueue,
         retainsReferences: Bool,
         outputBuffer: MTLBuffer,
@@ -3223,7 +3169,9 @@ public enum BLAKE3Metal {
             inputLength: UInt64(range.count),
             baseChunkCounter: baseChunkCounter,
             chunkCount: UInt32(chunkCount),
-            canLoadWords: canLoadWords(buffer: buffer, range: range) ? 1 : 0
+            canLoadWords: canLoadWords(buffer: buffer, range: range) ? 1 : 0,
+            key: mode.metalKey,
+            flags: mode.flags
         )
         copyParameter(params, into: parameterBuffer, slot: 0)
         let pipeline = canUseAlignedFullChunkKernel(buffer: buffer, range: range)
@@ -3250,6 +3198,7 @@ public enum BLAKE3Metal {
         chunkCount: Int,
         baseChunkCounter: UInt64,
         pipelines: BLAKE3MetalPipelines,
+        mode: HashMode,
         commandQueue: MTLCommandQueue,
         retainsReferences: Bool,
         cvBuffer: MTLBuffer,
@@ -3272,6 +3221,7 @@ public enum BLAKE3Metal {
             chunkCount: chunkCount,
             baseChunkCounter: baseChunkCounter,
             pipelines: pipelines,
+            mode: mode,
             cvBuffer: cvBuffer,
             scratchBuffer: scratchBuffer,
             parameterBuffer: parameterBuffer,
@@ -3299,6 +3249,7 @@ public enum BLAKE3Metal {
         chunkCount: Int,
         baseChunkCounter: UInt64,
         pipelines: BLAKE3MetalPipelines,
+        mode: HashMode,
         cvBuffer: MTLBuffer,
         scratchBuffer: MTLBuffer,
         parameterBuffer: MTLBuffer,
@@ -3310,7 +3261,9 @@ public enum BLAKE3Metal {
             inputLength: UInt64(range.count),
             baseChunkCounter: baseChunkCounter,
             chunkCount: UInt32(chunkCount),
-            canLoadWords: canLoadWords ? 1 : 0
+            canLoadWords: canLoadWords ? 1 : 0,
+            key: mode.metalKey,
+            flags: mode.flags
         )
         copyParameter(params, into: parameterBuffer, slot: 0)
 
@@ -3356,7 +3309,11 @@ public enum BLAKE3Metal {
         }
 
         while currentCount > 1 {
-            let parentParams = BLAKE3MetalParentParams(inputCount: UInt32(currentCount))
+            let parentParams = BLAKE3MetalParentParams(
+                inputCount: UInt32(currentCount),
+                key: mode.metalKey,
+                flags: mode.flags
+            )
             copyParameter(parentParams, into: parameterBuffer, slot: parameterSlot)
             let useWideReduction = currentCount >= wideParentReductionThreshold
             let useQuadReduction = !useWideReduction

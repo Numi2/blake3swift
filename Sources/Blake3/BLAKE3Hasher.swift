@@ -402,6 +402,10 @@ public extension BLAKE3 {
             )
         }
 
+        init(key: BLAKE3Core.ChainingValue, flags: UInt32) {
+            self.storage = BLAKE3HasherStorage(key: key, flags: flags)
+        }
+
         private mutating func ensureUniqueStorage() {
             if !isKnownUniquelyReferenced(&storage) {
                 storage = storage.copy()

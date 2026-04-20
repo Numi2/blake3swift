@@ -64,6 +64,7 @@ The current `flatkernels` branch includes the block-state streaming hasher, loca
 - Explicit `hashSerial`, `hashCPU`, and `hashParallel` APIs keep CPU-only benchmarking and backend selection reproducible.
 - Bounded-memory CV stack for streaming and multi-GB file hashing; the `flatkernels` streaming state keeps only the current undecided 64-byte block.
 - CPU file strategies for buffered reads and memory-mapped hashing.
+- File APIs cover unkeyed digest/XOF, keyed digest/XOF, and derive-key material output across CPU and Metal strategies.
 - Metal resident-buffer, no-copy Swift input, keyed hashing, derive-key material hashing, XOF, staged-buffer, tuned private-staged, async pipeline, tiled mmap file, and staged-read file hashing APIs.
 - Fused Metal tile reduction for aligned full-chunk shared-memory inputs.
 - Metal file hashing can use no-copy mmap pages or staged reads into bounded shared buffers; large complete prefixes reduce to GPU subtree chaining values before CPU stack merge.
@@ -167,6 +168,34 @@ let digest = try BLAKE3File.hash(
 print(digest)
 ```
 
+File XOF, keyed hashing, and derive-key material use the same strategy selection:
+
+```swift
+import Foundation
+import Blake3
+
+let key = Data(repeating: 7, count: BLAKE3.keyByteCount)
+
+let xof = try BLAKE3File.hash(
+    path: "/path/to/file",
+    strategy: .metalStagedRead(),
+    outputByteCount: 1024
+)
+
+let keyedDigest = try BLAKE3File.keyedHash(
+    key: key,
+    path: "/path/to/file",
+    strategy: .metalMemoryMapped()
+)
+
+let derived = try BLAKE3File.deriveKey(
+    context: "com.example.file-key.v1",
+    path: "/path/to/file",
+    strategy: .memoryMappedParallel(),
+    outputByteCount: 64
+)
+```
+
 Async file hashing supports cancellation through Swift tasks:
 
 ```swift
@@ -191,7 +220,7 @@ let digest = try await BLAKE3File.hashAsync(
 print(digest)
 ```
 
-The default tiled mmap Metal file tile is 64 MiB on this branch, while staged-read Metal now defaults to 32 MiB. `.metalTiledMemoryMapped()` remains available as the no-copy mmap path, but `.metalStagedRead()` is the preferred reality-check path when mmap page-in noise dominates. Staged-read Metal uses four bounded shared buffers and a matching async workspace by default so file reads can overlap multiple in-flight GPU reductions without sharing scratch or CV output buffers. CPU mapped parallel hashing uses the direct one-shot parallel tree for files up to 2 GiB, then falls back to the smaller 16 MiB subtree-tiled path to avoid unbounded CV workspace growth. CPU regular-file reads use bounded 64 MiB read tiles, two read buffers below 128 MiB, four read buffers at and above 128 MiB, and CPU subtree reductions overlapped with the next file read. Set `BLAKE3_SWIFT_READ_INFLIGHT` to `1`, `2`, `3`, or `4` to override that default for local sweeps.
+The default tiled mmap Metal file tile is 64 MiB on this branch, while staged-read Metal now defaults to 32 MiB. `.metalTiledMemoryMapped()` remains available as the no-copy mmap path, but `.metalStagedRead()` is the preferred reality-check path when mmap page-in noise dominates. Metal file strategies accelerate complete chunk/subtree chaining-value work on the GPU; the final canonical CV-stack merge and any final partial chunk remain on the CPU. Staged-read Metal uses four bounded shared buffers and separate per-slot CV buffers by default so file reads can overlap pending GPU tile work without sharing scratch or CV output buffers. CPU mapped parallel hashing uses the direct one-shot parallel tree for files up to 2 GiB, then falls back to the smaller 16 MiB subtree-tiled path to avoid unbounded CV workspace growth. CPU regular-file reads use bounded 64 MiB read tiles, two read buffers below 128 MiB, four read buffers at and above 128 MiB, and CPU subtree reductions overlapped with the next file read. Set `BLAKE3_SWIFT_READ_INFLIGHT` to `1`, `2`, `3`, or `4` to override that default for local sweeps.
 
 ## Metal Resident Hashing
 
@@ -332,6 +361,19 @@ swift run -c release blake3-bench \
   --iterations 3 \
   --metal-modes none \
   --file-modes mmap-parallel,metal-mmap,metal-tiled-mmap,metal-staged-read
+```
+
+Add file keyed, derive-key, and XOF rows to the file strategy table:
+
+```bash
+swift run -c release blake3-bench \
+  --sizes 64m,256m \
+  --iterations 3 \
+  --metal-modes none \
+  --cryptokit-modes none \
+  --file-modes read,mmap-parallel,metal-mmap,metal-tiled-mmap,metal-staged-read \
+  --file-operation-modes keyed,derive-key,xof,keyed-xof \
+  --xof-output-bytes 1024
 ```
 
 ### Timing Classes

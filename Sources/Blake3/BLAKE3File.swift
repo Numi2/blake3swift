@@ -24,6 +24,19 @@ public enum BLAKE3File {
     /// Default tile size used by staged Metal read paths.
     public static let metalStagedReadTileByteCount = 32 * 1024 * 1024
 
+    private struct HashMode: Sendable {
+        let key: BLAKE3Core.ChainingValue
+        let flags: UInt32
+
+        static let unkeyed = HashMode(key: BLAKE3Core.iv, flags: 0)
+
+        #if canImport(Metal)
+        var metalMode: BLAKE3Metal.HashMode {
+            BLAKE3Metal.HashMode(key: key, flags: flags)
+        }
+        #endif
+    }
+
     /// File hashing strategy.
     public enum Strategy: Equatable, Sendable {
         /// Chooses the bounded memory-mapped CPU path with read fallback.
@@ -68,7 +81,91 @@ public enum BLAKE3File {
         path: String,
         strategy: Strategy = .automatic
     ) throws -> BLAKE3.Digest {
-        try hash(path: path, strategy: strategy, cancellationCheck: nil)
+        try digest(
+            from: hashOutput(
+                path: path,
+                strategy: strategy,
+                mode: .unkeyed,
+                outputByteCount: BLAKE3.digestByteCount,
+                seek: 0,
+                cancellationCheck: nil
+            )
+        )
+    }
+
+    /// Hashes a regular file and returns `outputByteCount` BLAKE3 XOF output bytes.
+    public static func hash(
+        path: String,
+        strategy: Strategy = .automatic,
+        outputByteCount: Int,
+        seek: UInt64 = 0
+    ) throws -> [UInt8] {
+        try hashOutput(
+            path: path,
+            strategy: strategy,
+            mode: .unkeyed,
+            outputByteCount: outputByteCount,
+            seek: seek,
+            cancellationCheck: nil
+        )
+    }
+
+    /// Computes a keyed 32-byte BLAKE3 digest for a regular file.
+    public static func keyedHash(
+        key: some ContiguousBytes,
+        path: String,
+        strategy: Strategy = .automatic
+    ) throws -> BLAKE3.Digest {
+        try key.withUnsafeBytes { keyBytes in
+            try digest(
+                from: hashOutput(
+                    path: path,
+                    strategy: strategy,
+                    mode: keyedMode(keyBytes),
+                    outputByteCount: BLAKE3.digestByteCount,
+                    seek: 0,
+                    cancellationCheck: nil
+                )
+            )
+        }
+    }
+
+    /// Computes keyed BLAKE3 XOF output for a regular file.
+    public static func keyedHash(
+        key: some ContiguousBytes,
+        path: String,
+        strategy: Strategy = .automatic,
+        outputByteCount: Int,
+        seek: UInt64 = 0
+    ) throws -> [UInt8] {
+        try key.withUnsafeBytes { keyBytes in
+            try hashOutput(
+                path: path,
+                strategy: strategy,
+                mode: keyedMode(keyBytes),
+                outputByteCount: outputByteCount,
+                seek: seek,
+                cancellationCheck: nil
+            )
+        }
+    }
+
+    /// Derives key material from a regular file using BLAKE3 key derivation.
+    public static func deriveKey(
+        context: String,
+        path: String,
+        strategy: Strategy = .automatic,
+        outputByteCount: Int = BLAKE3.digestByteCount,
+        seek: UInt64 = 0
+    ) throws -> [UInt8] {
+        try hashOutput(
+            path: path,
+            strategy: strategy,
+            mode: deriveKeyMaterialMode(context: context),
+            outputByteCount: outputByteCount,
+            seek: seek,
+            cancellationCheck: nil
+        )
     }
 
     /// Hashes a regular file asynchronously.
@@ -86,7 +183,8 @@ public enum BLAKE3File {
                 path: path,
                 policy: policy,
                 fallbackToCPU: fallbackToCPU,
-                librarySource: librarySource
+                librarySource: librarySource,
+                mode: .unkeyed
             )
         }
         if case let .metalTiledMemoryMapped(tileByteCount, fallbackToCPU, librarySource) = strategy {
@@ -94,25 +192,33 @@ public enum BLAKE3File {
                 path: path,
                 tileByteCount: tileByteCount,
                 fallbackToCPU: fallbackToCPU,
-                librarySource: librarySource
+                librarySource: librarySource,
+                mode: .unkeyed
             )
         }
         if case let .metalStagedRead(tileByteCount, fallbackToCPU, librarySource) = strategy {
-            return try await Task.detached {
+            let output = try await Task.detached {
                 try hashMetalStagedRead(
                     path: path,
                     tileByteCount: tileByteCount,
                     fallbackToCPU: fallbackToCPU,
                     librarySource: librarySource,
+                    mode: .unkeyed,
+                    outputByteCount: BLAKE3.digestByteCount,
+                    seek: 0,
                     cancellationCheck: { try Task.checkCancellation() }
                 )
             }.value
+            return try digest(from: output)
         }
         #endif
         return try await Task.detached {
             try hash(
                 path: path,
                 strategy: strategy,
+                mode: .unkeyed,
+                outputByteCount: BLAKE3.digestByteCount,
+                seek: 0,
                 cancellationCheck: { try Task.checkCancellation() }
             )
         }.value
@@ -121,24 +227,64 @@ public enum BLAKE3File {
     private static func hash(
         path: String,
         strategy: Strategy,
+        mode: HashMode = .unkeyed,
+        outputByteCount: Int = BLAKE3.digestByteCount,
+        seek: UInt64 = 0,
         cancellationCheck: (() throws -> Void)?
     ) throws -> BLAKE3.Digest {
+        try digest(
+            from: hashOutput(
+                path: path,
+                strategy: strategy,
+                mode: mode,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                cancellationCheck: cancellationCheck
+            )
+        )
+    }
+
+    private static func hashOutput(
+        path: String,
+        strategy: Strategy,
+        mode: HashMode,
+        outputByteCount: Int,
+        seek: UInt64,
+        cancellationCheck: (() throws -> Void)?
+    ) throws -> [UInt8] {
         try cancellationCheck?()
+        try validateOutput(outputByteCount: outputByteCount, seek: seek)
+        guard outputByteCount > 0 else {
+            return []
+        }
         switch strategy {
         case .automatic:
             return try hashMapped(
                 path: path,
                 fallbackToRead: true,
                 parallel: true,
+                mode: mode,
+                outputByteCount: outputByteCount,
+                seek: seek,
                 cancellationCheck: cancellationCheck
             )
         case let .read(bufferSize):
-            return try hashRead(path: path, bufferSize: bufferSize, cancellationCheck: cancellationCheck)
+            return try hashRead(
+                path: path,
+                bufferSize: bufferSize,
+                mode: mode,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                cancellationCheck: cancellationCheck
+            )
         case .memoryMapped:
             return try hashMapped(
                 path: path,
                 fallbackToRead: false,
                 parallel: false,
+                mode: mode,
+                outputByteCount: outputByteCount,
+                seek: seek,
                 cancellationCheck: cancellationCheck
             )
         case let .memoryMappedParallel(maxThreads):
@@ -147,6 +293,9 @@ public enum BLAKE3File {
                 fallbackToRead: true,
                 parallel: true,
                 maxWorkers: maxThreads,
+                mode: mode,
+                outputByteCount: outputByteCount,
+                seek: seek,
                 cancellationCheck: cancellationCheck
             )
         #if canImport(Metal)
@@ -156,6 +305,9 @@ public enum BLAKE3File {
                 policy: policy,
                 fallbackToCPU: fallbackToCPU,
                 librarySource: librarySource,
+                mode: mode,
+                outputByteCount: outputByteCount,
+                seek: seek,
                 cancellationCheck: cancellationCheck
             )
         case let .metalTiledMemoryMapped(tileByteCount, fallbackToCPU, librarySource):
@@ -164,6 +316,9 @@ public enum BLAKE3File {
                 tileByteCount: tileByteCount,
                 fallbackToCPU: fallbackToCPU,
                 librarySource: librarySource,
+                mode: mode,
+                outputByteCount: outputByteCount,
+                seek: seek,
                 cancellationCheck: cancellationCheck
             )
         case let .metalStagedRead(tileByteCount, fallbackToCPU, librarySource):
@@ -172,6 +327,9 @@ public enum BLAKE3File {
                 tileByteCount: tileByteCount,
                 fallbackToCPU: fallbackToCPU,
                 librarySource: librarySource,
+                mode: mode,
+                outputByteCount: outputByteCount,
+                seek: seek,
                 cancellationCheck: cancellationCheck
             )
         #endif
@@ -181,8 +339,11 @@ public enum BLAKE3File {
     private static func hashRead(
         path: String,
         bufferSize: Int,
+        mode: HashMode,
+        outputByteCount: Int,
+        seek: UInt64,
         cancellationCheck: (() throws -> Void)? = nil
-    ) throws -> BLAKE3.Digest {
+    ) throws -> [UInt8] {
         try cancellationCheck?()
         let fd = open(path, O_RDONLY)
         guard fd >= 0 else {
@@ -200,6 +361,9 @@ public enum BLAKE3File {
                 path: path,
                 fileSize: Int(info.st_size),
                 bufferSize: bufferSize,
+                mode: mode,
+                outputByteCount: outputByteCount,
+                seek: seek,
                 cancellationCheck: cancellationCheck
             )
         }
@@ -211,7 +375,7 @@ public enum BLAKE3File {
         )
         defer { buffer.deallocate() }
 
-        var hasher = BLAKE3.Hasher()
+        var hasher = BLAKE3.Hasher(key: mode.key, flags: mode.flags)
         while true {
             try cancellationCheck?()
             let readCount = Darwin.read(fd, buffer, clampedBufferSize)
@@ -225,7 +389,7 @@ public enum BLAKE3File {
                 throw BLAKE3Error.fileReadFailed(path)
             }
         }
-        return hasher.finalize()
+        return readOutput(from: hasher, outputByteCount: outputByteCount, seek: seek)
     }
 
     private static func hashReadRegularFile(
@@ -233,8 +397,11 @@ public enum BLAKE3File {
         path: String,
         fileSize: Int,
         bufferSize: Int,
+        mode: HashMode,
+        outputByteCount: Int,
+        seek: UInt64,
         cancellationCheck: (() throws -> Void)? = nil
-    ) throws -> BLAKE3.Digest {
+    ) throws -> [UInt8] {
         enableReadAhead(fd: fd)
         let clampedBufferSize = max(1, min(bufferSize, fileSize))
         let readInflightCount = configuredReadInflightCount(fileSize: fileSize)
@@ -250,7 +417,7 @@ public enum BLAKE3File {
             }
         }
 
-        var hasher = BLAKE3.Hasher()
+        var hasher = BLAKE3.Hasher(key: mode.key, flags: mode.flags)
         var fileOffset = 0
         let alignedBufferSize = (clampedBufferSize / BLAKE3.chunkByteCount) * BLAKE3.chunkByteCount
         guard alignedBufferSize >= BLAKE3.chunkByteCount else {
@@ -262,12 +429,12 @@ public enum BLAKE3File {
                 hasher.update(UnsafeRawBufferPointer(start: buffer, count: requested))
                 fileOffset += requested
             }
-            return hasher.finalize()
+            return readOutput(from: hasher, outputByteCount: outputByteCount, seek: seek)
         }
 
         var stack = BLAKE3Core.CVStack()
         let scheduler = BLAKE3Core.defaultScheduler(forByteCount: fileSize, maxWorkers: nil)
-        let tileWorker = CPUFileTileWorker(scheduler: scheduler)
+        let tileWorker = CPUFileTileWorker(scheduler: scheduler, mode: mode)
         var pendingTileWork: CPUFileTileWork?
         defer {
             _ = try? pendingTileWork?.wait()
@@ -278,7 +445,7 @@ public enum BLAKE3File {
             try cancellationCheck?()
             if readInflightCount == 1, let tileWork = pendingTileWork {
                 pendingTileWork = nil
-                pushCPUFileStackEntries(try tileWork.wait(), into: &stack)
+                pushCPUFileStackEntries(try tileWork.wait(), into: &stack, mode: mode)
             }
             let buffer = buffers[bufferIndex]
             let requested = min(alignedBufferSize, fileSize - fileOffset)
@@ -292,7 +459,7 @@ public enum BLAKE3File {
 
             if readInflightCount > 1, let tileWork = pendingTileWork {
                 pendingTileWork = nil
-                pushCPUFileStackEntries(try tileWork.wait(), into: &stack)
+                pushCPUFileStackEntries(try tileWork.wait(), into: &stack, mode: mode)
             }
 
             if completeChunkByteCount > 0 {
@@ -305,7 +472,7 @@ public enum BLAKE3File {
             if isFinalTile {
                 if let tileWork = pendingTileWork {
                     pendingTileWork = nil
-                    pushCPUFileStackEntries(try tileWork.wait(), into: &stack)
+                    pushCPUFileStackEntries(try tileWork.wait(), into: &stack, mode: mode)
                 }
                 let currentChunkLength = requested - completeChunkByteCount
                 let currentChunk = UnsafeRawBufferPointer(
@@ -315,23 +482,21 @@ public enum BLAKE3File {
                 let output = BLAKE3Core.chunkOutput(
                     currentChunk,
                     chunkCounter: stack.finalizedChunkCount,
-                    key: BLAKE3Core.iv,
-                    flags: 0
+                    key: mode.key,
+                    flags: mode.flags
                 )
-                return BLAKE3.Digest(
-                    stack.rootOutput(
-                        currentChunkOutput: output,
-                        key: BLAKE3Core.iv,
-                        flags: 0
-                    )
-                    .rootBytes(byteCount: BLAKE3.digestByteCount)
+                return stack.rootOutput(
+                    currentChunkOutput: output,
+                    key: mode.key,
+                    flags: mode.flags
                 )
+                .rootBytes(byteCount: outputByteCount, seek: seek)
             }
             fileOffset += requested
             bufferIndex = (bufferIndex + 1) % readInflightCount
         }
 
-        return BLAKE3.hash(UnsafeRawBufferPointer(start: nil, count: 0))
+        return emptyOutput(mode: mode, outputByteCount: outputByteCount, seek: seek)
     }
 
     private static func hashMapped(
@@ -339,8 +504,11 @@ public enum BLAKE3File {
         fallbackToRead: Bool,
         parallel: Bool = false,
         maxWorkers: Int? = nil,
+        mode: HashMode,
+        outputByteCount: Int,
+        seek: UInt64,
         cancellationCheck: (() throws -> Void)? = nil
-    ) throws -> BLAKE3.Digest {
+    ) throws -> [UInt8] {
         do {
             return try withMappedRegion(path: path) { region in
                 try cancellationCheck?()
@@ -348,6 +516,9 @@ public enum BLAKE3File {
                     region,
                     parallel: parallel,
                     maxWorkers: maxWorkers,
+                    mode: mode,
+                    outputByteCount: outputByteCount,
+                    seek: seek,
                     cancellationCheck: cancellationCheck
                 )
             }
@@ -356,6 +527,9 @@ public enum BLAKE3File {
                 return try hashRead(
                     path: path,
                     bufferSize: 64 * 1024,
+                    mode: mode,
+                    outputByteCount: outputByteCount,
+                    seek: seek,
                     cancellationCheck: cancellationCheck
                 )
             }
@@ -369,8 +543,11 @@ public enum BLAKE3File {
         policy: BLAKE3Metal.ExecutionPolicy,
         fallbackToCPU: Bool,
         librarySource: BLAKE3Metal.LibrarySource,
+        mode: HashMode,
+        outputByteCount: Int,
+        seek: UInt64,
         cancellationCheck: (() throws -> Void)? = nil
-    ) throws -> BLAKE3.Digest {
+    ) throws -> [UInt8] {
         do {
             try cancellationCheck?()
             guard let device = MTLCreateSystemDefaultDevice() else {
@@ -382,7 +559,7 @@ public enum BLAKE3File {
                 guard region.size > 0,
                       let pointer = region.pointer
                 else {
-                    return BLAKE3.hash(UnsafeRawBufferPointer(start: nil, count: 0))
+                    return emptyOutput(mode: mode, outputByteCount: outputByteCount, seek: seek)
                 }
                 guard let buffer = device.makeBuffer(
                     bytesNoCopy: pointer,
@@ -392,7 +569,22 @@ public enum BLAKE3File {
                 ) else {
                     throw BLAKE3Error.metalCommandFailed("Unable to wrap mapped file pages in a Metal buffer.")
                 }
-                return try context.hash(buffer: buffer, length: region.size, policy: policy)
+                if outputByteCount == BLAKE3.digestByteCount, seek == 0 {
+                    return try context.hash(
+                        buffer: buffer,
+                        range: 0..<region.size,
+                        policy: policy,
+                        mode: mode.metalMode
+                    ).bytes
+                }
+                return try context.hash(
+                    buffer: buffer,
+                    range: 0..<region.size,
+                    outputByteCount: outputByteCount,
+                    seek: seek,
+                    policy: policy,
+                    mode: mode.metalMode
+                )
             }
         } catch let error as CancellationError {
             throw error
@@ -402,6 +594,9 @@ public enum BLAKE3File {
                     path: path,
                     fallbackToRead: true,
                     parallel: true,
+                    mode: mode,
+                    outputByteCount: outputByteCount,
+                    seek: seek,
                     cancellationCheck: cancellationCheck
                 )
             }
@@ -413,7 +608,8 @@ public enum BLAKE3File {
         path: String,
         policy: BLAKE3Metal.ExecutionPolicy,
         fallbackToCPU: Bool,
-        librarySource: BLAKE3Metal.LibrarySource
+        librarySource: BLAKE3Metal.LibrarySource,
+        mode: HashMode
     ) async throws -> BLAKE3.Digest {
         do {
             try Task.checkCancellation()
@@ -426,7 +622,7 @@ public enum BLAKE3File {
                 guard region.size > 0,
                       let pointer = region.pointer
                 else {
-                    return BLAKE3.hash(UnsafeRawBufferPointer(start: nil, count: 0))
+                    return try digest(from: emptyOutput(mode: mode, outputByteCount: BLAKE3.digestByteCount, seek: 0))
                 }
                 guard let buffer = device.makeBuffer(
                     bytesNoCopy: pointer,
@@ -436,19 +632,28 @@ public enum BLAKE3File {
                 ) else {
                     throw BLAKE3Error.metalCommandFailed("Unable to wrap mapped file pages in a Metal buffer.")
                 }
-                return try await context.hashAsync(buffer: buffer, length: region.size, policy: policy)
+                return try context.hash(
+                    buffer: buffer,
+                    range: 0..<region.size,
+                    policy: policy,
+                    mode: mode.metalMode
+                )
             }
         } catch let error as CancellationError {
             throw error
         } catch {
             if fallbackToCPU {
                 return try await Task.detached {
-                    try hashMapped(
+                    let output = try hashMapped(
                         path: path,
                         fallbackToRead: true,
                         parallel: true,
+                        mode: mode,
+                        outputByteCount: BLAKE3.digestByteCount,
+                        seek: 0,
                         cancellationCheck: { try Task.checkCancellation() }
                     )
+                    return try digest(from: output)
                 }.value
             }
             throw error
@@ -459,7 +664,8 @@ public enum BLAKE3File {
         path: String,
         tileByteCount: Int,
         fallbackToCPU: Bool,
-        librarySource: BLAKE3Metal.LibrarySource
+        librarySource: BLAKE3Metal.LibrarySource,
+        mode: HashMode
     ) async throws -> BLAKE3.Digest {
         do {
             try Task.checkCancellation()
@@ -476,8 +682,9 @@ public enum BLAKE3File {
                 guard region.size > 0,
                       let pointer = region.pointer
                 else {
-                    return BLAKE3.hash(UnsafeRawBufferPointer(start: nil, count: 0))
+                    return try digest(from: emptyOutput(mode: mode, outputByteCount: BLAKE3.digestByteCount, seek: 0))
                 }
+
                 guard let fileBuffer = device.makeBuffer(
                     bytesNoCopy: pointer,
                     length: region.size,
@@ -509,27 +716,30 @@ public enum BLAKE3File {
                             let cv = try await context.chunkSubtreeChainingValueAsync(
                                 buffer: fileBuffer,
                                 range: chunkRange,
-                                baseChunkCounter: stack.finalizedChunkCount
+                                baseChunkCounter: stack.finalizedChunkCount,
+                                mode: mode.metalMode
                             )
                             try Task.checkCancellation()
                             stack.pushSubtreeCV(
                                 cv,
                                 chunkCount: UInt64(completeChunkCount),
-                                key: BLAKE3Core.iv,
-                                flags: 0
+                                key: mode.key,
+                                flags: mode.flags
                             )
                         } else {
                             let chunkCount = try await context.writeChunkChainingValuesAsync(
                                 buffer: fileBuffer,
                                 range: chunkRange,
                                 baseChunkCounter: stack.finalizedChunkCount,
-                                into: chunkCVBuffer
+                                into: chunkCVBuffer,
+                                mode: mode.metalMode
                             )
                             try Task.checkCancellation()
                             try pushChunkChainingValues(
                                 chunkCVBuffer,
                                 chunkCount: chunkCount,
-                                into: &stack
+                                into: &stack,
+                                mode: mode
                             )
                         }
                         offset += completeChunkByteCount
@@ -544,33 +754,37 @@ public enum BLAKE3File {
                         let output = BLAKE3Core.chunkOutput(
                             currentChunk,
                             chunkCounter: stack.finalizedChunkCount,
-                            key: BLAKE3Core.iv,
-                            flags: 0
+                            key: mode.key,
+                            flags: mode.flags
                         )
-                        return BLAKE3.Digest(
-                            stack.rootOutput(
+                        return try digest(
+                            from: stack.rootOutput(
                                 currentChunkOutput: output,
-                                key: BLAKE3Core.iv,
-                                flags: 0
+                                key: mode.key,
+                                flags: mode.flags
                             )
                             .rootBytes(byteCount: BLAKE3.digestByteCount)
                         )
                     }
                 }
 
-                return BLAKE3.hash(UnsafeRawBufferPointer(start: nil, count: 0))
+                return try digest(from: emptyOutput(mode: mode, outputByteCount: BLAKE3.digestByteCount, seek: 0))
             }
         } catch let error as CancellationError {
             throw error
         } catch {
             if fallbackToCPU {
                 return try await Task.detached {
-                    try hashMapped(
+                    let output = try hashMapped(
                         path: path,
                         fallbackToRead: true,
                         parallel: true,
+                        mode: mode,
+                        outputByteCount: BLAKE3.digestByteCount,
+                        seek: 0,
                         cancellationCheck: { try Task.checkCancellation() }
                     )
+                    return try digest(from: output)
                 }.value
             }
             throw error
@@ -582,8 +796,11 @@ public enum BLAKE3File {
         tileByteCount: Int,
         fallbackToCPU: Bool,
         librarySource: BLAKE3Metal.LibrarySource,
+        mode: HashMode,
+        outputByteCount: Int,
+        seek: UInt64,
         cancellationCheck: (() throws -> Void)? = nil
-    ) throws -> BLAKE3.Digest {
+    ) throws -> [UInt8] {
         do {
             try cancellationCheck?()
             guard let device = MTLCreateSystemDefaultDevice() else {
@@ -599,8 +816,9 @@ public enum BLAKE3File {
                 guard region.size > 0,
                       let pointer = region.pointer
                 else {
-                    return BLAKE3.hash(UnsafeRawBufferPointer(start: nil, count: 0))
+                    return emptyOutput(mode: mode, outputByteCount: outputByteCount, seek: seek)
                 }
+
                 guard let fileBuffer = device.makeBuffer(
                     bytesNoCopy: pointer,
                     length: region.size,
@@ -628,15 +846,16 @@ public enum BLAKE3File {
                         let completeChunkCount = completeChunkByteCount / BLAKE3.chunkByteCount
                         try pushCompleteMetalChunks(
                             context: context,
-                        buffer: fileBuffer,
-                        range: chunkRange,
-                        chunkCount: completeChunkCount,
-                        chunkCVBuffer: chunkCVBuffer,
-                        subtreeDecompositionChunkThreshold: metalMappedSubtreeDecompositionChunkThreshold,
-                        into: &stack
-                    )
-                    offset += completeChunkByteCount
-                }
+                            buffer: fileBuffer,
+                            range: chunkRange,
+                            chunkCount: completeChunkCount,
+                            chunkCVBuffer: chunkCVBuffer,
+                            subtreeDecompositionChunkThreshold: metalMappedSubtreeDecompositionChunkThreshold,
+                            into: &stack,
+                            mode: mode
+                        )
+                        offset += completeChunkByteCount
+                    }
 
                     if isFinalTile {
                         let currentChunkLength = region.size - offset
@@ -647,21 +866,19 @@ public enum BLAKE3File {
                         let output = BLAKE3Core.chunkOutput(
                             currentChunk,
                             chunkCounter: stack.finalizedChunkCount,
-                            key: BLAKE3Core.iv,
-                            flags: 0
+                            key: mode.key,
+                            flags: mode.flags
                         )
-                        return BLAKE3.Digest(
-                            stack.rootOutput(
-                                currentChunkOutput: output,
-                                key: BLAKE3Core.iv,
-                                flags: 0
-                            )
-                            .rootBytes(byteCount: BLAKE3.digestByteCount)
+                        return stack.rootOutput(
+                            currentChunkOutput: output,
+                            key: mode.key,
+                            flags: mode.flags
                         )
+                        .rootBytes(byteCount: outputByteCount, seek: seek)
                     }
                 }
 
-                return BLAKE3.hash(UnsafeRawBufferPointer(start: nil, count: 0))
+                return emptyOutput(mode: mode, outputByteCount: outputByteCount, seek: seek)
             }
         } catch let error as CancellationError {
             throw error
@@ -671,6 +888,9 @@ public enum BLAKE3File {
                     path: path,
                     fallbackToRead: true,
                     parallel: true,
+                    mode: mode,
+                    outputByteCount: outputByteCount,
+                    seek: seek,
                     cancellationCheck: cancellationCheck
                 )
             }
@@ -690,8 +910,11 @@ public enum BLAKE3File {
         tileByteCount: Int,
         fallbackToCPU: Bool,
         librarySource: BLAKE3Metal.LibrarySource,
+        mode: HashMode,
+        outputByteCount: Int,
+        seek: UInt64,
         cancellationCheck: (() throws -> Void)? = nil
-    ) throws -> BLAKE3.Digest {
+    ) throws -> [UInt8] {
         do {
             try cancellationCheck?()
             guard let device = MTLCreateSystemDefaultDevice() else {
@@ -701,10 +924,6 @@ public enum BLAKE3File {
             let tileChunkCapacity = max(1, alignedTileByteCount / BLAKE3.chunkByteCount)
             let stagedReadInflightCount = configuredMetalStagedReadInflightCount()
             let context = try BLAKE3Metal.cachedContext(device: device, librarySource: librarySource)
-            let asyncWorkspace = try context.makeAsyncWorkspace(
-                maxPooledResources: stagedReadInflightCount,
-                preallocateForByteCount: alignedTileByteCount
-            )
             let stagingBuffers = try (0..<stagedReadInflightCount).map { _ in
                 try context.makeStagingBuffer(capacity: alignedTileByteCount)
             }
@@ -733,7 +952,7 @@ public enum BLAKE3File {
 
             let fileSize = Int(info.st_size)
             guard fileSize > 0 else {
-                return BLAKE3.hash(UnsafeRawBufferPointer(start: nil, count: 0))
+                return emptyOutput(mode: mode, outputByteCount: outputByteCount, seek: seek)
             }
 
             enableReadAhead(fd: fd)
@@ -758,7 +977,8 @@ public enum BLAKE3File {
                     untilBufferAvailableAt: bufferIndex,
                     pendingSlots: &pendingSlots,
                     pendingQueue: &pendingQueue,
-                    into: &stack
+                    into: &stack,
+                    mode: mode
                 )
 
                 let stagingBuffer = stagingBuffers[bufferIndex]
@@ -785,13 +1005,13 @@ public enum BLAKE3File {
                     let completeChunkCount = completeChunkByteCount / BLAKE3.chunkByteCount
                     let tileWork = startMetalFileTileWork(
                         context: context,
-                        asyncWorkspace: asyncWorkspace,
                         buffer: stagingBuffer.metalBuffer,
                         range: chunkRange,
                         chunkCount: completeChunkCount,
                         baseChunkCounter: UInt64(fileOffset / BLAKE3.chunkByteCount),
                         chunkCVBuffer: chunkCVBuffer,
                         subtreeDecompositionChunkThreshold: metalStagedReadSubtreeDecompositionChunkThreshold,
+                        mode: mode,
                         bufferIndex: bufferIndex
                     )
                     pendingSlots[bufferIndex] = tileWork
@@ -802,7 +1022,8 @@ public enum BLAKE3File {
                     try drainAllMetalFileTileWork(
                         pendingSlots: &pendingSlots,
                         pendingQueue: &pendingQueue,
-                        into: &stack
+                        into: &stack,
+                        mode: mode
                     )
                     let currentChunkLength = tileLength - completeChunkByteCount
                     let currentChunk = UnsafeRawBufferPointer(
@@ -812,24 +1033,22 @@ public enum BLAKE3File {
                     let output = BLAKE3Core.chunkOutput(
                         currentChunk,
                         chunkCounter: stack.finalizedChunkCount,
-                        key: BLAKE3Core.iv,
-                        flags: 0
+                        key: mode.key,
+                        flags: mode.flags
                     )
-                    return BLAKE3.Digest(
-                        stack.rootOutput(
-                            currentChunkOutput: output,
-                            key: BLAKE3Core.iv,
-                            flags: 0
-                        )
-                        .rootBytes(byteCount: BLAKE3.digestByteCount)
+                    return stack.rootOutput(
+                        currentChunkOutput: output,
+                        key: mode.key,
+                        flags: mode.flags
                     )
+                    .rootBytes(byteCount: outputByteCount, seek: seek)
                 }
 
                 fileOffset += tileLength
                 bufferIndex = (bufferIndex + 1) % stagedReadInflightCount
             }
 
-            return BLAKE3.hash(UnsafeRawBufferPointer(start: nil, count: 0))
+            return emptyOutput(mode: mode, outputByteCount: outputByteCount, seek: seek)
         } catch let error as CancellationError {
             throw error
         } catch {
@@ -838,6 +1057,9 @@ public enum BLAKE3File {
                     path: path,
                     fallbackToRead: true,
                     parallel: true,
+                    mode: mode,
+                    outputByteCount: outputByteCount,
+                    seek: seek,
                     cancellationCheck: cancellationCheck
                 )
             }
@@ -889,28 +1111,28 @@ public enum BLAKE3File {
 
     private static func startMetalFileTileWork(
         context: BLAKE3Metal.Context,
-        asyncWorkspace: BLAKE3Metal.AsyncWorkspace,
         buffer: MTLBuffer,
         range: Range<Int>,
         chunkCount: Int,
         baseChunkCounter: UInt64,
         chunkCVBuffer: BLAKE3Metal.ChunkChainingValueBuffer,
         subtreeDecompositionChunkThreshold: Int,
+        mode: HashMode,
         bufferIndex: Int
     ) -> MetalFileTileWork {
         let work = MetalFileTileWork(bufferIndex: bufferIndex)
         let bufferReference = MetalFileBufferReference(buffer: buffer)
         Task.detached(priority: .userInitiated) {
             do {
-                let entries = try await collectCompleteMetalChunkEntriesAsync(
+                let entries = try collectCompleteMetalChunkEntries(
                     context: context,
-                    asyncWorkspace: asyncWorkspace,
                     buffer: bufferReference.buffer,
                     range: range,
                     chunkCount: chunkCount,
                     baseChunkCounter: baseChunkCounter,
                     chunkCVBuffer: chunkCVBuffer,
-                    subtreeDecompositionChunkThreshold: subtreeDecompositionChunkThreshold
+                    subtreeDecompositionChunkThreshold: subtreeDecompositionChunkThreshold,
+                    mode: mode
                 )
                 work.complete(.success(entries))
             } catch {
@@ -924,13 +1146,15 @@ public enum BLAKE3File {
         untilBufferAvailableAt bufferIndex: Int,
         pendingSlots: inout [MetalFileTileWork?],
         pendingQueue: inout [MetalFileTileWork],
-        into stack: inout BLAKE3Core.CVStack
+        into stack: inout BLAKE3Core.CVStack,
+        mode: HashMode
     ) throws {
         while pendingSlots[bufferIndex] != nil {
             try drainNextMetalFileTileWork(
                 pendingSlots: &pendingSlots,
                 pendingQueue: &pendingQueue,
-                into: &stack
+                into: &stack,
+                mode: mode
             )
         }
     }
@@ -938,13 +1162,15 @@ public enum BLAKE3File {
     private static func drainAllMetalFileTileWork(
         pendingSlots: inout [MetalFileTileWork?],
         pendingQueue: inout [MetalFileTileWork],
-        into stack: inout BLAKE3Core.CVStack
+        into stack: inout BLAKE3Core.CVStack,
+        mode: HashMode
     ) throws {
         while !pendingQueue.isEmpty {
             try drainNextMetalFileTileWork(
                 pendingSlots: &pendingSlots,
                 pendingQueue: &pendingQueue,
-                into: &stack
+                into: &stack,
+                mode: mode
             )
         }
     }
@@ -952,13 +1178,14 @@ public enum BLAKE3File {
     private static func drainNextMetalFileTileWork(
         pendingSlots: inout [MetalFileTileWork?],
         pendingQueue: inout [MetalFileTileWork],
-        into stack: inout BLAKE3Core.CVStack
+        into stack: inout BLAKE3Core.CVStack,
+        mode: HashMode
     ) throws {
         guard !pendingQueue.isEmpty else {
             return
         }
         let tileWork = pendingQueue.removeFirst()
-        pushMetalFileStackEntries(try tileWork.wait(), into: &stack)
+        pushMetalFileStackEntries(try tileWork.wait(), into: &stack, mode: mode)
         pendingSlots[tileWork.bufferIndex] = nil
     }
     #endif
@@ -972,18 +1199,27 @@ public enum BLAKE3File {
         _ region: MappedRegion,
         parallel: Bool,
         maxWorkers: Int?,
+        mode: HashMode,
+        outputByteCount: Int,
+        seek: UInt64,
         cancellationCheck: (() throws -> Void)? = nil
-    ) throws -> BLAKE3.Digest {
+    ) throws -> [UInt8] {
         guard region.size > 0,
               let pointer = region.pointer
         else {
-            return BLAKE3.hash(UnsafeRawBufferPointer(start: nil, count: 0))
+            return emptyOutput(mode: mode, outputByteCount: outputByteCount, seek: seek)
         }
 
         let regionBuffer = UnsafeRawBufferPointer(start: pointer, count: region.size)
         if parallel, region.size <= mappedParallelOneShotMaxByteCount {
             try cancellationCheck?()
-            return BLAKE3.hashParallel(regionBuffer, maxWorkers: maxWorkers)
+            return hashCPU(
+                regionBuffer,
+                mode: mode,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                maxWorkers: maxWorkers
+            )
         }
 
         if parallel {
@@ -991,11 +1227,14 @@ public enum BLAKE3File {
                 regionBuffer,
                 tileByteCount: mappedTileByteCount,
                 maxWorkers: maxWorkers,
+                mode: mode,
+                outputByteCount: outputByteCount,
+                seek: seek,
                 cancellationCheck: cancellationCheck
             )
         }
 
-        var hasher = BLAKE3.Hasher()
+        var hasher = BLAKE3.Hasher(key: mode.key, flags: mode.flags)
         var offset = 0
         while offset < region.size {
             try cancellationCheck?()
@@ -1004,7 +1243,7 @@ public enum BLAKE3File {
             hasher.update(tile)
             offset += byteCount
         }
-        return hasher.finalize()
+        return readOutput(from: hasher, outputByteCount: outputByteCount, seek: seek)
     }
 
     private static let mappedParallelOneShotMaxByteCount = 2 * 1024 * 1024 * 1024
@@ -1013,12 +1252,15 @@ public enum BLAKE3File {
         _ input: UnsafeRawBufferPointer,
         tileByteCount: Int,
         maxWorkers: Int?,
+        mode: HashMode,
+        outputByteCount: Int,
+        seek: UInt64,
         cancellationCheck: (() throws -> Void)? = nil
-    ) throws -> BLAKE3.Digest {
+    ) throws -> [UInt8] {
         guard input.count > 0,
               let baseAddress = input.baseAddress
         else {
-            return BLAKE3.hash(UnsafeRawBufferPointer(start: nil, count: 0))
+            return emptyOutput(mode: mode, outputByteCount: outputByteCount, seek: seek)
         }
 
         let alignedTileByteCount = max(
@@ -1048,7 +1290,8 @@ public enum BLAKE3File {
                     maxWorkers: maxWorkers,
                     scheduler: scheduler,
                     workspace: &workspace,
-                    into: &stack
+                    into: &stack,
+                    mode: mode
                 )
             }
 
@@ -1061,23 +1304,21 @@ public enum BLAKE3File {
                 let output = BLAKE3Core.chunkOutput(
                     currentChunk,
                     chunkCounter: stack.finalizedChunkCount,
-                    key: BLAKE3Core.iv,
-                    flags: 0
+                    key: mode.key,
+                    flags: mode.flags
                 )
-                return BLAKE3.Digest(
-                    stack.rootOutput(
-                        currentChunkOutput: output,
-                        key: BLAKE3Core.iv,
-                        flags: 0
-                    )
-                    .rootBytes(byteCount: BLAKE3.digestByteCount)
+                return stack.rootOutput(
+                    currentChunkOutput: output,
+                    key: mode.key,
+                    flags: mode.flags
                 )
+                .rootBytes(byteCount: outputByteCount, seek: seek)
             }
 
             offset += tileLength
         }
 
-        return BLAKE3.hash(UnsafeRawBufferPointer(start: nil, count: 0))
+        return emptyOutput(mode: mode, outputByteCount: outputByteCount, seek: seek)
     }
 
     private static func pushCompleteCPUChunks(
@@ -1087,7 +1328,8 @@ public enum BLAKE3File {
         maxWorkers: Int?,
         scheduler: BLAKE3Core.ParallelScheduler?,
         workspace: inout BLAKE3Core.Workspace,
-        into stack: inout BLAKE3Core.CVStack
+        into stack: inout BLAKE3Core.CVStack,
+        mode: HashMode
     ) throws {
         let entries = try collectCompleteCPUChunkEntries(
             buffer: buffer,
@@ -1095,9 +1337,10 @@ public enum BLAKE3File {
             baseChunkCounter: baseChunkCounter,
             maxWorkers: maxWorkers,
             scheduler: scheduler,
-            workspace: &workspace
+            workspace: &workspace,
+            mode: mode
         )
-        pushCPUFileStackEntries(entries, into: &stack)
+        pushCPUFileStackEntries(entries, into: &stack, mode: mode)
     }
 
     private static func collectCompleteCPUChunkEntries(
@@ -1106,7 +1349,8 @@ public enum BLAKE3File {
         baseChunkCounter: UInt64,
         maxWorkers: Int?,
         scheduler: BLAKE3Core.ParallelScheduler?,
-        workspace: inout BLAKE3Core.Workspace
+        workspace: inout BLAKE3Core.Workspace,
+        mode: HashMode
     ) throws -> [CPUFileStackEntry] {
         guard range.count > 0 else {
             return []
@@ -1134,8 +1378,8 @@ public enum BLAKE3File {
             let cv = BLAKE3Core.subtreeChainingValue(
                 subtree,
                 baseChunkCounter: Int(baseChunkCounter) + processedChunkCount,
-                key: BLAKE3Core.iv,
-                flags: 0,
+                key: mode.key,
+                flags: mode.flags,
                 maxWorkers: maxWorkers,
                 scheduler: scheduler,
                 workspace: &workspace
@@ -1149,14 +1393,15 @@ public enum BLAKE3File {
 
     private static func pushCPUFileStackEntries(
         _ entries: [CPUFileStackEntry],
-        into stack: inout BLAKE3Core.CVStack
+        into stack: inout BLAKE3Core.CVStack,
+        mode: HashMode
     ) {
         for entry in entries {
             stack.pushSubtreeCV(
                 entry.cv,
                 chunkCount: UInt64(entry.chunkCount),
-                key: BLAKE3Core.iv,
-                flags: 0
+                key: mode.key,
+                flags: mode.flags
             )
         }
     }
@@ -1174,6 +1419,81 @@ public enum BLAKE3File {
             return fileSize >= 128 * 1024 * 1024 ? 4 : 2
         }
         return min(max(parsed, 1), 4)
+    }
+
+    private static func validateOutput(outputByteCount: Int, seek: UInt64) throws {
+        guard outputByteCount >= 0 else {
+            throw BLAKE3Error.invalidOutputLength(outputByteCount)
+        }
+        guard UInt64.max - seek >= UInt64(outputByteCount) else {
+            throw BLAKE3Error.metalCommandFailed("BLAKE3 XOF output range overflows UInt64.")
+        }
+    }
+
+    private static func digest(from output: [UInt8]) throws -> BLAKE3.Digest {
+        guard output.count == BLAKE3.digestByteCount else {
+            throw BLAKE3Error.invalidOutputLength(output.count)
+        }
+        return BLAKE3.Digest(output)
+    }
+
+    private static func keyedMode(_ keyBytes: UnsafeRawBufferPointer) throws -> HashMode {
+        guard keyBytes.count == BLAKE3.keyByteCount else {
+            throw BLAKE3Error.invalidKeyLength(
+                expected: BLAKE3.keyByteCount,
+                actual: keyBytes.count
+            )
+        }
+        return HashMode(key: BLAKE3Core.keyedWords(keyBytes), flags: BLAKE3Core.keyedHash)
+    }
+
+    private static func deriveKeyMaterialMode(context: String) -> HashMode {
+        let contextBytes = Array(context.utf8)
+        return contextBytes.withUnsafeBytes { contextRaw in
+            HashMode(
+                key: BLAKE3Core.deriveKeyContextKey(contextRaw),
+                flags: BLAKE3Core.deriveKeyMaterial
+            )
+        }
+    }
+
+    private static func emptyOutput(mode: HashMode, outputByteCount: Int, seek: UInt64) -> [UInt8] {
+        let empty = UnsafeRawBufferPointer(start: nil, count: 0)
+        return BLAKE3Core
+            .chunkOutput(empty, chunkCounter: 0, key: mode.key, flags: mode.flags)
+            .rootBytes(byteCount: outputByteCount, seek: seek)
+    }
+
+    private static func hashCPU(
+        _ input: UnsafeRawBufferPointer,
+        mode: HashMode,
+        outputByteCount: Int,
+        seek: UInt64,
+        maxWorkers: Int?
+    ) -> [UInt8] {
+        var workspace = BLAKE3Core.Workspace()
+        let output = BLAKE3Core.rootOutputParallel(
+            input,
+            key: mode.key,
+            flags: mode.flags,
+            maxWorkers: maxWorkers,
+            workspace: &workspace
+        )
+        return output.rootBytes(byteCount: outputByteCount, seek: seek)
+    }
+
+    private static func readOutput(
+        from hasher: BLAKE3.Hasher,
+        outputByteCount: Int,
+        seek: UInt64
+    ) -> [UInt8] {
+        var reader = hasher.finalizeXOF()
+        reader.seek(to: seek)
+        var output = [UInt8](repeating: 0, count: outputByteCount)
+        output.withUnsafeMutableBytes { rawOutput in
+            reader.read(into: rawOutput)
+        }
+        return output
     }
 
     private struct CPUFileStackEntry {
@@ -1207,10 +1527,12 @@ public enum BLAKE3File {
     private final class CPUFileTileWorker: @unchecked Sendable {
         private let queue = DispatchQueue(label: "org.blake3swift.cpu-read")
         private let scheduler: BLAKE3Core.ParallelScheduler?
+        private let mode: HashMode
         private var workspace = BLAKE3Core.Workspace()
 
-        init(scheduler: BLAKE3Core.ParallelScheduler?) {
+        init(scheduler: BLAKE3Core.ParallelScheduler?, mode: HashMode) {
             self.scheduler = scheduler
+            self.mode = mode
         }
 
         func start(
@@ -1231,7 +1553,8 @@ public enum BLAKE3File {
                         baseChunkCounter: baseChunkCounter,
                         maxWorkers: nil,
                         scheduler: self.scheduler,
-                        workspace: &self.workspace
+                        workspace: &self.workspace,
+                        mode: self.mode
                     )
                     work.complete(.success(entries))
                 } catch {
@@ -1357,7 +1680,8 @@ public enum BLAKE3File {
     private static func pushChunkChainingValues(
         _ chunkCVBuffer: BLAKE3Metal.ChunkChainingValueBuffer,
         chunkCount: Int,
-        into stack: inout BLAKE3Core.CVStack
+        into stack: inout BLAKE3Core.CVStack,
+        mode: HashMode
     ) throws {
         try chunkCVBuffer.withUnsafeBytes { raw in
             guard raw.count >= chunkCount * BLAKE3.digestByteCount else {
@@ -1366,7 +1690,7 @@ public enum BLAKE3File {
             for chunkIndex in 0..<chunkCount {
                 let offset = chunkIndex * BLAKE3.digestByteCount
                 let cv = BLAKE3Core.chainingValue(from: raw, atByteOffset: offset)
-                stack.pushChunkCV(cv, key: BLAKE3Core.iv, flags: 0)
+                stack.pushChunkCV(cv, key: mode.key, flags: mode.flags)
             }
         }
     }
@@ -1378,7 +1702,8 @@ public enum BLAKE3File {
         chunkCount: Int,
         chunkCVBuffer: BLAKE3Metal.ChunkChainingValueBuffer,
         subtreeDecompositionChunkThreshold: Int,
-        into stack: inout BLAKE3Core.CVStack
+        into stack: inout BLAKE3Core.CVStack,
+        mode: HashMode
     ) throws {
         let entries = try collectCompleteMetalChunkEntries(
             context: context,
@@ -1387,9 +1712,10 @@ public enum BLAKE3File {
             chunkCount: chunkCount,
             baseChunkCounter: stack.finalizedChunkCount,
             chunkCVBuffer: chunkCVBuffer,
-            subtreeDecompositionChunkThreshold: subtreeDecompositionChunkThreshold
+            subtreeDecompositionChunkThreshold: subtreeDecompositionChunkThreshold,
+            mode: mode
         )
-        pushMetalFileStackEntries(entries, into: &stack)
+        pushMetalFileStackEntries(entries, into: &stack, mode: mode)
     }
 
     private static func collectCompleteMetalChunkEntries(
@@ -1399,7 +1725,8 @@ public enum BLAKE3File {
         chunkCount: Int,
         baseChunkCounter: UInt64,
         chunkCVBuffer: BLAKE3Metal.ChunkChainingValueBuffer,
-        subtreeDecompositionChunkThreshold: Int
+        subtreeDecompositionChunkThreshold: Int,
+        mode: HashMode
     ) throws -> [MetalFileStackEntry] {
         guard chunkCount > 0 else {
             return []
@@ -1420,7 +1747,8 @@ public enum BLAKE3File {
                 let cv = try context.chunkSubtreeChainingValue(
                     buffer: buffer,
                     range: subtreeRange,
-                    baseChunkCounter: baseChunkCounter + UInt64(processedChunkCount)
+                    baseChunkCounter: baseChunkCounter + UInt64(processedChunkCount),
+                    mode: mode.metalMode
                 )
                 entries.append(MetalFileStackEntry(cv: cv, chunkCount: subtreeChunkCount))
                 processedChunkCount += subtreeChunkCount
@@ -1433,69 +1761,8 @@ public enum BLAKE3File {
             buffer: buffer,
             range: range,
             baseChunkCounter: baseChunkCounter,
-            into: chunkCVBuffer
-        )
-        var entries = [MetalFileStackEntry]()
-        entries.reserveCapacity(writtenChunkCount)
-        try chunkCVBuffer.withUnsafeBytes { raw in
-            guard raw.count >= writtenChunkCount * BLAKE3.digestByteCount else {
-                throw BLAKE3Error.metalCommandFailed("Metal chunk chaining value output is shorter than expected.")
-            }
-            for chunkIndex in 0..<writtenChunkCount {
-                let offset = chunkIndex * BLAKE3.digestByteCount
-                let cv = BLAKE3Core.chainingValue(from: raw, atByteOffset: offset)
-                entries.append(MetalFileStackEntry(cv: cv, chunkCount: 1))
-            }
-        }
-        return entries
-    }
-
-    private static func collectCompleteMetalChunkEntriesAsync(
-        context: BLAKE3Metal.Context,
-        asyncWorkspace: BLAKE3Metal.AsyncWorkspace,
-        buffer: MTLBuffer,
-        range: Range<Int>,
-        chunkCount: Int,
-        baseChunkCounter: UInt64,
-        chunkCVBuffer: BLAKE3Metal.ChunkChainingValueBuffer,
-        subtreeDecompositionChunkThreshold: Int
-    ) async throws -> [MetalFileStackEntry] {
-        guard chunkCount > 0 else {
-            return []
-        }
-        guard range.count == chunkCount * BLAKE3.chunkByteCount else {
-            throw BLAKE3Error.invalidBufferRange
-        }
-
-        if chunkCount.nonzeroBitCount == 1 || chunkCount >= subtreeDecompositionChunkThreshold {
-            var entries = [MetalFileStackEntry]()
-            entries.reserveCapacity(chunkCount.nonzeroBitCount)
-            var remainingChunkCount = chunkCount
-            var processedChunkCount = 0
-            while remainingChunkCount > 0 {
-                try Task.checkCancellation()
-                let subtreeChunkCount = largestPowerOfTwo(notExceeding: remainingChunkCount)
-                let subtreeLowerBound = range.lowerBound + processedChunkCount * BLAKE3.chunkByteCount
-                let subtreeRange = subtreeLowerBound..<(subtreeLowerBound + subtreeChunkCount * BLAKE3.chunkByteCount)
-                let cv = try await context.chunkSubtreeChainingValueAsync(
-                    buffer: buffer,
-                    range: subtreeRange,
-                    baseChunkCounter: baseChunkCounter + UInt64(processedChunkCount),
-                    workspace: asyncWorkspace
-                )
-                entries.append(MetalFileStackEntry(cv: cv, chunkCount: subtreeChunkCount))
-                processedChunkCount += subtreeChunkCount
-                remainingChunkCount -= subtreeChunkCount
-            }
-            return entries
-        }
-
-        let writtenChunkCount = try await context.writeChunkChainingValuesAsync(
-            buffer: buffer,
-            range: range,
-            baseChunkCounter: baseChunkCounter,
             into: chunkCVBuffer,
-            workspace: asyncWorkspace
+            mode: mode.metalMode
         )
         var entries = [MetalFileStackEntry]()
         entries.reserveCapacity(writtenChunkCount)
@@ -1514,14 +1781,15 @@ public enum BLAKE3File {
 
     private static func pushMetalFileStackEntries(
         _ entries: [MetalFileStackEntry],
-        into stack: inout BLAKE3Core.CVStack
+        into stack: inout BLAKE3Core.CVStack,
+        mode: HashMode
     ) {
         for entry in entries {
             stack.pushSubtreeCV(
                 entry.cv,
                 chunkCount: UInt64(entry.chunkCount),
-                key: BLAKE3Core.iv,
-                flags: 0
+                key: mode.key,
+                flags: mode.flags
             )
         }
     }

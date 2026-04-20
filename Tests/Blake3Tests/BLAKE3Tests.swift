@@ -688,6 +688,113 @@ final class BLAKE3Tests: XCTestCase {
         }
     }
 
+    func testFileKeyedDeriveAndXOFStrategiesMatchOneShot() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("blake3swift-file-mode-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let fileURL = directory.appendingPathComponent("input.bin")
+        let input = deterministicInput(byteCount: 5 * BLAKE3.chunkByteCount + 901)
+        try Data(input).write(to: fileURL, options: .atomic)
+
+        let key = deterministicInput(byteCount: BLAKE3.keyByteCount)
+        let kdfContext = "BLAKE3 file mode test context"
+        let outputByteCount = 513
+        let seek: UInt64 = 17
+
+        var unkeyedHasher = BLAKE3.Hasher()
+        unkeyedHasher.update(input)
+        let expectedXOF = xofBytes(from: unkeyedHasher, count: outputByteCount, seek: seek)
+        let expectedKeyedDigest = try BLAKE3.keyedHash(key: key, input: input)
+        var keyedHasher = try BLAKE3.Hasher(key: key)
+        keyedHasher.update(input)
+        let expectedKeyedXOF = xofBytes(from: keyedHasher, count: outputByteCount, seek: seek)
+        var deriveHasher = BLAKE3.Hasher(deriveKeyContext: kdfContext)
+        deriveHasher.update(input)
+        let expectedDerived = xofBytes(from: deriveHasher, count: outputByteCount, seek: seek)
+
+        var strategies: [(String, BLAKE3File.Strategy)] = [
+            ("read", .read(bufferSize: 2 * BLAKE3.chunkByteCount)),
+            ("mmap", .memoryMapped),
+            ("mmap-parallel", .memoryMappedParallel(maxThreads: 2))
+        ]
+        #if canImport(Metal)
+        if BLAKE3Metal.isAvailable {
+            strategies.append(
+                ("metal-mmap", .metalMemoryMapped(policy: .gpu, fallbackToCPU: false))
+            )
+            strategies.append(
+                (
+                    "metal-tiled",
+                    .metalTiledMemoryMapped(
+                        tileByteCount: 2 * BLAKE3.chunkByteCount,
+                        fallbackToCPU: false
+                    )
+                )
+            )
+            strategies.append(
+                (
+                    "metal-staged",
+                    .metalStagedRead(
+                        tileByteCount: 2 * BLAKE3.chunkByteCount,
+                        fallbackToCPU: false
+                    )
+                )
+            )
+        }
+        #endif
+
+        for (label, strategy) in strategies {
+            XCTAssertEqual(
+                try BLAKE3File.hash(
+                    path: fileURL.path,
+                    strategy: strategy,
+                    outputByteCount: outputByteCount,
+                    seek: seek
+                ),
+                expectedXOF,
+                "file XOF mismatch for strategy=\(label)"
+            )
+            XCTAssertEqual(
+                try BLAKE3File.keyedHash(key: key, path: fileURL.path, strategy: strategy),
+                expectedKeyedDigest,
+                "file keyed digest mismatch for strategy=\(label)"
+            )
+            XCTAssertEqual(
+                try BLAKE3File.keyedHash(
+                    key: key,
+                    path: fileURL.path,
+                    strategy: strategy,
+                    outputByteCount: outputByteCount,
+                    seek: seek
+                ),
+                expectedKeyedXOF,
+                "file keyed XOF mismatch for strategy=\(label)"
+            )
+            XCTAssertEqual(
+                try BLAKE3File.deriveKey(
+                    context: kdfContext,
+                    path: fileURL.path,
+                    strategy: strategy,
+                    outputByteCount: outputByteCount,
+                    seek: seek
+                ),
+                expectedDerived,
+                "file derive-key mismatch for strategy=\(label)"
+            )
+        }
+
+        XCTAssertEqual(
+            try BLAKE3File.deriveKey(
+                context: kdfContext,
+                path: fileURL.path,
+                outputByteCount: 0
+            ),
+            []
+        )
+    }
+
     func testFileAsyncHashing() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("blake3swift-async-tests-\(UUID().uuidString)", isDirectory: true)
