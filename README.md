@@ -48,9 +48,9 @@ plan/write pipelines. The fused aggregate path is correct, but it was not the re
 
 | Batch item | Pipeline width | Metal row | Median GiB/s | Min GiB/s | P95 GiB/s |
 | ---: | ---: | --- | ---: | ---: | ---: |
-| 64 B | 20 | `resident-plan-write-pipeline-20-gpu` | 40.13 | 37.27 | 41.79 |
-| 64 B | 24 | `resident-plan-write-private-pipeline-24-gpu` | 43.88 | 39.76 | 45.16 |
-| 64 B | 16 | `resident-plan-write-private-chained-pipeline-16-gpu` | 32.43 | 30.34 | 32.90 |
+| 64 B | 23 | `resident-plan-write-pipeline-23-gpu` | 42.67 | 32.24 | 43.79 |
+| 64 B | 28 | `resident-plan-write-private-pipeline-28-gpu` | 46.95 | 45.75 | 47.50 |
+| 64 B | 28 | `resident-plan-write-private-chained-pipeline-28-gpu` | 33.23 | 32.40 | 33.64 |
 | 1024 B | 8 | `resident-plan-write-pipeline-8-gpu` | 62.91 | 53.47 | 64.98 |
 | 1024 B | 8 | `resident-plan-write-private-chained-pipeline-8-gpu` | 59.76 | 50.84 | 66.17 |
 
@@ -63,10 +63,10 @@ swift run -c release blake3-bench \
   --metal-modes resident \
   --operation-modes batch-one-chunk \
   --batch-item-bytes 64 \
-  --batch-pipeline-width 20 \
+  --batch-pipeline-width 23 \
   --file-modes none \
   --cryptokit-modes none \
-  --json-output /tmp/blake3-batch-contiguous-block-64-w20.json
+  --json-output /tmp/blake3-batch-contiguous-block-64-w23-next.json
 
 swift run -c release blake3-bench \
   --sizes 64m \
@@ -74,21 +74,10 @@ swift run -c release blake3-bench \
   --metal-modes resident \
   --operation-modes batch-one-chunk \
   --batch-item-bytes 64 \
-  --batch-pipeline-width 24 \
+  --batch-pipeline-width 28 \
   --file-modes none \
   --cryptokit-modes none \
-  --json-output /tmp/blake3-batch-contiguous-block-64-w24.json
-
-swift run -c release blake3-bench \
-  --sizes 64m \
-  --iterations 5 \
-  --metal-modes resident \
-  --operation-modes batch-one-chunk \
-  --batch-item-bytes 64 \
-  --batch-pipeline-width 16 \
-  --file-modes none \
-  --cryptokit-modes none \
-  --json-output /tmp/blake3-batch-contiguous-block-64-w16.json
+  --json-output /tmp/blake3-batch-contiguous-block-64-w28-next.json
 
 swift run -c release blake3-bench \
   --sizes 64m \
