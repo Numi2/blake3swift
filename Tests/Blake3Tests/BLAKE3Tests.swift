@@ -1715,6 +1715,55 @@ final class BLAKE3Tests: XCTestCase {
             fullChunkAggregateExpected
         )
 
+        let prefixedFullChunkOffset = 13
+        let prefixedFullChunkInput = deterministicInput(
+            byteCount: prefixedFullChunkOffset + BLAKE3.chunkByteCount * 3
+        )
+        let prefixedFullChunkRanges = (0..<3).map { index in
+            let lowerBound = prefixedFullChunkOffset + index * BLAKE3.chunkByteCount
+            return lowerBound..<(lowerBound + BLAKE3.chunkByteCount)
+        }
+        let prefixedFullChunkBuffer = try XCTUnwrap(prefixedFullChunkInput.withUnsafeBytes { raw in
+            device.makeBuffer(bytes: raw.baseAddress!, length: raw.count, options: .storageModeShared)
+        })
+        let prefixedFullChunkExpected = prefixedFullChunkRanges.map { range in
+            prefixedFullChunkInput.withUnsafeBytes { raw in
+                BLAKE3.hash(
+                    UnsafeRawBufferPointer(
+                        start: raw.baseAddress!.advanced(by: range.lowerBound),
+                        count: range.count
+                    )
+                )
+            }
+        }
+        let prefixedFullChunkPlan = try context.makeOneChunkBatchPlan(
+            buffer: prefixedFullChunkBuffer,
+            ranges: prefixedFullChunkRanges
+        )
+        XCTAssertEqual(try context.hashOneChunkBatch(plan: prefixedFullChunkPlan), prefixedFullChunkExpected)
+        let prefixedFullChunkOutputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: prefixedFullChunkPlan.outputByteCount,
+                options: .storageModeShared
+            )
+        )
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigests(
+                plan: prefixedFullChunkPlan,
+                into: prefixedFullChunkOutputBuffer
+            ),
+            prefixedFullChunkRanges.count
+        )
+        XCTAssertEqual(
+            readDigests(prefixedFullChunkOutputBuffer, count: prefixedFullChunkRanges.count),
+            prefixedFullChunkExpected
+        )
+        let prefixedFullChunkAggregateExpected = BLAKE3.hashCPU(prefixedFullChunkExpected.flatMap(\.bytes))
+        XCTAssertEqual(
+            try context.hashOneChunkBatchDigestBytes(plan: prefixedFullChunkPlan),
+            prefixedFullChunkAggregateExpected
+        )
+
         let emptyOutputBuffer = try XCTUnwrap(device.makeBuffer(length: 1, options: .storageModeShared))
         XCTAssertEqual(
             try context.writeOneChunkBatchDigests(buffer: buffer, ranges: [], into: emptyOutputBuffer),

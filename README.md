@@ -43,13 +43,13 @@ Metal timing classes are separated by ownership and transfer cost. Resident mode
 Focused one-chunk batch records from April 20, 2026 use resident Metal buffers on Apple M4 with runtime
 Metal source, 64 MiB input, 5 iterations, and JSON validation. These targeted rows are tuning records for
 the batch APIs; they do not replace the full publication sweep above. The 64 B rows use the contiguous
-single-block Metal batch kernel; the 1024 B rows use the full-chunk plan/write pipelines. The fused aggregate
-path is correct, but it was not the record holder in this run.
+single-block Metal batch kernel with row-specific pipeline widths; the 1024 B rows use the full-chunk
+plan/write pipelines. The fused aggregate path is correct, but it was not the record holder in this run.
 
 | Batch item | Pipeline width | Metal row | Median GiB/s | Min GiB/s | P95 GiB/s |
 | ---: | ---: | --- | ---: | ---: | ---: |
-| 64 B | 16 | `resident-plan-write-pipeline-16-gpu` | 38.25 | 34.57 | 42.83 |
-| 64 B | 16 | `resident-plan-write-private-pipeline-16-gpu` | 40.47 | 37.92 | 43.25 |
+| 64 B | 20 | `resident-plan-write-pipeline-20-gpu` | 40.13 | 37.27 | 41.79 |
+| 64 B | 24 | `resident-plan-write-private-pipeline-24-gpu` | 43.88 | 39.76 | 45.16 |
 | 64 B | 16 | `resident-plan-write-private-chained-pipeline-16-gpu` | 32.43 | 30.34 | 32.90 |
 | 1024 B | 8 | `resident-plan-write-pipeline-8-gpu` | 62.91 | 53.47 | 64.98 |
 | 1024 B | 8 | `resident-plan-write-private-chained-pipeline-8-gpu` | 59.76 | 50.84 | 66.17 |
@@ -57,6 +57,28 @@ path is correct, but it was not the record holder in this run.
 Record commands:
 
 ```bash
+swift run -c release blake3-bench \
+  --sizes 64m \
+  --iterations 5 \
+  --metal-modes resident \
+  --operation-modes batch-one-chunk \
+  --batch-item-bytes 64 \
+  --batch-pipeline-width 20 \
+  --file-modes none \
+  --cryptokit-modes none \
+  --json-output /tmp/blake3-batch-contiguous-block-64-w20.json
+
+swift run -c release blake3-bench \
+  --sizes 64m \
+  --iterations 5 \
+  --metal-modes resident \
+  --operation-modes batch-one-chunk \
+  --batch-item-bytes 64 \
+  --batch-pipeline-width 24 \
+  --file-modes none \
+  --cryptokit-modes none \
+  --json-output /tmp/blake3-batch-contiguous-block-64-w24.json
+
 swift run -c release blake3-bench \
   --sizes 64m \
   --iterations 5 \
