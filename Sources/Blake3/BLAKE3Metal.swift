@@ -187,6 +187,28 @@ public enum BLAKE3Metal {
         )
     }
 
+    /// Builds a benchmark-only command pipeline for repeated plan writes plus output hashing.
+    @_spi(Benchmark)
+    public static func makeOneChunkBatchChainedPipeline(
+        plan: OneChunkBatchPlan,
+        outputBuffers: [MTLBuffer]
+    ) throws -> OneChunkBatchChainedPipeline {
+        try contextCache.context(device: plan.buffer.device).makeOneChunkBatchChainedPipeline(
+            plan: plan,
+            outputBuffers: outputBuffers
+        )
+    }
+
+    /// Writes plan digests into all chained-pipeline output buffers and returns the last output digest.
+    @_spi(Benchmark)
+    public static func writeOneChunkBatchDigestsAndHashOutput(
+        pipeline: OneChunkBatchChainedPipeline
+    ) throws -> BLAKE3.Digest {
+        try contextCache.context(device: pipeline.plan.buffer.device).writeOneChunkBatchDigestsAndHashOutput(
+            pipeline: pipeline
+        )
+    }
+
     /// Writes one digest per independent one-chunk resident-buffer range into `outputBuffer`.
     ///
     /// `outputBuffer` must have capacity for `ranges.count * BLAKE3.digestByteCount` bytes.
@@ -842,6 +864,8 @@ public enum BLAKE3Metal {
         fileprivate let entriesBuffer: MTLBuffer
         fileprivate let parameterBuffer: MTLBuffer
         fileprivate let canLoadWords: Bool
+        fileprivate let contiguousSingleBlocks: Bool
+        fileprivate let allSingleBlocks: Bool
         fileprivate let allFullChunks: Bool
         fileprivate let lock = NSLock()
 
@@ -851,6 +875,8 @@ public enum BLAKE3Metal {
             entriesBuffer: MTLBuffer,
             parameterBuffer: MTLBuffer,
             canLoadWords: Bool,
+            contiguousSingleBlocks: Bool,
+            allSingleBlocks: Bool,
             allFullChunks: Bool
         ) {
             self.buffer = buffer
@@ -858,6 +884,8 @@ public enum BLAKE3Metal {
             self.entriesBuffer = entriesBuffer
             self.parameterBuffer = parameterBuffer
             self.canLoadWords = canLoadWords
+            self.contiguousSingleBlocks = contiguousSingleBlocks
+            self.allSingleBlocks = allSingleBlocks
             self.allFullChunks = allFullChunks
         }
     }
@@ -889,6 +917,57 @@ public enum BLAKE3Metal {
             self.plan = plan
             self.outputBuffers = outputBuffers
             self.parameterBuffers = parameterBuffers
+        }
+    }
+
+    /// Benchmark-only command pipeline for repeated writes followed by hashing the produced digest bytes.
+    @_spi(Benchmark)
+    public final class OneChunkBatchChainedPipeline: @unchecked Sendable {
+        /// Plan whose digest commands are encoded by this pipeline.
+        public let plan: OneChunkBatchPlan
+        /// Output buffers written by each in-flight command.
+        public let outputBuffers: [MTLBuffer]
+        /// Number of command buffers committed per pipeline call.
+        public var inFlightCount: Int {
+            outputBuffers.count
+        }
+        /// Number of digest bytes written into each output buffer.
+        public var outputByteCount: Int {
+            plan.outputByteCount
+        }
+
+        fileprivate let outputChunkCount: Int
+        fileprivate let outputEntryBuffer: MTLBuffer?
+        fileprivate let outputCanLoadWords: [Bool]
+        fileprivate let batchParameterBuffers: [MTLBuffer]
+        fileprivate let outputHashParameterBuffers: [MTLBuffer]
+        fileprivate let chunkCVBuffers: [MTLBuffer]
+        fileprivate let scratchBuffers: [MTLBuffer]
+        fileprivate let digestBuffers: [MTLBuffer]
+        fileprivate let lock = NSLock()
+
+        fileprivate init(
+            plan: OneChunkBatchPlan,
+            outputBuffers: [MTLBuffer],
+            outputChunkCount: Int,
+            outputEntryBuffer: MTLBuffer?,
+            outputCanLoadWords: [Bool],
+            batchParameterBuffers: [MTLBuffer],
+            outputHashParameterBuffers: [MTLBuffer],
+            chunkCVBuffers: [MTLBuffer],
+            scratchBuffers: [MTLBuffer],
+            digestBuffers: [MTLBuffer]
+        ) {
+            self.plan = plan
+            self.outputBuffers = outputBuffers
+            self.outputChunkCount = outputChunkCount
+            self.outputEntryBuffer = outputEntryBuffer
+            self.outputCanLoadWords = outputCanLoadWords
+            self.batchParameterBuffers = batchParameterBuffers
+            self.outputHashParameterBuffers = outputHashParameterBuffers
+            self.chunkCVBuffers = chunkCVBuffers
+            self.scratchBuffers = scratchBuffers
+            self.digestBuffers = digestBuffers
         }
     }
 
@@ -1460,6 +1539,29 @@ public enum BLAKE3Metal {
             try writeOneChunkBatchDigests(pipeline: pipeline, mode: .unkeyed)
         }
 
+        /// Builds a benchmark-only command pipeline for repeated plan writes plus output hashing.
+        @_spi(Benchmark)
+        public func makeOneChunkBatchChainedPipeline(
+            plan: OneChunkBatchPlan,
+            outputBuffers: [MTLBuffer]
+        ) throws -> OneChunkBatchChainedPipeline {
+            guard plan.buffer.device.registryID == device.registryID else {
+                throw BLAKE3Error.metalCommandFailed("Batch plan belongs to a different Metal device.")
+            }
+            return try BLAKE3Metal.buildOneChunkBatchChainedPipeline(
+                plan: plan,
+                outputBuffers: outputBuffers
+            )
+        }
+
+        /// Writes plan digests into all chained-pipeline output buffers and returns the last output digest.
+        @_spi(Benchmark)
+        public func writeOneChunkBatchDigestsAndHashOutput(
+            pipeline: OneChunkBatchChainedPipeline
+        ) throws -> BLAKE3.Digest {
+            try writeOneChunkBatchDigestsAndHashOutput(pipeline: pipeline, mode: .unkeyed)
+        }
+
         /// Computes keyed BLAKE3 hashes for many independent resident-buffer ranges that each fit in one chunk.
         public func keyedHashOneChunkBatch(
             key: some ContiguousBytes,
@@ -1694,6 +1796,21 @@ public enum BLAKE3Metal {
                 throw BLAKE3Error.metalCommandFailed("Batch pipeline belongs to a different Metal device.")
             }
             return try BLAKE3Metal.writeOneChunkBatchDigests(
+                pipeline: pipeline,
+                mode: mode,
+                pipelines: pipelines,
+                commandQueue: commandQueue
+            )
+        }
+
+        func writeOneChunkBatchDigestsAndHashOutput(
+            pipeline: OneChunkBatchChainedPipeline,
+            mode: HashMode
+        ) throws -> BLAKE3.Digest {
+            guard pipeline.plan.buffer.device.registryID == device.registryID else {
+                throw BLAKE3Error.metalCommandFailed("Batch pipeline belongs to a different Metal device.")
+            }
+            return try BLAKE3Metal.writeOneChunkBatchDigestsAndHashOutput(
                 pipeline: pipeline,
                 mode: mode,
                 pipelines: pipelines,
@@ -4293,6 +4410,8 @@ public enum BLAKE3Metal {
     private struct OneChunkBatchDescriptor {
         var entries: [BLAKE3MetalBatchEntry]
         var canLoadWords: Bool
+        var contiguousSingleBlocks: Bool
+        var allSingleBlocks: Bool
         var allFullChunks: Bool
     }
 
@@ -4307,8 +4426,12 @@ public enum BLAKE3Metal {
         var entries = [BLAKE3MetalBatchEntry]()
         entries.reserveCapacity(ranges.count)
         var canLoadEveryRange = true
+        var contiguousSingleBlocks = true
+        var allSingleBlocks = true
         var allFullChunks = true
+        let firstLowerBound = ranges.first?.lowerBound ?? 0
         for range in ranges {
+            let entryIndex = entries.count
             guard range.lowerBound >= 0,
                   range.upperBound <= buffer.length,
                   range.lowerBound <= range.upperBound
@@ -4327,12 +4450,19 @@ public enum BLAKE3Metal {
                 )
             )
             canLoadEveryRange = canLoadEveryRange && canLoadWords(buffer: buffer, range: range)
+            let expectedSingleBlockLowerBound = firstLowerBound + entryIndex * BLAKE3.blockByteCount
+            contiguousSingleBlocks = contiguousSingleBlocks
+                && range.count == BLAKE3.blockByteCount
+                && range.lowerBound == expectedSingleBlockLowerBound
+            allSingleBlocks = allSingleBlocks && range.count == BLAKE3.blockByteCount
             allFullChunks = allFullChunks && range.count == BLAKE3.chunkByteCount
         }
 
         return OneChunkBatchDescriptor(
             entries: entries,
             canLoadWords: canLoadEveryRange,
+            contiguousSingleBlocks: contiguousSingleBlocks,
+            allSingleBlocks: allSingleBlocks,
             allFullChunks: allFullChunks
         )
     }
@@ -4370,8 +4500,42 @@ public enum BLAKE3Metal {
             entriesBuffer: entriesBuffer,
             parameterBuffer: parameterBuffer,
             canLoadWords: descriptor.canLoadWords,
+            contiguousSingleBlocks: descriptor.contiguousSingleBlocks,
+            allSingleBlocks: descriptor.allSingleBlocks,
             allFullChunks: descriptor.allFullChunks
         )
+    }
+
+    private static func oneChunkBatchDigestPipeline(
+        for plan: OneChunkBatchPlan,
+        pipelines: BLAKE3MetalPipelines
+    ) -> MTLComputePipelineState {
+        if plan.contiguousSingleBlocks {
+            return pipelines.batchOneContiguousBlockDigest
+        }
+        if plan.allSingleBlocks {
+            return pipelines.batchOneBlockDigest
+        }
+        if plan.allFullChunks {
+            return pipelines.batchOneFullChunkDigest
+        }
+        return pipelines.batchOneChunkDigest
+    }
+
+    private static func oneChunkBatchOutputChunkCVPipeline(
+        for plan: OneChunkBatchPlan,
+        pipelines: BLAKE3MetalPipelines
+    ) -> MTLComputePipelineState {
+        if plan.contiguousSingleBlocks {
+            return pipelines.batchOneContiguousBlockOutputChunkCVs
+        }
+        if plan.allSingleBlocks {
+            return pipelines.batchOneBlockOutputChunkCVs
+        }
+        if plan.allFullChunks {
+            return pipelines.batchOneFullChunkOutputChunkCVs
+        }
+        return pipelines.batchOneChunkOutputChunkCVs
     }
 
     private static func buildOneChunkBatchWritePipeline(
@@ -4409,6 +4573,124 @@ public enum BLAKE3Metal {
             plan: plan,
             outputBuffers: outputBuffers,
             parameterBuffers: parameterBuffers
+        )
+    }
+
+    private static func buildOneChunkBatchChainedPipeline(
+        plan: OneChunkBatchPlan,
+        outputBuffers: [MTLBuffer]
+    ) throws -> OneChunkBatchChainedPipeline {
+        guard !outputBuffers.isEmpty else {
+            throw BLAKE3Error.metalCommandFailed("BLAKE3 chained batch pipeline requires at least one output buffer.")
+        }
+        let requiredOutputByteCount = plan.outputByteCount
+        for outputBuffer in outputBuffers {
+            guard outputBuffer.device.registryID == plan.buffer.device.registryID else {
+                throw BLAKE3Error.metalCommandFailed("Output buffer belongs to a different Metal device.")
+            }
+            guard outputBuffer.length >= requiredOutputByteCount else {
+                throw BLAKE3Error.metalCommandFailed(
+                    "BLAKE3 batch output buffer must hold \(requiredOutputByteCount) bytes."
+                )
+            }
+        }
+
+        let outputChunkCount = max(
+            1,
+            (requiredOutputByteCount + BLAKE3.chunkByteCount - 1) / BLAKE3.chunkByteCount
+        )
+        let chunkCVByteCount = Context.roundedCapacity(
+            for: outputChunkCount * BLAKE3.digestByteCount
+        )
+        let scratchByteCount = Context.roundedCapacity(
+            for: ((outputChunkCount + 1) / 2) * BLAKE3.digestByteCount
+        )
+        let outputHashParameterSlotCount = 1 + Context.parentReductionStepCount(for: outputChunkCount)
+        let outputHashParameterByteCount = outputHashParameterSlotCount * Context.parameterSlotStride
+
+        let outputEntryBuffer: MTLBuffer?
+        if requiredOutputByteCount <= BLAKE3.chunkByteCount {
+            var outputEntry = BLAKE3MetalBatchEntry(
+                inputOffset: 0,
+                inputLength: UInt32(requiredOutputByteCount)
+            )
+            outputEntryBuffer = withUnsafeBytes(of: &outputEntry) { raw in
+                plan.buffer.device.makeBuffer(
+                    bytes: raw.baseAddress!,
+                    length: raw.count,
+                    options: .storageModeShared
+                )
+            }
+            guard outputEntryBuffer != nil else {
+                throw BLAKE3Error.metalCommandFailed("Unable to allocate BLAKE3 batch output digest entry buffer.")
+            }
+        } else {
+            outputEntryBuffer = nil
+        }
+
+        var outputCanLoadWords = [Bool]()
+        var batchParameterBuffers = [MTLBuffer]()
+        var outputHashParameterBuffers = [MTLBuffer]()
+        var chunkCVBuffers = [MTLBuffer]()
+        var scratchBuffers = [MTLBuffer]()
+        var digestBuffers = [MTLBuffer]()
+        outputCanLoadWords.reserveCapacity(outputBuffers.count)
+        batchParameterBuffers.reserveCapacity(outputBuffers.count)
+        outputHashParameterBuffers.reserveCapacity(outputBuffers.count)
+        chunkCVBuffers.reserveCapacity(outputBuffers.count)
+        scratchBuffers.reserveCapacity(outputBuffers.count)
+        digestBuffers.reserveCapacity(outputBuffers.count)
+
+        for outputBuffer in outputBuffers {
+            outputCanLoadWords.append(canLoadWords(buffer: outputBuffer, range: 0..<requiredOutputByteCount))
+            guard let batchParameterBuffer = plan.buffer.device.makeBuffer(
+                length: Context.parameterSlotStride,
+                options: .storageModeShared
+            ) else {
+                throw BLAKE3Error.metalCommandFailed("Unable to allocate BLAKE3 chained batch parameter buffer.")
+            }
+            guard let outputHashParameterBuffer = plan.buffer.device.makeBuffer(
+                length: outputHashParameterByteCount,
+                options: .storageModeShared
+            ) else {
+                throw BLAKE3Error.metalCommandFailed("Unable to allocate BLAKE3 chained output parameter buffer.")
+            }
+            guard let chunkCVBuffer = plan.buffer.device.makeBuffer(
+                length: chunkCVByteCount,
+                options: .storageModePrivate
+            ) else {
+                throw BLAKE3Error.metalCommandFailed("Unable to allocate BLAKE3 chained chunk CV buffer.")
+            }
+            guard let scratchBuffer = plan.buffer.device.makeBuffer(
+                length: scratchByteCount,
+                options: .storageModePrivate
+            ) else {
+                throw BLAKE3Error.metalCommandFailed("Unable to allocate BLAKE3 chained scratch buffer.")
+            }
+            guard let digestBuffer = plan.buffer.device.makeBuffer(
+                length: BLAKE3.digestByteCount,
+                options: .storageModeShared
+            ) else {
+                throw BLAKE3Error.metalCommandFailed("Unable to allocate BLAKE3 chained digest buffer.")
+            }
+            batchParameterBuffers.append(batchParameterBuffer)
+            outputHashParameterBuffers.append(outputHashParameterBuffer)
+            chunkCVBuffers.append(chunkCVBuffer)
+            scratchBuffers.append(scratchBuffer)
+            digestBuffers.append(digestBuffer)
+        }
+
+        return OneChunkBatchChainedPipeline(
+            plan: plan,
+            outputBuffers: outputBuffers,
+            outputChunkCount: outputChunkCount,
+            outputEntryBuffer: outputEntryBuffer,
+            outputCanLoadWords: outputCanLoadWords,
+            batchParameterBuffers: batchParameterBuffers,
+            outputHashParameterBuffers: outputHashParameterBuffers,
+            chunkCVBuffers: chunkCVBuffers,
+            scratchBuffers: scratchBuffers,
+            digestBuffers: digestBuffers
         )
     }
 
@@ -4468,9 +4750,7 @@ public enum BLAKE3Metal {
             throw BLAKE3Error.metalCommandFailed("Unable to create BLAKE3 batch command buffer.")
         }
 
-        let pipeline = plan.allFullChunks
-            ? pipelines.batchOneFullChunkDigest
-            : pipelines.batchOneChunkDigest
+        let pipeline = oneChunkBatchDigestPipeline(for: plan, pipelines: pipelines)
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(plan.buffer, offset: 0, index: 0)
         encoder.setBuffer(plan.entriesBuffer, offset: 0, index: 1)
@@ -4534,9 +4814,7 @@ public enum BLAKE3Metal {
             copyParameter(params, into: parameterBuffer, slot: 0)
         }
 
-        let batchPipeline = plan.allFullChunks
-            ? pipelines.batchOneFullChunkDigest
-            : pipelines.batchOneChunkDigest
+        let batchPipeline = oneChunkBatchDigestPipeline(for: plan, pipelines: pipelines)
         var commandBuffers = [MTLCommandBuffer]()
         commandBuffers.reserveCapacity(pipeline.outputBuffers.count)
 
@@ -4568,6 +4846,167 @@ public enum BLAKE3Metal {
         }
 
         return plan.digestCount * pipeline.outputBuffers.count
+    }
+
+    private static func encodeOneChunkBatchChainedCommands(
+        plan: OneChunkBatchPlan,
+        mode: HashMode,
+        pipelines: BLAKE3MetalPipelines,
+        outputBuffer: MTLBuffer,
+        requiredOutputByteCount: Int,
+        outputChunkCount: Int,
+        outputEntryBuffer: MTLBuffer?,
+        outputCanLoadWords: Bool,
+        cvBuffer: MTLBuffer,
+        scratchBuffer: MTLBuffer,
+        digestBuffer: MTLBuffer,
+        batchParameterBuffer: MTLBuffer,
+        outputHashParameterBuffer: MTLBuffer,
+        commandBuffer: MTLCommandBuffer
+    ) throws {
+        guard let batchEncoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw BLAKE3Error.metalCommandFailed("Unable to create BLAKE3 chained batch encoder.")
+        }
+
+        let batchParams = BLAKE3MetalBatchParams(
+            entryCount: UInt32(plan.digestCount),
+            canLoadWords: plan.canLoadWords ? 1 : 0,
+            key: mode.metalKey,
+            flags: mode.flags
+        )
+        copyParameter(batchParams, into: batchParameterBuffer, slot: 0)
+        let batchPipeline = oneChunkBatchDigestPipeline(for: plan, pipelines: pipelines)
+        batchEncoder.setComputePipelineState(batchPipeline)
+        batchEncoder.setBuffer(plan.buffer, offset: 0, index: 0)
+        batchEncoder.setBuffer(plan.entriesBuffer, offset: 0, index: 1)
+        batchEncoder.setBuffer(outputBuffer, offset: 0, index: 2)
+        batchEncoder.setBuffer(batchParameterBuffer, offset: 0, index: 3)
+        dispatchThreads(count: plan.digestCount, pipeline: batchPipeline, encoder: batchEncoder)
+        batchEncoder.endEncoding()
+
+        guard let outputHashEncoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw BLAKE3Error.metalCommandFailed("Unable to create BLAKE3 batch output digest encoder.")
+        }
+        if requiredOutputByteCount <= BLAKE3.chunkByteCount {
+            guard let outputEntryBuffer else {
+                outputHashEncoder.endEncoding()
+                throw BLAKE3Error.metalCommandFailed("BLAKE3 chained output entry buffer is unavailable.")
+            }
+            let outputParams = BLAKE3MetalBatchParams(
+                entryCount: 1,
+                canLoadWords: outputCanLoadWords ? 1 : 0,
+                key: HashMode.unkeyed.metalKey,
+                flags: HashMode.unkeyed.flags
+            )
+            copyParameter(outputParams, into: outputHashParameterBuffer, slot: 0)
+            let outputHashPipeline = pipelines.batchOneChunkDigest
+            outputHashEncoder.setComputePipelineState(outputHashPipeline)
+            outputHashEncoder.setBuffer(outputBuffer, offset: 0, index: 0)
+            outputHashEncoder.setBuffer(outputEntryBuffer, offset: 0, index: 1)
+            outputHashEncoder.setBuffer(digestBuffer, offset: 0, index: 2)
+            outputHashEncoder.setBuffer(outputHashParameterBuffer, offset: 0, index: 3)
+            dispatchThreads(count: 1, pipeline: outputHashPipeline, encoder: outputHashEncoder)
+            outputHashEncoder.endEncoding()
+        } else {
+            try encodeHashCommands(
+                buffer: outputBuffer,
+                range: 0..<requiredOutputByteCount,
+                chunkCount: outputChunkCount,
+                pipelines: pipelines,
+                mode: .unkeyed,
+                cvBuffer: cvBuffer,
+                scratchBuffer: scratchBuffer,
+                digestBuffer: digestBuffer,
+                parameterBuffer: outputHashParameterBuffer,
+                encoder: outputHashEncoder
+            )
+        }
+    }
+
+    private static func writeOneChunkBatchDigestsAndHashOutput(
+        pipeline: OneChunkBatchChainedPipeline,
+        mode: HashMode,
+        pipelines: BLAKE3MetalPipelines,
+        commandQueue: MTLCommandQueue
+    ) throws -> BLAKE3.Digest {
+        let plan = pipeline.plan
+        guard !pipeline.outputBuffers.isEmpty else {
+            throw BLAKE3Error.metalCommandFailed("BLAKE3 chained batch pipeline has no output buffers.")
+        }
+        let resourceCount = pipeline.outputBuffers.count
+        guard pipeline.outputCanLoadWords.count == resourceCount,
+              pipeline.batchParameterBuffers.count == resourceCount,
+              pipeline.outputHashParameterBuffers.count == resourceCount,
+              pipeline.chunkCVBuffers.count == resourceCount,
+              pipeline.scratchBuffers.count == resourceCount,
+              pipeline.digestBuffers.count == resourceCount
+        else {
+            throw BLAKE3Error.metalCommandFailed("BLAKE3 chained batch pipeline resource count mismatch.")
+        }
+        guard plan.digestCount > 0 else {
+            return BLAKE3.hashCPU([UInt8]())
+        }
+        let requiredOutputByteCount = plan.outputByteCount
+        for outputBuffer in pipeline.outputBuffers {
+            guard outputBuffer.device.registryID == plan.buffer.device.registryID else {
+                throw BLAKE3Error.metalCommandFailed("Output buffer belongs to a different Metal device.")
+            }
+            guard outputBuffer.length >= requiredOutputByteCount else {
+                throw BLAKE3Error.metalCommandFailed(
+                    "BLAKE3 batch output buffer must hold \(requiredOutputByteCount) bytes."
+                )
+            }
+        }
+
+        pipeline.lock.lock()
+        defer {
+            pipeline.lock.unlock()
+        }
+
+        var commandBuffers = [MTLCommandBuffer]()
+        commandBuffers.reserveCapacity(resourceCount)
+        for index in pipeline.outputBuffers.indices {
+            guard let commandBuffer = commandQueue.makeCommandBufferWithUnretainedReferences() else {
+                throw BLAKE3Error.metalCommandFailed("Unable to create BLAKE3 chained batch command buffer.")
+            }
+            try encodeOneChunkBatchChainedCommands(
+                plan: plan,
+                mode: mode,
+                pipelines: pipelines,
+                outputBuffer: pipeline.outputBuffers[index],
+                requiredOutputByteCount: requiredOutputByteCount,
+                outputChunkCount: pipeline.outputChunkCount,
+                outputEntryBuffer: pipeline.outputEntryBuffer,
+                outputCanLoadWords: pipeline.outputCanLoadWords[index],
+                cvBuffer: pipeline.chunkCVBuffers[index],
+                scratchBuffer: pipeline.scratchBuffers[index],
+                digestBuffer: pipeline.digestBuffers[index],
+                batchParameterBuffer: pipeline.batchParameterBuffers[index],
+                outputHashParameterBuffer: pipeline.outputHashParameterBuffers[index],
+                commandBuffer: commandBuffer
+            )
+            commandBuffers.append(commandBuffer)
+        }
+
+        for commandBuffer in commandBuffers {
+            commandBuffer.commit()
+        }
+        for commandBuffer in commandBuffers {
+            commandBuffer.waitUntilCompleted()
+            if let error = commandBuffer.error {
+                throw BLAKE3Error.metalCommandFailed(error.localizedDescription)
+            }
+        }
+
+        guard let digestBuffer = pipeline.digestBuffers.last else {
+            throw BLAKE3Error.metalCommandFailed("BLAKE3 chained batch digest buffer is unavailable.")
+        }
+        return BLAKE3.Digest(
+            UnsafeRawBufferPointer(
+                start: digestBuffer.contents(),
+                count: BLAKE3.digestByteCount
+            )
+        )
     }
 
     private static func writeOneChunkBatchDigestsAndHashOutput(
@@ -4636,9 +5075,7 @@ public enum BLAKE3Metal {
                 flags: mode.flags
             )
             copyParameter(batchParams, into: batchParameterBuffer, slot: 0)
-            let batchPipeline = plan.allFullChunks
-                ? pipelines.batchOneFullChunkDigest
-                : pipelines.batchOneChunkDigest
+            let batchPipeline = oneChunkBatchDigestPipeline(for: plan, pipelines: pipelines)
             batchEncoder.setComputePipelineState(batchPipeline)
             batchEncoder.setBuffer(plan.buffer, offset: 0, index: 0)
             batchEncoder.setBuffer(plan.entriesBuffer, offset: 0, index: 1)
@@ -4781,7 +5218,7 @@ public enum BLAKE3Metal {
                 flags: mode.flags
             )
             copyParameter(batchParams, into: parameterBuffer, slot: 0)
-            let pipeline = pipelines.batchOneChunkOutputChunkCVs
+            let pipeline = oneChunkBatchOutputChunkCVPipeline(for: plan, pipelines: pipelines)
             encoder.setComputePipelineState(pipeline)
             encoder.setBuffer(plan.buffer, offset: 0, index: 0)
             encoder.setBuffer(plan.entriesBuffer, offset: 0, index: 1)

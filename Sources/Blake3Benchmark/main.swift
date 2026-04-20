@@ -862,6 +862,14 @@ private func batchOneChunkMetalPlanWritePrivateChainedGPUForBenchmark(
 }
 
 @inline(never)
+private func batchOneChunkMetalPlanWritePrivateChainedPipelinedGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    pipeline: BLAKE3Metal.OneChunkBatchChainedPipeline
+) -> BLAKE3.Digest {
+    try! context.writeOneChunkBatchDigestsAndHashOutput(pipeline: pipeline)
+}
+
+@inline(never)
 private func batchOneChunkMetalPlanFusedAggregateGPUForBenchmark(
     context: BLAKE3Metal.Context,
     plan: BLAKE3Metal.OneChunkBatchPlan
@@ -3340,6 +3348,16 @@ for size in requestedSizes {
         } else {
             nil
         }
+        let batchOneChunkPrivateChainedPipeline: BLAKE3Metal.OneChunkBatchChainedPipeline? =
+            if let batchOneChunkPlan,
+               let batchOneChunkPrivatePipelinedOutputBuffers {
+                try? metalContext.makeOneChunkBatchChainedPipeline(
+                    plan: batchOneChunkPlan,
+                    outputBuffers: batchOneChunkPrivatePipelinedOutputBuffers
+                )
+            } else {
+                nil
+            }
         let xofOutputBuffer = requestedMetalTimingModes.contains(.resident)
             && (
                 requestedOperationTimingModes.contains(.xof)
@@ -3997,6 +4015,26 @@ for size in requestedSizes {
                         context: metalContext,
                         plan: batchOneChunkPlan,
                         outputBuffer: batchOneChunkPrivateOutputBuffer
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedBatchOneChunkDigest,
+           let batchOneChunkPrivateChainedPipeline,
+           requestedOperationTimingModes.contains(.batchOneChunk) {
+            operationResults.append(
+                runPipelinedBenchmark(
+                    backend: "metal",
+                    mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-plan-write-private-chained-pipeline-\(requestedBatchPipelineWidth)-gpu",
+                    input: input,
+                    iterations: iterations,
+                    operationsPerSample: requestedBatchPipelineWidth,
+                    expectedDigest: expectedBatchOneChunkDigest
+                ) { _ in
+                    batchOneChunkMetalPlanWritePrivateChainedPipelinedGPUForBenchmark(
+                        context: metalContext,
+                        pipeline: batchOneChunkPrivateChainedPipeline
                     )
                 }
             )

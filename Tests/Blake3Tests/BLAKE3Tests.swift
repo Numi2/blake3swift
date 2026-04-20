@@ -869,6 +869,11 @@ final class BLAKE3Tests: XCTestCase {
         XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_chunk_tile512_cvs"))
         XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_root_digest"))
         XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_root_xof"))
+        XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_batch_contiguous_block_digest"))
+        XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_batch_contiguous_block_output_chunk_cvs"))
+        XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_batch_one_block_digest"))
+        XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_batch_one_block_output_chunk_cvs"))
+        XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_batch_one_full_chunk_output_chunk_cvs"))
     }
 
     func testMetalContextRecordsLibrarySource() throws {
@@ -1517,6 +1522,18 @@ final class BLAKE3Tests: XCTestCase {
             ).first,
             aggregateExpected
         )
+        let chainedPipeline = try context.makeOneChunkBatchChainedPipeline(
+            plan: plan,
+            outputBuffers: privatePipelineOutputBuffers
+        )
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigestsAndHashOutput(pipeline: chainedPipeline),
+            aggregateExpected
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.writeOneChunkBatchDigestsAndHashOutput(pipeline: chainedPipeline),
+            aggregateExpected
+        )
         let manyRanges = Array(repeating: ranges, count: 4).flatMap { $0 }
         let manyExpected = Array(repeating: expected, count: 4).flatMap { $0 }
         let manyAggregateExpected = BLAKE3.hashCPU(manyExpected.flatMap(\.bytes))
@@ -1544,6 +1561,85 @@ final class BLAKE3Tests: XCTestCase {
             try BLAKE3Metal.hashOneChunkBatchDigestBytes(buffer: buffer, ranges: manyRanges),
             manyAggregateExpected
         )
+
+        let blockInput = deterministicInput(byteCount: BLAKE3.blockByteCount * 40)
+        let blockRanges = (0..<40).map { index in
+            let lowerBound = index * BLAKE3.blockByteCount
+            return lowerBound..<(lowerBound + BLAKE3.blockByteCount)
+        }
+        let blockBuffer = try XCTUnwrap(blockInput.withUnsafeBytes { raw in
+            device.makeBuffer(bytes: raw.baseAddress!, length: raw.count, options: .storageModeShared)
+        })
+        let blockExpected = blockRanges.map { range in
+            blockInput.withUnsafeBytes { raw in
+                BLAKE3.hash(
+                    UnsafeRawBufferPointer(
+                        start: raw.baseAddress!.advanced(by: range.lowerBound),
+                        count: range.count
+                    )
+                )
+            }
+        }
+        XCTAssertEqual(
+            try context.hashOneChunkBatch(buffer: blockBuffer, ranges: blockRanges),
+            blockExpected
+        )
+        let blockPlan = try context.makeOneChunkBatchPlan(buffer: blockBuffer, ranges: blockRanges)
+        XCTAssertEqual(try context.hashOneChunkBatch(plan: blockPlan), blockExpected)
+        let blockOutputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: blockPlan.outputByteCount,
+                options: .storageModeShared
+            )
+        )
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigests(plan: blockPlan, into: blockOutputBuffer),
+            blockRanges.count
+        )
+        XCTAssertEqual(readDigests(blockOutputBuffer, count: blockRanges.count), blockExpected)
+        let blockAggregateExpected = BLAKE3.hashCPU(blockExpected.flatMap(\.bytes))
+        let blockPrivateOutputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: blockPlan.outputByteCount,
+                options: .storageModePrivate
+            )
+        )
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigestsAndHashOutput(
+                plan: blockPlan,
+                into: blockPrivateOutputBuffer
+            ),
+            blockAggregateExpected
+        )
+        XCTAssertEqual(
+            try context.hashOneChunkBatchDigestBytes(plan: blockPlan),
+            blockAggregateExpected
+        )
+        let blockKey = deterministicInput(byteCount: BLAKE3.keyByteCount)
+        let blockExpectedKeyed = blockRanges.map { range in
+            blockInput.withUnsafeBytes { raw in
+                try! BLAKE3.keyedHash(
+                    key: blockKey,
+                    input: UnsafeRawBufferPointer(
+                        start: raw.baseAddress!.advanced(by: range.lowerBound),
+                        count: range.count
+                    )
+                )
+            }
+        }
+        XCTAssertEqual(
+            try context.keyedHashOneChunkBatch(key: blockKey, plan: blockPlan),
+            blockExpectedKeyed
+        )
+        XCTAssertEqual(
+            try context.writeKeyedOneChunkBatchDigests(
+                key: blockKey,
+                plan: blockPlan,
+                into: blockOutputBuffer
+            ),
+            blockRanges.count
+        )
+        XCTAssertEqual(readDigests(blockOutputBuffer, count: blockRanges.count), blockExpectedKeyed)
 
         let fullChunkInput = deterministicInput(byteCount: BLAKE3.chunkByteCount * 4)
         let fullChunkRanges = (0..<4).map { index in
