@@ -782,6 +782,29 @@ private func batchOneChunkMetalWritePrivateGPUForBenchmark(
 }
 
 @inline(never)
+private func batchOneChunkMetalWritePrivateChainedGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    ranges: [Range<Int>],
+    outputBuffer: MTLBuffer
+) -> BLAKE3.Digest {
+    try! context.writeOneChunkBatchDigestsAndHashOutput(
+        buffer: buffer,
+        ranges: ranges,
+        into: outputBuffer
+    )
+}
+
+@inline(never)
+private func batchOneChunkMetalFusedAggregateGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    ranges: [Range<Int>]
+) -> BLAKE3.Digest {
+    try! context.hashOneChunkBatchDigestBytes(buffer: buffer, ranges: ranges)
+}
+
+@inline(never)
 private func keyedHashMetalGPUForBenchmark(
     context: BLAKE3Metal.Context,
     buffer: MTLBuffer,
@@ -3640,6 +3663,46 @@ for size in requestedSizes {
                         buffer: metalBuffer,
                         ranges: batchOneChunkRanges,
                         outputBuffer: batchOneChunkPrivateOutputBuffer
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedBatchOneChunkDigest,
+           let batchOneChunkPrivateOutputBuffer,
+           requestedOperationTimingModes.contains(.batchOneChunk) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-write-private-chained-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedBatchOneChunkDigest
+                ) { _ in
+                    batchOneChunkMetalWritePrivateChainedGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        ranges: batchOneChunkRanges,
+                        outputBuffer: batchOneChunkPrivateOutputBuffer
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedBatchOneChunkDigest,
+           requestedOperationTimingModes.contains(.batchOneChunk) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-fused-aggregate-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedBatchOneChunkDigest
+                ) { _ in
+                    batchOneChunkMetalFusedAggregateGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        ranges: batchOneChunkRanges
                     )
                 }
             )

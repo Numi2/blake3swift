@@ -417,7 +417,9 @@ swift run -c release blake3-bench \
 
 The benchmark emits the array-returning row, a `resident-write-gpu` row that writes digests into a reused
 shared `MTLBuffer`, and a `resident-write-private-gpu` row that writes digest bytes into private GPU storage
-and reduces them with Metal.
+and reduces them with Metal. The `resident-write-private-chained-gpu` row writes digest bytes into private GPU
+storage and reduces them in the same command buffer. The `resident-fused-aggregate-gpu` row hashes the
+concatenated digest bytes without materializing that intermediate output.
 
 By default, `blake3-bench` also includes a `cryptokit sha256` row as a familiar Apple platform baseline. CryptoKit does not provide BLAKE3, so this is a cross-algorithm comparison against Apple's built-in SHA-256 implementation, not a BLAKE3 parity row. CryptoKit rows are emitted after BLAKE3 CPU/Metal rows to avoid perturbing Metal timings. Use `--cryptokit-modes none` when tuning only BLAKE3 backends.
 

@@ -1411,11 +1411,70 @@ final class BLAKE3Tests: XCTestCase {
             ).first,
             aggregateExpected
         )
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigestsAndHashOutput(
+                buffer: buffer,
+                ranges: ranges,
+                into: privateOutputBuffer
+            ),
+            aggregateExpected
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.writeOneChunkBatchDigestsAndHashOutput(
+                buffer: buffer,
+                ranges: ranges,
+                into: privateOutputBuffer
+            ),
+            aggregateExpected
+        )
+        XCTAssertEqual(
+            try context.hashOneChunkBatchDigestBytes(buffer: buffer, ranges: ranges),
+            aggregateExpected
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.hashOneChunkBatchDigestBytes(buffer: buffer, ranges: ranges),
+            aggregateExpected
+        )
+        let manyRanges = Array(repeating: ranges, count: 4).flatMap { $0 }
+        let manyExpected = Array(repeating: expected, count: 4).flatMap { $0 }
+        let manyAggregateExpected = BLAKE3.hashCPU(manyExpected.flatMap(\.bytes))
+        let manyOutputByteCount = manyRanges.count * BLAKE3.digestByteCount
+        XCTAssertGreaterThan(manyOutputByteCount, BLAKE3.chunkByteCount)
+        let manyPrivateOutputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: manyOutputByteCount,
+                options: .storageModePrivate
+            )
+        )
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigestsAndHashOutput(
+                buffer: buffer,
+                ranges: manyRanges,
+                into: manyPrivateOutputBuffer
+            ),
+            manyAggregateExpected
+        )
+        XCTAssertEqual(
+            try context.hashOneChunkBatchDigestBytes(buffer: buffer, ranges: manyRanges),
+            manyAggregateExpected
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.hashOneChunkBatchDigestBytes(buffer: buffer, ranges: manyRanges),
+            manyAggregateExpected
+        )
 
         let emptyOutputBuffer = try XCTUnwrap(device.makeBuffer(length: 1, options: .storageModeShared))
         XCTAssertEqual(
             try context.writeOneChunkBatchDigests(buffer: buffer, ranges: [], into: emptyOutputBuffer),
             0
+        )
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigestsAndHashOutput(buffer: buffer, ranges: [], into: emptyOutputBuffer),
+            BLAKE3.hashCPU([UInt8]())
+        )
+        XCTAssertEqual(
+            try context.hashOneChunkBatchDigestBytes(buffer: buffer, ranges: []),
+            BLAKE3.hashCPU([UInt8]())
         )
 
         let key = deterministicInput(byteCount: BLAKE3.keyByteCount)
@@ -1490,6 +1549,32 @@ final class BLAKE3Tests: XCTestCase {
                 buffer: privateKeyedOutputBuffer,
                 ranges: [0..<(ranges.count * BLAKE3.digestByteCount)]
             ).first,
+            aggregateExpectedKeyed
+        )
+        XCTAssertEqual(
+            try context.writeKeyedOneChunkBatchDigestsAndHashOutput(
+                key: key,
+                buffer: buffer,
+                ranges: ranges,
+                into: privateKeyedOutputBuffer
+            ),
+            aggregateExpectedKeyed
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.writeKeyedOneChunkBatchDigestsAndHashOutput(
+                key: key,
+                buffer: buffer,
+                ranges: ranges,
+                into: privateKeyedOutputBuffer
+            ),
+            aggregateExpectedKeyed
+        )
+        XCTAssertEqual(
+            try context.hashKeyedOneChunkBatchDigestBytes(key: key, buffer: buffer, ranges: ranges),
+            aggregateExpectedKeyed
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.hashKeyedOneChunkBatchDigestBytes(key: key, buffer: buffer, ranges: ranges),
             aggregateExpectedKeyed
         )
 

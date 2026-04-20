@@ -96,6 +96,7 @@ struct BLAKE3MetalPipelines {
     let root4Digest: MTLComputePipelineState
     let rootXOF: MTLComputePipelineState
     let batchOneChunkDigest: MTLComputePipelineState
+    let batchOneChunkOutputChunkCVs: MTLComputePipelineState
 }
 
 final class BLAKE3MetalPipelineCache: @unchecked Sendable {
@@ -148,7 +149,10 @@ final class BLAKE3MetalPipelineCache: @unchecked Sendable {
               let root3Function = library.makeFunction(name: "blake3_root3_digest"),
               let root4Function = library.makeFunction(name: "blake3_root4_digest"),
               let rootXOFFunction = library.makeFunction(name: "blake3_root_xof"),
-              let batchOneChunkDigestFunction = library.makeFunction(name: "blake3_batch_one_chunk_digest")
+              let batchOneChunkDigestFunction = library.makeFunction(name: "blake3_batch_one_chunk_digest"),
+              let batchOneChunkOutputChunkCVsFunction = library.makeFunction(
+                name: "blake3_batch_one_chunk_output_chunk_cvs"
+              )
         else {
             throw BLAKE3Error.metalCommandFailed("Unable to load BLAKE3 Metal kernels.")
         }
@@ -174,7 +178,10 @@ final class BLAKE3MetalPipelineCache: @unchecked Sendable {
             root3Digest: try device.makeComputePipelineState(function: root3Function),
             root4Digest: try device.makeComputePipelineState(function: root4Function),
             rootXOF: try device.makeComputePipelineState(function: rootXOFFunction),
-            batchOneChunkDigest: try device.makeComputePipelineState(function: batchOneChunkDigestFunction)
+            batchOneChunkDigest: try device.makeComputePipelineState(function: batchOneChunkDigestFunction),
+            batchOneChunkOutputChunkCVs: try device.makeComputePipelineState(
+                function: batchOneChunkOutputChunkCVsFunction
+            )
         )
 
         lock.lock()
@@ -614,16 +621,10 @@ enum BLAKE3MetalKernelSource {
         }
     }
 
-    kernel void blake3_batch_one_chunk_digest(device const uchar *input [[buffer(0)]],
-                                              device const BLAKE3BatchEntry *entries [[buffer(1)]],
-                                              device uchar *digests [[buffer(2)]],
-                                              constant BLAKE3BatchParams &params [[buffer(3)]],
-                                              uint gid [[thread_position_in_grid]]) {
-        if (gid >= params.entryCount) {
-            return;
-        }
-
-        BLAKE3BatchEntry entry = entries[gid];
+    static inline void batch_one_chunk_digest_words(device const uchar *input,
+                                                    BLAKE3BatchEntry entry,
+                                                    constant BLAKE3BatchParams &params,
+                                                    thread uint digestWords[8]) {
         uint chunkLength = entry.inputLength;
         device const uchar *chunk = input + entry.inputOffset;
         device const uint *chunkWords32 = reinterpret_cast<device const uint *>(chunk);
@@ -679,9 +680,85 @@ enum BLAKE3MetalKernelSource {
         uint outputWords[16];
         compress_xof(cv, blockWords, lastBlockLength, 0UL, outputFlags, outputWords);
 
+        for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+            digestWords[wordIndex] = outputWords[wordIndex];
+        }
+    }
+
+    kernel void blake3_batch_one_chunk_digest(device const uchar *input [[buffer(0)]],
+                                              device const BLAKE3BatchEntry *entries [[buffer(1)]],
+                                              device uchar *digests [[buffer(2)]],
+                                              constant BLAKE3BatchParams &params [[buffer(3)]],
+                                              uint gid [[thread_position_in_grid]]) {
+        if (gid >= params.entryCount) {
+            return;
+        }
+
+        uint outputWords[8];
+        batch_one_chunk_digest_words(input, entries[gid], params, outputWords);
+
         device uint *digestWords = reinterpret_cast<device uint *>(digests + ulong(gid) * 32UL);
         for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
             store32_aligned(digestWords, wordIndex, outputWords[wordIndex]);
+        }
+    }
+
+    kernel void blake3_batch_one_chunk_output_chunk_cvs(device const uchar *input [[buffer(0)]],
+                                                        device const BLAKE3BatchEntry *entries [[buffer(1)]],
+                                                        device uchar *chunkCVs [[buffer(2)]],
+                                                        constant BLAKE3BatchParams &params [[buffer(3)]],
+                                                        uint gid [[thread_position_in_grid]]) {
+        uint firstEntry = gid * 32u;
+        if (firstEntry >= params.entryCount) {
+            return;
+        }
+
+        uint remaining = params.entryCount - firstEntry;
+        uint digestCount = remaining > 32u ? 32u : remaining;
+        uint blockCount = (digestCount + 1u) >> 1u;
+
+        uint outputKey[8];
+        for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+            outputKey[wordIndex] = IV[wordIndex];
+        }
+        uint cv[8];
+        init_cv(cv, outputKey);
+
+        for (uint blockIndex = 0u; blockIndex < blockCount; blockIndex++) {
+            uint firstDigestIndex = firstEntry + blockIndex * 2u;
+            uint blockWords[16];
+            uint digestWords[8];
+            batch_one_chunk_digest_words(input, entries[firstDigestIndex], params, digestWords);
+            for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                blockWords[wordIndex] = digestWords[wordIndex];
+            }
+
+            bool hasSecondDigest = firstDigestIndex + 1u < params.entryCount
+                && blockIndex * 2u + 1u < digestCount;
+            if (hasSecondDigest) {
+                batch_one_chunk_digest_words(input, entries[firstDigestIndex + 1u], params, digestWords);
+                for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                    blockWords[wordIndex + 8u] = digestWords[wordIndex];
+                }
+            } else {
+                for (uint wordIndex = 8u; wordIndex < 16u; wordIndex++) {
+                    blockWords[wordIndex] = 0u;
+                }
+            }
+
+            uint flags = 0u;
+            if (blockIndex == 0u) {
+                flags |= 1u;
+            }
+            if (blockIndex + 1u == blockCount) {
+                flags |= 2u;
+            }
+            compress_in_place(cv, blockWords, hasSecondDigest ? 64u : 32u, ulong(gid), flags);
+        }
+
+        device uint *out = reinterpret_cast<device uint *>(chunkCVs + ulong(gid) * 32UL);
+        for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+            store32_aligned(out, wordIndex, cv[wordIndex]);
         }
     }
 
