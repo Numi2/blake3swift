@@ -97,6 +97,26 @@ private enum CryptoKitTimingMode: String {
 }
 #endif
 
+private enum OperationTimingMode: String {
+    case keyed
+    case xof
+    case keyedXOF = "keyed-xof"
+    case deriveKey = "derive-key"
+
+    var description: String {
+        switch self {
+        case .keyed:
+            return "timed BLAKE3 keyed hash over existing Swift bytes, plus matching Metal variants for requested Metal ownership modes"
+        case .xof:
+            return "timed BLAKE3 XOF output over existing Swift bytes, with output length controlled by --xof-output-bytes"
+        case .keyedXOF:
+            return "timed BLAKE3 keyed XOF output over existing Swift bytes, with output length controlled by --xof-output-bytes"
+        case .deriveKey:
+            return "timed BLAKE3 derive-key material hashing over existing Swift bytes, with output length controlled by --xof-output-bytes"
+        }
+    }
+}
+
 private let defaultSizes = [
     1,
     1 * 1024,
@@ -280,6 +300,46 @@ private func cryptoKitTimingModes() -> [CryptoKitTimingMode] {
 }
 #endif
 
+private func operationTimingModes() -> [OperationTimingMode] {
+    guard let rawValue = argumentValue(named: "--operation-modes") else {
+        return []
+    }
+
+    let tokens = rawValue
+        .split(separator: ",")
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+
+    if tokens.contains("none") || tokens.contains("off") || tokens.contains("disabled") {
+        return []
+    }
+
+    let modes = tokens.compactMap { token -> OperationTimingMode? in
+        switch token {
+        case "keyed", "keyed-hash", "keyed-digest":
+            return .keyed
+        case "xof", "extendable", "extendable-output":
+            return .xof
+        case "keyed-xof", "xof-keyed", "keyed-extendable", "keyed-extendable-output":
+            return .keyedXOF
+        case "derive-key", "derive", "kdf", "key-derivation", "derived-key":
+            return .deriveKey
+        default:
+            return nil
+        }
+    }
+
+    return modes
+}
+
+private func xofOutputByteCount() -> Int {
+    guard let rawValue = argumentValue(named: "--xof-output-bytes"),
+          let parsed = parseByteCount(Substring(rawValue))
+    else {
+        return 1_024
+    }
+    return max(BLAKE3.digestByteCount, parsed)
+}
+
 #if canImport(Metal)
 private func metalTimingModes() -> [MetalTimingMode] {
     guard let rawValue = argumentValue(named: "--metal-modes") else {
@@ -425,6 +485,11 @@ private func fillDeterministically(_ bytes: inout [UInt8]) {
     }
 }
 
+private let benchmarkKey: [UInt8] = {
+    (0..<BLAKE3.keyByteCount).map { UInt8(truncatingIfNeeded: ($0 &* 7) &+ 3) }
+}()
+private let benchmarkDeriveKeyContext = "blake3swift benchmark derive-key context 2026-04-20"
+
 @inline(never)
 private func hashScalarForBenchmark(_ input: UnsafeRawBufferPointer) -> BLAKE3.Digest {
     BLAKE3.hashScalar(input)
@@ -448,6 +513,52 @@ private func hashParallelForBenchmark(_ input: UnsafeRawBufferPointer, maxWorker
 @inline(never)
 private func hashOfficialCForBenchmark(_ input: UnsafeRawBufferPointer) -> BLAKE3.Digest {
     OfficialCBLAKE3.hash(input)
+}
+
+@inline(never)
+private func keyedHashCPUForBenchmark(_ input: UnsafeRawBufferPointer) -> BLAKE3.Digest {
+    try! BLAKE3.keyedHash(key: benchmarkKey, input: input)
+}
+
+@inline(never)
+private func xofCPUForBenchmark(
+    _ input: UnsafeRawBufferPointer,
+    outputByteCount: Int
+) -> BLAKE3.Digest {
+    var hasher = BLAKE3.Hasher()
+    hasher.updateParallel(input)
+    var output = [UInt8](repeating: 0, count: outputByteCount)
+    output.withUnsafeMutableBytes { rawOutput in
+        hasher.finalize(into: rawOutput)
+    }
+    return BLAKE3.hashCPU(output)
+}
+
+@inline(never)
+private func keyedXOFCPUForBenchmark(
+    _ input: UnsafeRawBufferPointer,
+    outputByteCount: Int
+) -> BLAKE3.Digest {
+    var hasher = try! BLAKE3.Hasher(key: benchmarkKey)
+    hasher.updateParallel(input)
+    var output = [UInt8](repeating: 0, count: outputByteCount)
+    output.withUnsafeMutableBytes { rawOutput in
+        hasher.finalize(into: rawOutput)
+    }
+    return BLAKE3.hashCPU(output)
+}
+
+@inline(never)
+private func deriveKeyCPUForBenchmark(
+    _ input: UnsafeRawBufferPointer,
+    outputByteCount: Int
+) -> BLAKE3.Digest {
+    let output = try! BLAKE3.deriveKeyParallel(
+        context: benchmarkDeriveKeyContext,
+        material: input,
+        outputByteCount: outputByteCount
+    )
+    return BLAKE3.hashCPU(output)
 }
 
 #if canImport(CryptoKit)
@@ -475,6 +586,117 @@ private func hashMetalGPUForBenchmark(
     length: Int
 ) -> BLAKE3.Digest {
     try! context.hash(buffer: buffer, length: length, policy: .gpu)
+}
+
+@inline(never)
+private func keyedHashMetalGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    length: Int
+) -> BLAKE3.Digest {
+    try! context.keyedHash(key: benchmarkKey, buffer: buffer, length: length, policy: .gpu)
+}
+
+@inline(never)
+private func keyedHashMetalWrappedGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    input: [UInt8]
+) -> BLAKE3.Digest {
+    try! context.keyedHash(key: benchmarkKey, input: input, policy: .gpu)
+}
+
+@inline(never)
+private func xofMetalGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    length: Int,
+    outputByteCount: Int
+) -> BLAKE3.Digest {
+    let output = try! context.hash(
+        buffer: buffer,
+        length: length,
+        outputByteCount: outputByteCount,
+        policy: .gpu
+    )
+    return BLAKE3.hashCPU(output)
+}
+
+@inline(never)
+private func xofMetalWrappedGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    input: [UInt8],
+    outputByteCount: Int
+) -> BLAKE3.Digest {
+    let output = try! context.hash(
+        input: input,
+        outputByteCount: outputByteCount,
+        policy: .gpu
+    )
+    return BLAKE3.hashCPU(output)
+}
+
+@inline(never)
+private func keyedXOFMetalGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    length: Int,
+    outputByteCount: Int
+) -> BLAKE3.Digest {
+    let output = try! context.keyedHash(
+        key: benchmarkKey,
+        buffer: buffer,
+        length: length,
+        outputByteCount: outputByteCount,
+        policy: .gpu
+    )
+    return BLAKE3.hashCPU(output)
+}
+
+@inline(never)
+private func keyedXOFMetalWrappedGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    input: [UInt8],
+    outputByteCount: Int
+) -> BLAKE3.Digest {
+    let output = try! context.keyedHash(
+        key: benchmarkKey,
+        input: input,
+        outputByteCount: outputByteCount,
+        policy: .gpu
+    )
+    return BLAKE3.hashCPU(output)
+}
+
+@inline(never)
+private func deriveKeyMetalGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    length: Int,
+    outputByteCount: Int
+) -> BLAKE3.Digest {
+    let output = try! context.deriveKey(
+        context: benchmarkDeriveKeyContext,
+        buffer: buffer,
+        length: length,
+        outputByteCount: outputByteCount,
+        policy: .gpu
+    )
+    return BLAKE3.hashCPU(output)
+}
+
+@inline(never)
+private func deriveKeyMetalWrappedGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    input: [UInt8],
+    outputByteCount: Int
+) -> BLAKE3.Digest {
+    let output = try! context.deriveKey(
+        context: benchmarkDeriveKeyContext,
+        material: input,
+        outputByteCount: outputByteCount,
+        policy: .gpu
+    )
+    return BLAKE3.hashCPU(output)
 }
 
 private func makeMetalBuffer(device: MTLDevice, input: [UInt8]) -> MTLBuffer? {
@@ -1949,6 +2171,8 @@ private let requestedSizes = benchmarkSizes()
 private let requestedIterationsOverride = iterationsOverride()
 private let requestedJSONOutputPath = jsonOutputPath()
 private let requestedFileTimingModes = fileTimingModes()
+private let requestedOperationTimingModes = operationTimingModes()
+private let requestedXOFOutputByteCount = xofOutputByteCount()
 #if canImport(CryptoKit)
 private let requestedCryptoKitTimingModes = cryptoKitTimingModes()
 #endif
@@ -2019,6 +2243,17 @@ if let metalDevice {
 }
 #endif
 print("sizes=\(requestedSizes.map(formatBytes).joined(separator: ", "))")
+if !requestedOperationTimingModes.isEmpty {
+    print("operationModes=\(requestedOperationTimingModes.map(\.rawValue).joined(separator: ","))")
+    if requestedOperationTimingModes.contains(.xof)
+        || requestedOperationTimingModes.contains(.keyedXOF)
+        || requestedOperationTimingModes.contains(.deriveKey) {
+        print("xofOutputByteCount=\(requestedXOFOutputByteCount)")
+    }
+    for mode in requestedOperationTimingModes {
+        print("operation-\(mode.rawValue) includes: \(mode.description)")
+    }
+}
 #if canImport(CryptoKit)
 let requestedCryptoKitTimingModeLabel = requestedCryptoKitTimingModes.isEmpty
     ? "none"
@@ -2107,6 +2342,89 @@ for size in requestedSizes {
         iterations: iterations
     ) { rawInput in
         BLAKE3.hash(rawInput)
+    }
+
+    var operationResults = [BenchmarkResult]()
+    let expectedKeyedDigest: BLAKE3.Digest? = if requestedOperationTimingModes.contains(.keyed)
+        || requestedOperationTimingModes.contains(.keyedXOF) {
+        input.withUnsafeBytes { rawInput in
+            keyedHashCPUForBenchmark(rawInput)
+        }
+    } else {
+        nil
+    }
+    let expectedXOFDigest: BLAKE3.Digest? = if requestedOperationTimingModes.contains(.xof) {
+        input.withUnsafeBytes { rawInput in
+            xofCPUForBenchmark(rawInput, outputByteCount: requestedXOFOutputByteCount)
+        }
+    } else {
+        nil
+    }
+    let expectedKeyedXOFDigest: BLAKE3.Digest? = if requestedOperationTimingModes.contains(.keyedXOF) {
+        input.withUnsafeBytes { rawInput in
+            keyedXOFCPUForBenchmark(rawInput, outputByteCount: requestedXOFOutputByteCount)
+        }
+    } else {
+        nil
+    }
+    let expectedDeriveKeyDigest: BLAKE3.Digest? = if requestedOperationTimingModes.contains(.deriveKey) {
+        input.withUnsafeBytes { rawInput in
+            deriveKeyCPUForBenchmark(rawInput, outputByteCount: requestedXOFOutputByteCount)
+        }
+    } else {
+        nil
+    }
+
+    if let expectedKeyedDigest, requestedOperationTimingModes.contains(.keyed) {
+        operationResults.append(
+            runRawBenchmark(
+                backend: "cpu",
+                mode: "keyed",
+                input: input,
+                iterations: iterations,
+                expectedDigest: expectedKeyedDigest,
+                operation: keyedHashCPUForBenchmark
+            )
+        )
+    }
+    if let expectedXOFDigest, requestedOperationTimingModes.contains(.xof) {
+        operationResults.append(
+            runRawBenchmark(
+                backend: "cpu",
+                mode: "xof-\(requestedXOFOutputByteCount)",
+                input: input,
+                iterations: iterations,
+                expectedDigest: expectedXOFDigest
+            ) { rawInput in
+                xofCPUForBenchmark(rawInput, outputByteCount: requestedXOFOutputByteCount)
+            }
+        )
+    }
+    if let expectedKeyedXOFDigest, requestedOperationTimingModes.contains(.keyedXOF) {
+        operationResults.append(
+            runRawBenchmark(
+                backend: "cpu",
+                mode: "keyed-xof-\(requestedXOFOutputByteCount)",
+                input: input,
+                iterations: iterations,
+                expectedDigest: expectedKeyedXOFDigest
+            ) { rawInput in
+                keyedXOFCPUForBenchmark(rawInput, outputByteCount: requestedXOFOutputByteCount)
+            }
+        )
+    }
+    if let expectedDeriveKeyDigest, requestedOperationTimingModes.contains(.deriveKey) {
+        operationResults.append(
+            runRawBenchmark(
+                backend: "cpu",
+                mode: "derive-key-\(requestedXOFOutputByteCount)",
+                input: input,
+                iterations: iterations,
+                expectedDigest: expectedDeriveKeyDigest
+            ) { rawInput in
+                deriveKeyCPUForBenchmark(rawInput, outputByteCount: requestedXOFOutputByteCount)
+            }
+        )
     }
 
     var fileResults = [BenchmarkResult]()
@@ -2352,10 +2670,162 @@ for size in requestedSizes {
                 return hashMetalGPUForBenchmark(context: metalContext, buffer: buffer, length: size)
             }
         }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedKeyedDigest,
+           requestedOperationTimingModes.contains(.keyed) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "keyed-resident-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedKeyedDigest
+                ) { _ in
+                    keyedHashMetalGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        length: size
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.wrapped),
+           let expectedKeyedDigest,
+           requestedOperationTimingModes.contains(.keyed) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "keyed-wrapped-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedKeyedDigest
+                ) { bytes in
+                    keyedHashMetalWrappedGPUForBenchmark(context: metalContext, input: bytes)
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedXOFDigest,
+           requestedOperationTimingModes.contains(.xof) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "xof-\(requestedXOFOutputByteCount)-resident-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedXOFDigest
+                ) { _ in
+                    xofMetalGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        length: size,
+                        outputByteCount: requestedXOFOutputByteCount
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.wrapped),
+           let expectedXOFDigest,
+           requestedOperationTimingModes.contains(.xof) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "xof-\(requestedXOFOutputByteCount)-wrapped-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedXOFDigest
+                ) { bytes in
+                    xofMetalWrappedGPUForBenchmark(
+                        context: metalContext,
+                        input: bytes,
+                        outputByteCount: requestedXOFOutputByteCount
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedKeyedXOFDigest,
+           requestedOperationTimingModes.contains(.keyedXOF) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "keyed-xof-\(requestedXOFOutputByteCount)-resident-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedKeyedXOFDigest
+                ) { _ in
+                    keyedXOFMetalGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        length: size,
+                        outputByteCount: requestedXOFOutputByteCount
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.wrapped),
+           let expectedKeyedXOFDigest,
+           requestedOperationTimingModes.contains(.keyedXOF) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "keyed-xof-\(requestedXOFOutputByteCount)-wrapped-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedKeyedXOFDigest
+                ) { bytes in
+                    keyedXOFMetalWrappedGPUForBenchmark(
+                        context: metalContext,
+                        input: bytes,
+                        outputByteCount: requestedXOFOutputByteCount
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedDeriveKeyDigest,
+           requestedOperationTimingModes.contains(.deriveKey) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "derive-key-\(requestedXOFOutputByteCount)-resident-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedDeriveKeyDigest
+                ) { _ in
+                    deriveKeyMetalGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        length: size,
+                        outputByteCount: requestedXOFOutputByteCount
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.wrapped),
+           let expectedDeriveKeyDigest,
+           requestedOperationTimingModes.contains(.deriveKey) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "derive-key-\(requestedXOFOutputByteCount)-wrapped-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedDeriveKeyDigest
+                ) { bytes in
+                    deriveKeyMetalWrappedGPUForBenchmark(
+                        context: metalContext,
+                        input: bytes,
+                        outputByteCount: requestedXOFOutputByteCount
+                    )
+                }
+            )
+        }
     }
     #endif
 
     var results = [scalar, single, parallel, officialC, cpuContextAuto, defaultAuto]
+    results.append(contentsOf: operationResults)
     results.append(contentsOf: fileResults)
     #if canImport(Metal)
     if let metalAuto {

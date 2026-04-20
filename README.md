@@ -56,15 +56,15 @@ The current `flatkernels` branch includes the block-state streaming hasher, loca
 
 - Native Swift BLAKE3 library target; vendored official C code remains under its upstream license and is isolated to benchmark support.
 - One-shot, keyed, derived-key, streaming, XOF, and reusable context APIs.
-- Keyed and derive-key one-shot APIs use CPU tree parallelism for large inputs.
+- Keyed one-shot APIs use CPU tree parallelism for large inputs; derive-key one-shot APIs can use Metal for large material hashes, and `BLAKE3Metal` exposes forced-GPU keyed, derive-key, and XOF hashing for resident and no-copy inputs.
 - Reusable CPU contexts with persistent parallel worker pools for repeated hashes.
 - SIMD4 chunk and parent reduction paths for CPU throughput.
 - CPU parallel hashing defaults to the active processor count, with explicit worker overrides for reproducible benchmarks.
-- Default one-shot hashing uses CPU parallelism for CPU-visible work and no-copy Metal for large unkeyed inputs when available.
+- Default one-shot hashing uses CPU parallelism for CPU-visible work and no-copy Metal for large unkeyed digest, XOF, and derive-key material inputs when available.
 - Explicit `hashSerial`, `hashCPU`, and `hashParallel` APIs keep CPU-only benchmarking and backend selection reproducible.
 - Bounded-memory CV stack for streaming and multi-GB file hashing; the `flatkernels` streaming state keeps only the current undecided 64-byte block.
 - CPU file strategies for buffered reads and memory-mapped hashing.
-- Metal resident-buffer, no-copy Swift input, staged-buffer, tuned private-staged, async pipeline, tiled mmap file, and staged-read file hashing APIs.
+- Metal resident-buffer, no-copy Swift input, keyed hashing, derive-key material hashing, XOF, staged-buffer, tuned private-staged, async pipeline, tiled mmap file, and staged-read file hashing APIs.
 - Fused Metal tile reduction for aligned full-chunk shared-memory inputs.
 - Metal file hashing can use no-copy mmap pages or staged reads into bounded shared buffers; large complete prefixes reduce to GPU subtree chaining values before CPU stack merge.
 - Runtime Metal compilation fallback plus precompiled `.metallib` loading for production startup control.
@@ -110,7 +110,7 @@ let digest = BLAKE3.hash(input)
 print(digest)
 ```
 
-`BLAKE3.hash` is the default automatic path. It uses CPU parallel hashing below the Metal threshold and, on Metal-capable Apple Silicon, wraps large unkeyed inputs without copying. Use `BLAKE3.hashCPU(input)` or `BLAKE3.hashSerial(input)` when a CPU-only path is required.
+`BLAKE3.hash` is the default automatic path. It uses CPU parallel hashing below the Metal threshold and, on Metal-capable Apple Silicon, wraps large unkeyed digest and XOF inputs without copying. Use `BLAKE3.hashCPU(input)` or `BLAKE3.hashSerial(input)` when a CPU-only path is required.
 
 Streaming:
 
@@ -294,6 +294,19 @@ swift run -c release blake3-bench \
   --sizes 16m,64m,256m,512m,1g \
   --iterations 5 \
   --metal-modes resident,staged,private
+```
+
+Add keyed hash, derive-key, and XOF rows to the same table:
+
+```bash
+swift run -c release blake3-bench \
+  --sizes 64m,256m \
+  --iterations 4 \
+  --metal-modes resident,wrapped \
+  --operation-modes keyed,xof,keyed-xof,derive-key \
+  --xof-output-bytes 1024 \
+  --file-modes none \
+  --cryptokit-modes none
 ```
 
 By default, `blake3-bench` also includes a `cryptokit sha256` row as a familiar Apple platform baseline. CryptoKit does not provide BLAKE3, so this is a cross-algorithm comparison against Apple's built-in SHA-256 implementation, not a BLAKE3 parity row. CryptoKit rows are emitted after BLAKE3 CPU/Metal rows to avoid perturbing Metal timings. Use `--cryptokit-modes none` when tuning only BLAKE3 backends.

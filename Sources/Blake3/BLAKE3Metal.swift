@@ -43,6 +43,17 @@ public enum BLAKE3Metal {
     private static let defaultDevice = BLAKE3MetalDeviceReference(MTLCreateSystemDefaultDevice())
     private static let contextCache = BLAKE3MetalContextCache()
 
+    fileprivate struct HashMode: Sendable {
+        let key: BLAKE3Core.ChainingValue
+        let flags: UInt32
+
+        static let unkeyed = HashMode(key: BLAKE3Core.iv, flags: 0)
+
+        var metalKey: BLAKE3MetalKeyWords {
+            BLAKE3MetalKeyWords(key)
+        }
+    }
+
     /// Source for Metal kernel library creation.
     public enum LibrarySource: Equatable, Sendable {
         /// Compile the built-in Metal source string at runtime.
@@ -117,6 +128,40 @@ public enum BLAKE3Metal {
         )
     }
 
+    /// Hashes a resident Metal buffer and returns `outputByteCount` bytes of BLAKE3 XOF output.
+    public static func hash(
+        buffer: MTLBuffer,
+        length: Int,
+        outputByteCount: Int,
+        seek: UInt64 = 0,
+        policy: ExecutionPolicy = .automatic
+    ) throws -> [UInt8] {
+        try hash(
+            buffer: buffer,
+            range: 0..<length,
+            outputByteCount: outputByteCount,
+            seek: seek,
+            policy: policy
+        )
+    }
+
+    /// Hashes a resident Metal buffer range and returns `outputByteCount` bytes of BLAKE3 XOF output.
+    public static func hash(
+        buffer: MTLBuffer,
+        range: Range<Int>,
+        outputByteCount: Int,
+        seek: UInt64 = 0,
+        policy: ExecutionPolicy = .automatic
+    ) throws -> [UInt8] {
+        try contextCache.context(device: buffer.device).hash(
+            buffer: buffer,
+            range: range,
+            outputByteCount: outputByteCount,
+            seek: seek,
+            policy: policy
+        )
+    }
+
     /// Hashes Swift-owned contiguous input by temporarily wrapping it in a shared Metal buffer.
     ///
     /// The synchronous call waits for GPU completion before returning, so the wrapped pointer remains valid
@@ -142,6 +187,230 @@ public enum BLAKE3Metal {
             throw BLAKE3Error.metalUnavailable
         }
         return try contextCache.context(device: device).hash(input: input, policy: policy)
+    }
+
+    /// Hashes Swift-owned contiguous input and returns `outputByteCount` bytes of BLAKE3 XOF output.
+    public static func hash(
+        input: some ContiguousBytes,
+        outputByteCount: Int,
+        seek: UInt64 = 0,
+        policy: ExecutionPolicy = .automatic
+    ) throws -> [UInt8] {
+        try input.withUnsafeBytes { raw in
+            try hash(input: raw, outputByteCount: outputByteCount, seek: seek, policy: policy)
+        }
+    }
+
+    /// Hashes Swift-owned raw input and returns `outputByteCount` bytes of BLAKE3 XOF output.
+    public static func hash(
+        input: UnsafeRawBufferPointer,
+        outputByteCount: Int,
+        seek: UInt64 = 0,
+        policy: ExecutionPolicy = .automatic
+    ) throws -> [UInt8] {
+        guard let device = defaultDevice.device else {
+            throw BLAKE3Error.metalUnavailable
+        }
+        return try contextCache.context(device: device).hash(
+            input: input,
+            outputByteCount: outputByteCount,
+            seek: seek,
+            policy: policy
+        )
+    }
+
+    /// Computes a 32-byte keyed BLAKE3 hash for Swift-owned contiguous input.
+    public static func keyedHash(
+        key: some ContiguousBytes,
+        input: some ContiguousBytes,
+        policy: ExecutionPolicy = .automatic
+    ) throws -> BLAKE3.Digest {
+        try key.withUnsafeBytes { keyBytes in
+            let mode = try keyedHashMode(keyBytes)
+            return try input.withUnsafeBytes { inputBytes in
+                try hash(input: inputBytes, policy: policy, mode: mode)
+            }
+        }
+    }
+
+    /// Computes a 32-byte keyed BLAKE3 hash for a resident Metal buffer.
+    public static func keyedHash(
+        key: some ContiguousBytes,
+        buffer: MTLBuffer,
+        length: Int,
+        policy: ExecutionPolicy = .automatic
+    ) throws -> BLAKE3.Digest {
+        try keyedHash(key: key, buffer: buffer, range: 0..<length, policy: policy)
+    }
+
+    /// Computes a 32-byte keyed BLAKE3 hash for a resident Metal buffer range.
+    public static func keyedHash(
+        key: some ContiguousBytes,
+        buffer: MTLBuffer,
+        range: Range<Int>,
+        policy: ExecutionPolicy = .automatic
+    ) throws -> BLAKE3.Digest {
+        try key.withUnsafeBytes { keyBytes in
+            let mode = try keyedHashMode(keyBytes)
+            return try contextCache.context(device: buffer.device).hash(
+                buffer: buffer,
+                range: range,
+                policy: policy,
+                mode: mode
+            )
+        }
+    }
+
+    /// Computes keyed BLAKE3 XOF output for Swift-owned contiguous input.
+    public static func keyedHash(
+        key: some ContiguousBytes,
+        input: some ContiguousBytes,
+        outputByteCount: Int,
+        seek: UInt64 = 0,
+        policy: ExecutionPolicy = .automatic
+    ) throws -> [UInt8] {
+        try key.withUnsafeBytes { keyBytes in
+            let mode = try keyedHashMode(keyBytes)
+            return try input.withUnsafeBytes { inputBytes in
+                try xof(
+                    input: inputBytes,
+                    outputByteCount: outputByteCount,
+                    seek: seek,
+                    policy: policy,
+                    mode: mode
+                )
+            }
+        }
+    }
+
+    /// Computes keyed BLAKE3 XOF output for a resident Metal buffer.
+    public static func keyedHash(
+        key: some ContiguousBytes,
+        buffer: MTLBuffer,
+        length: Int,
+        outputByteCount: Int,
+        seek: UInt64 = 0,
+        policy: ExecutionPolicy = .automatic
+    ) throws -> [UInt8] {
+        try keyedHash(
+            key: key,
+            buffer: buffer,
+            range: 0..<length,
+            outputByteCount: outputByteCount,
+            seek: seek,
+            policy: policy
+        )
+    }
+
+    /// Computes keyed BLAKE3 XOF output for a resident Metal buffer range.
+    public static func keyedHash(
+        key: some ContiguousBytes,
+        buffer: MTLBuffer,
+        range: Range<Int>,
+        outputByteCount: Int,
+        seek: UInt64 = 0,
+        policy: ExecutionPolicy = .automatic
+    ) throws -> [UInt8] {
+        try key.withUnsafeBytes { keyBytes in
+            let mode = try keyedHashMode(keyBytes)
+            return try contextCache.context(device: buffer.device).hash(
+                buffer: buffer,
+                range: range,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                policy: policy,
+                mode: mode
+            )
+        }
+    }
+
+    /// Derives BLAKE3 key material using Metal for the material hash when selected by `policy`.
+    public static func deriveKey(
+        context: String,
+        material: some ContiguousBytes,
+        outputByteCount: Int = BLAKE3.digestByteCount,
+        seek: UInt64 = 0,
+        policy: ExecutionPolicy = .automatic
+    ) throws -> [UInt8] {
+        let mode = deriveKeyMaterialMode(context: context)
+        return try material.withUnsafeBytes { materialBytes in
+            try xof(
+                input: materialBytes,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                policy: policy,
+                mode: mode
+            )
+        }
+    }
+
+    /// Derives BLAKE3 key material from raw Swift-owned material using Metal when selected by `policy`.
+    public static func deriveKey(
+        context: String,
+        material: UnsafeRawBufferPointer,
+        outputByteCount: Int = BLAKE3.digestByteCount,
+        seek: UInt64 = 0,
+        policy: ExecutionPolicy = .automatic
+    ) throws -> [UInt8] {
+        let mode = deriveKeyMaterialMode(context: context)
+        if outputByteCount == BLAKE3.digestByteCount, seek == 0 {
+            return try hash(input: material, policy: policy, mode: mode).bytes
+        }
+        return try xof(
+            input: material,
+            outputByteCount: outputByteCount,
+            seek: seek,
+            policy: policy,
+            mode: mode
+        )
+    }
+
+    /// Derives BLAKE3 key material from a resident Metal buffer.
+    public static func deriveKey(
+        context: String,
+        buffer: MTLBuffer,
+        length: Int,
+        outputByteCount: Int = BLAKE3.digestByteCount,
+        seek: UInt64 = 0,
+        policy: ExecutionPolicy = .automatic
+    ) throws -> [UInt8] {
+        try deriveKey(
+            context: context,
+            buffer: buffer,
+            range: 0..<length,
+            outputByteCount: outputByteCount,
+            seek: seek,
+            policy: policy
+        )
+    }
+
+    /// Derives BLAKE3 key material from a resident Metal buffer range.
+    public static func deriveKey(
+        context: String,
+        buffer: MTLBuffer,
+        range: Range<Int>,
+        outputByteCount: Int = BLAKE3.digestByteCount,
+        seek: UInt64 = 0,
+        policy: ExecutionPolicy = .automatic
+    ) throws -> [UInt8] {
+        let mode = deriveKeyMaterialMode(context: context)
+        let metalContext = try contextCache.context(device: buffer.device)
+        if outputByteCount == BLAKE3.digestByteCount, seek == 0 {
+            return try metalContext.hash(
+                buffer: buffer,
+                range: range,
+                policy: policy,
+                mode: mode
+            ).bytes
+        }
+        return try metalContext.hash(
+            buffer: buffer,
+            range: range,
+            outputByteCount: outputByteCount,
+            seek: seek,
+            policy: policy,
+            mode: mode
+        )
     }
 
     /// Asynchronously hashes a resident Metal buffer.
@@ -681,6 +950,15 @@ public enum BLAKE3Metal {
             range: Range<Int>,
             policy: ExecutionPolicy = .automatic
         ) throws -> BLAKE3.Digest {
+            try hash(buffer: buffer, range: range, policy: policy, mode: .unkeyed)
+        }
+
+        fileprivate func hash(
+            buffer: MTLBuffer,
+            range: Range<Int>,
+            policy: ExecutionPolicy,
+            mode: HashMode
+        ) throws -> BLAKE3.Digest {
             guard buffer.device.registryID == device.registryID else {
                 throw BLAKE3Error.metalCommandFailed("Buffer belongs to a different Metal device.")
             }
@@ -688,6 +966,67 @@ public enum BLAKE3Metal {
                 buffer: buffer,
                 range: range,
                 policy: policy,
+                mode: mode,
+                minimumGPUByteCount: minimumGPUByteCount,
+                pipelines: pipelines,
+                commandQueue: commandQueue,
+                workspace: self
+            )
+        }
+
+        /// Hashes a resident Metal buffer through this context and returns BLAKE3 XOF output.
+        public func hash(
+            buffer: MTLBuffer,
+            length: Int,
+            outputByteCount: Int,
+            seek: UInt64 = 0,
+            policy: ExecutionPolicy = .automatic
+        ) throws -> [UInt8] {
+            try hash(
+                buffer: buffer,
+                range: 0..<length,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                policy: policy
+            )
+        }
+
+        /// Hashes a resident Metal buffer range through this context and returns BLAKE3 XOF output.
+        public func hash(
+            buffer: MTLBuffer,
+            range: Range<Int>,
+            outputByteCount: Int,
+            seek: UInt64 = 0,
+            policy: ExecutionPolicy = .automatic
+        ) throws -> [UInt8] {
+            try hash(
+                buffer: buffer,
+                range: range,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                policy: policy,
+                mode: .unkeyed
+            )
+        }
+
+        fileprivate func hash(
+            buffer: MTLBuffer,
+            range: Range<Int>,
+            outputByteCount: Int,
+            seek: UInt64,
+            policy: ExecutionPolicy,
+            mode: HashMode
+        ) throws -> [UInt8] {
+            guard buffer.device.registryID == device.registryID else {
+                throw BLAKE3Error.metalCommandFailed("Buffer belongs to a different Metal device.")
+            }
+            return try BLAKE3Metal.xof(
+                buffer: buffer,
+                range: range,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                policy: policy,
+                mode: mode,
                 minimumGPUByteCount: minimumGPUByteCount,
                 pipelines: pipelines,
                 commandQueue: commandQueue,
@@ -715,8 +1054,16 @@ public enum BLAKE3Metal {
             input: UnsafeRawBufferPointer,
             policy: ExecutionPolicy = .automatic
         ) throws -> BLAKE3.Digest {
+            try hash(input: input, policy: policy, mode: .unkeyed)
+        }
+
+        fileprivate func hash(
+            input: UnsafeRawBufferPointer,
+            policy: ExecutionPolicy,
+            mode: HashMode
+        ) throws -> BLAKE3.Digest {
             guard input.count > 0 else {
-                return BLAKE3.hash(input)
+                return BLAKE3Metal.hashOnCPU(input: input, mode: mode)
             }
             guard let baseAddress = input.baseAddress,
                   let buffer = device.makeBuffer(
@@ -728,7 +1075,260 @@ public enum BLAKE3Metal {
             else {
                 throw BLAKE3Error.metalCommandFailed("Unable to wrap Swift input in a Metal buffer.")
             }
-            return try hash(buffer: buffer, length: input.count, policy: policy)
+            return try hash(buffer: buffer, range: 0..<input.count, policy: policy, mode: mode)
+        }
+
+        /// Hashes Swift-owned contiguous input through this context and returns BLAKE3 XOF output.
+        public func hash(
+            input: some ContiguousBytes,
+            outputByteCount: Int,
+            seek: UInt64 = 0,
+            policy: ExecutionPolicy = .automatic
+        ) throws -> [UInt8] {
+            try input.withUnsafeBytes { raw in
+                try hash(input: raw, outputByteCount: outputByteCount, seek: seek, policy: policy)
+            }
+        }
+
+        /// Hashes raw Swift-owned input through this context and returns BLAKE3 XOF output.
+        public func hash(
+            input: UnsafeRawBufferPointer,
+            outputByteCount: Int,
+            seek: UInt64 = 0,
+            policy: ExecutionPolicy = .automatic
+        ) throws -> [UInt8] {
+            try xof(
+                input: input,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                policy: policy,
+                mode: .unkeyed
+            )
+        }
+
+        fileprivate func xof(
+            input: UnsafeRawBufferPointer,
+            outputByteCount: Int,
+            seek: UInt64,
+            policy: ExecutionPolicy,
+            mode: HashMode
+        ) throws -> [UInt8] {
+            try BLAKE3Metal.validateOutputByteCount(outputByteCount)
+            guard outputByteCount > 0 else {
+                return []
+            }
+            guard UInt64.max - seek >= UInt64(outputByteCount) else {
+                throw BLAKE3Error.metalCommandFailed("BLAKE3 XOF output range overflows UInt64.")
+            }
+            guard input.count > 0 else {
+                return BLAKE3Metal.xofOnCPU(
+                    input: input,
+                    mode: mode,
+                    outputByteCount: outputByteCount,
+                    seek: seek
+                )
+            }
+            guard let baseAddress = input.baseAddress,
+                  let buffer = device.makeBuffer(
+                    bytesNoCopy: UnsafeMutableRawPointer(mutating: baseAddress),
+                    length: input.count,
+                    options: .storageModeShared,
+                    deallocator: nil
+                  )
+            else {
+                throw BLAKE3Error.metalCommandFailed("Unable to wrap Swift input in a Metal buffer.")
+            }
+            return try hash(
+                buffer: buffer,
+                range: 0..<input.count,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                policy: policy,
+                mode: mode
+            )
+        }
+
+        /// Computes a 32-byte keyed BLAKE3 hash through this context.
+        public func keyedHash(
+            key: some ContiguousBytes,
+            input: some ContiguousBytes,
+            policy: ExecutionPolicy = .automatic
+        ) throws -> BLAKE3.Digest {
+            try key.withUnsafeBytes { keyBytes in
+                let mode = try BLAKE3Metal.keyedHashMode(keyBytes)
+                return try input.withUnsafeBytes { inputBytes in
+                    try hash(input: inputBytes, policy: policy, mode: mode)
+                }
+            }
+        }
+
+        /// Computes a 32-byte keyed BLAKE3 hash for a resident Metal buffer through this context.
+        public func keyedHash(
+            key: some ContiguousBytes,
+            buffer: MTLBuffer,
+            length: Int,
+            policy: ExecutionPolicy = .automatic
+        ) throws -> BLAKE3.Digest {
+            try keyedHash(key: key, buffer: buffer, range: 0..<length, policy: policy)
+        }
+
+        /// Computes a 32-byte keyed BLAKE3 hash for a resident Metal buffer range through this context.
+        public func keyedHash(
+            key: some ContiguousBytes,
+            buffer: MTLBuffer,
+            range: Range<Int>,
+            policy: ExecutionPolicy = .automatic
+        ) throws -> BLAKE3.Digest {
+            try key.withUnsafeBytes { keyBytes in
+                let mode = try BLAKE3Metal.keyedHashMode(keyBytes)
+                return try hash(buffer: buffer, range: range, policy: policy, mode: mode)
+            }
+        }
+
+        /// Computes keyed BLAKE3 XOF output through this context.
+        public func keyedHash(
+            key: some ContiguousBytes,
+            input: some ContiguousBytes,
+            outputByteCount: Int,
+            seek: UInt64 = 0,
+            policy: ExecutionPolicy = .automatic
+        ) throws -> [UInt8] {
+            try key.withUnsafeBytes { keyBytes in
+                let mode = try BLAKE3Metal.keyedHashMode(keyBytes)
+                return try input.withUnsafeBytes { inputBytes in
+                    try xof(
+                        input: inputBytes,
+                        outputByteCount: outputByteCount,
+                        seek: seek,
+                        policy: policy,
+                        mode: mode
+                    )
+                }
+            }
+        }
+
+        /// Computes keyed BLAKE3 XOF output for a resident Metal buffer through this context.
+        public func keyedHash(
+            key: some ContiguousBytes,
+            buffer: MTLBuffer,
+            length: Int,
+            outputByteCount: Int,
+            seek: UInt64 = 0,
+            policy: ExecutionPolicy = .automatic
+        ) throws -> [UInt8] {
+            try keyedHash(
+                key: key,
+                buffer: buffer,
+                range: 0..<length,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                policy: policy
+            )
+        }
+
+        /// Computes keyed BLAKE3 XOF output for a resident Metal buffer range through this context.
+        public func keyedHash(
+            key: some ContiguousBytes,
+            buffer: MTLBuffer,
+            range: Range<Int>,
+            outputByteCount: Int,
+            seek: UInt64 = 0,
+            policy: ExecutionPolicy = .automatic
+        ) throws -> [UInt8] {
+            try key.withUnsafeBytes { keyBytes in
+                let mode = try BLAKE3Metal.keyedHashMode(keyBytes)
+                return try hash(
+                    buffer: buffer,
+                    range: range,
+                    outputByteCount: outputByteCount,
+                    seek: seek,
+                    policy: policy,
+                    mode: mode
+                )
+            }
+        }
+
+        /// Derives BLAKE3 key material through this context.
+        public func deriveKey(
+            context: String,
+            material: some ContiguousBytes,
+            outputByteCount: Int = BLAKE3.digestByteCount,
+            seek: UInt64 = 0,
+            policy: ExecutionPolicy = .automatic
+        ) throws -> [UInt8] {
+            let mode = BLAKE3Metal.deriveKeyMaterialMode(context: context)
+            return try material.withUnsafeBytes { materialBytes in
+                try xof(
+                    input: materialBytes,
+                    outputByteCount: outputByteCount,
+                    seek: seek,
+                    policy: policy,
+                    mode: mode
+                )
+            }
+        }
+
+        /// Derives BLAKE3 key material from raw Swift-owned material through this context.
+        public func deriveKey(
+            context: String,
+            material: UnsafeRawBufferPointer,
+            outputByteCount: Int = BLAKE3.digestByteCount,
+            seek: UInt64 = 0,
+            policy: ExecutionPolicy = .automatic
+        ) throws -> [UInt8] {
+            let mode = BLAKE3Metal.deriveKeyMaterialMode(context: context)
+            if outputByteCount == BLAKE3.digestByteCount, seek == 0 {
+                return try hash(input: material, policy: policy, mode: mode).bytes
+            }
+            return try xof(
+                input: material,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                policy: policy,
+                mode: mode
+            )
+        }
+
+        /// Derives BLAKE3 key material from a resident Metal buffer through this context.
+        public func deriveKey(
+            context: String,
+            buffer: MTLBuffer,
+            length: Int,
+            outputByteCount: Int = BLAKE3.digestByteCount,
+            seek: UInt64 = 0,
+            policy: ExecutionPolicy = .automatic
+        ) throws -> [UInt8] {
+            try deriveKey(
+                context: context,
+                buffer: buffer,
+                range: 0..<length,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                policy: policy
+            )
+        }
+
+        /// Derives BLAKE3 key material from a resident Metal buffer range through this context.
+        public func deriveKey(
+            context: String,
+            buffer: MTLBuffer,
+            range: Range<Int>,
+            outputByteCount: Int = BLAKE3.digestByteCount,
+            seek: UInt64 = 0,
+            policy: ExecutionPolicy = .automatic
+        ) throws -> [UInt8] {
+            let mode = BLAKE3Metal.deriveKeyMaterialMode(context: context)
+            if outputByteCount == BLAKE3.digestByteCount, seek == 0 {
+                return try hash(buffer: buffer, range: range, policy: policy, mode: mode).bytes
+            }
+            return try hash(
+                buffer: buffer,
+                range: range,
+                outputByteCount: outputByteCount,
+                seek: seek,
+                policy: policy,
+                mode: mode
+            )
         }
 
         /// Writes chaining values for complete BLAKE3 chunks in a resident buffer.
@@ -1980,6 +2580,7 @@ public enum BLAKE3Metal {
         buffer: MTLBuffer,
         range: Range<Int>,
         policy: ExecutionPolicy,
+        mode: HashMode = .unkeyed,
         minimumGPUByteCount: Int,
         pipelines: BLAKE3MetalPipelines,
         commandQueue: MTLCommandQueue,
@@ -1994,17 +2595,17 @@ public enum BLAKE3Metal {
 
         switch policy {
         case .cpu:
-            return try hashOnCPU(buffer: buffer, range: range)
+            return try hashOnCPU(buffer: buffer, range: range, mode: mode)
         case .automatic:
             guard range.count >= minimumGPUByteCount || buffer.storageMode == .private else {
-                return try hashOnCPU(buffer: buffer, range: range)
+                return try hashOnCPU(buffer: buffer, range: range, mode: mode)
             }
         case .gpu:
             break
         }
 
         guard range.count > BLAKE3.chunkByteCount else {
-            return try hashOnCPU(buffer: buffer, range: range)
+            return try hashOnCPU(buffer: buffer, range: range, mode: mode)
         }
 
         let chunkCount = (range.count + BLAKE3.chunkByteCount - 1) / BLAKE3.chunkByteCount
@@ -2017,6 +2618,7 @@ public enum BLAKE3Metal {
                 pipelines: pipelines,
                 commandQueue: commandQueue,
                 retainsReferences: false,
+                mode: mode,
                 cvBuffer: cvBuffer,
                 scratchBuffer: scratchBuffer,
                 digestBuffer: digestBuffer,
@@ -2042,6 +2644,7 @@ public enum BLAKE3Metal {
         buffer: MTLBuffer,
         range: Range<Int>,
         policy: ExecutionPolicy,
+        mode: HashMode = .unkeyed,
         minimumGPUByteCount: Int,
         pipelines: BLAKE3MetalPipelines,
         commandQueue: MTLCommandQueue,
@@ -2059,17 +2662,17 @@ public enum BLAKE3Metal {
 
         switch policy {
         case .cpu:
-            return try hashOnCPU(buffer: buffer, range: range)
+            return try hashOnCPU(buffer: buffer, range: range, mode: mode)
         case .automatic:
             guard range.count >= minimumGPUByteCount || buffer.storageMode == .private else {
-                return try hashOnCPU(buffer: buffer, range: range)
+                return try hashOnCPU(buffer: buffer, range: range, mode: mode)
             }
         case .gpu:
             break
         }
 
         guard range.count > BLAKE3.chunkByteCount else {
-            return try hashOnCPU(buffer: buffer, range: range)
+            return try hashOnCPU(buffer: buffer, range: range, mode: mode)
         }
 
         let chunkCount = (range.count + BLAKE3.chunkByteCount - 1) / BLAKE3.chunkByteCount
@@ -2091,6 +2694,7 @@ public enum BLAKE3Metal {
                 pipelines: pipelines,
                 commandQueue: commandQueue,
                 retainsReferences: true,
+                mode: mode,
                 cvBuffer: buffers.chunkCVBuffer,
                 scratchBuffer: buffers.parentCVBuffer,
                 digestBuffer: buffers.digestBuffer,
@@ -2121,6 +2725,108 @@ public enum BLAKE3Metal {
         }
     }
 
+    private static func xof(
+        buffer: MTLBuffer,
+        range: Range<Int>,
+        outputByteCount: Int,
+        seek: UInt64,
+        policy: ExecutionPolicy,
+        mode: HashMode = .unkeyed,
+        minimumGPUByteCount: Int,
+        pipelines: BLAKE3MetalPipelines,
+        commandQueue: MTLCommandQueue,
+        workspace: Context
+    ) throws -> [UInt8] {
+        guard range.lowerBound >= 0,
+              range.upperBound <= buffer.length,
+              range.lowerBound <= range.upperBound
+        else {
+            throw BLAKE3Error.invalidBufferRange
+        }
+        try validateOutputByteCount(outputByteCount)
+        guard outputByteCount > 0 else {
+            return []
+        }
+        let outputByteCount64 = UInt64(outputByteCount)
+        guard UInt64.max - seek >= outputByteCount64 else {
+            throw BLAKE3Error.metalCommandFailed("BLAKE3 XOF output range overflows UInt64.")
+        }
+
+        switch policy {
+        case .cpu:
+            return try xofOnCPU(
+                buffer: buffer,
+                range: range,
+                mode: mode,
+                outputByteCount: outputByteCount,
+                seek: seek
+            )
+        case .automatic:
+            guard range.count >= minimumGPUByteCount || buffer.storageMode == .private else {
+                return try xofOnCPU(
+                    buffer: buffer,
+                    range: range,
+                    mode: mode,
+                    outputByteCount: outputByteCount,
+                    seek: seek
+                )
+            }
+        case .gpu:
+            break
+        }
+
+        guard range.count > BLAKE3.chunkByteCount else {
+            return try xofOnCPU(
+                buffer: buffer,
+                range: range,
+                mode: mode,
+                outputByteCount: outputByteCount,
+                seek: seek
+            )
+        }
+
+        let chunkCount = (range.count + BLAKE3.chunkByteCount - 1) / BLAKE3.chunkByteCount
+        var output = [UInt8](repeating: 0, count: outputByteCount)
+
+        return try workspace.withWorkspace(chunkCount: chunkCount) { cvBuffer, scratchBuffer, _, parameterBuffer in
+            try output.withUnsafeMutableBytes { rawOutput in
+                guard let baseAddress = rawOutput.baseAddress,
+                      let outputBuffer = buffer.device.makeBuffer(
+                        bytesNoCopy: baseAddress,
+                        length: outputByteCount,
+                        options: .storageModeShared,
+                        deallocator: nil
+                      )
+                else {
+                    throw BLAKE3Error.metalCommandFailed("Unable to wrap BLAKE3 XOF output in a Metal buffer.")
+                }
+
+                let commandBuffer = try makeXOFCommandBuffer(
+                    buffer: buffer,
+                    range: range,
+                    chunkCount: chunkCount,
+                    outputByteCount: outputByteCount,
+                    seek: seek,
+                    pipelines: pipelines,
+                    commandQueue: commandQueue,
+                    retainsReferences: false,
+                    mode: mode,
+                    cvBuffer: cvBuffer,
+                    scratchBuffer: scratchBuffer,
+                    outputBuffer: outputBuffer,
+                    parameterBuffer: parameterBuffer
+                )
+                commandBuffer.commit()
+                commandBuffer.waitUntilCompleted()
+
+                if let error = commandBuffer.error {
+                    throw BLAKE3Error.metalCommandFailed(error.localizedDescription)
+                }
+            }
+            return output
+        }
+    }
+
     private static func makeHashCommandBuffer(
         buffer: MTLBuffer,
         range: Range<Int>,
@@ -2128,6 +2834,7 @@ public enum BLAKE3Metal {
         pipelines: BLAKE3MetalPipelines,
         commandQueue: MTLCommandQueue,
         retainsReferences: Bool,
+        mode: HashMode = .unkeyed,
         cvBuffer: MTLBuffer,
         scratchBuffer: MTLBuffer,
         digestBuffer: MTLBuffer,
@@ -2147,9 +2854,52 @@ public enum BLAKE3Metal {
             range: range,
             chunkCount: chunkCount,
             pipelines: pipelines,
+            mode: mode,
             cvBuffer: cvBuffer,
             scratchBuffer: scratchBuffer,
             digestBuffer: digestBuffer,
+            parameterBuffer: parameterBuffer,
+            encoder: encoder
+        )
+
+        return commandBuffer
+    }
+
+    private static func makeXOFCommandBuffer(
+        buffer: MTLBuffer,
+        range: Range<Int>,
+        chunkCount: Int,
+        outputByteCount: Int,
+        seek: UInt64,
+        pipelines: BLAKE3MetalPipelines,
+        commandQueue: MTLCommandQueue,
+        retainsReferences: Bool,
+        mode: HashMode,
+        cvBuffer: MTLBuffer,
+        scratchBuffer: MTLBuffer,
+        outputBuffer: MTLBuffer,
+        parameterBuffer: MTLBuffer
+    ) throws -> MTLCommandBuffer {
+        let commandBuffer = retainsReferences
+            ? commandQueue.makeCommandBuffer()
+            : commandQueue.makeCommandBufferWithUnretainedReferences()
+        guard let commandBuffer,
+              let encoder = commandBuffer.makeComputeCommandEncoder()
+        else {
+            throw BLAKE3Error.metalCommandFailed("Unable to create BLAKE3 XOF command buffer or encoder.")
+        }
+
+        try encodeXOFCommands(
+            buffer: buffer,
+            range: range,
+            chunkCount: chunkCount,
+            outputByteCount: outputByteCount,
+            seek: seek,
+            pipelines: pipelines,
+            mode: mode,
+            cvBuffer: cvBuffer,
+            scratchBuffer: scratchBuffer,
+            outputBuffer: outputBuffer,
             parameterBuffer: parameterBuffer,
             encoder: encoder
         )
@@ -2162,6 +2912,7 @@ public enum BLAKE3Metal {
         range: Range<Int>,
         chunkCount: Int,
         pipelines: BLAKE3MetalPipelines,
+        mode: HashMode = .unkeyed,
         cvBuffer: MTLBuffer,
         scratchBuffer: MTLBuffer,
         digestBuffer: MTLBuffer,
@@ -2174,7 +2925,9 @@ public enum BLAKE3Metal {
             inputLength: UInt64(range.count),
             baseChunkCounter: 0,
             chunkCount: UInt32(chunkCount),
-            canLoadWords: canLoadWords ? 1 : 0
+            canLoadWords: canLoadWords ? 1 : 0,
+            key: mode.metalKey,
+            flags: mode.flags
         )
         copyParameter(params, into: parameterBuffer, slot: 0)
         let tilePlan = fusedTilePlan(
@@ -2224,7 +2977,11 @@ public enum BLAKE3Metal {
         }
 
         while currentCount > 4 {
-            let parentParams = BLAKE3MetalParentParams(inputCount: UInt32(currentCount))
+            let parentParams = BLAKE3MetalParentParams(
+                inputCount: UInt32(currentCount),
+                key: mode.metalKey,
+                flags: mode.flags
+            )
             copyParameter(parentParams, into: parameterBuffer, slot: parameterSlot)
             let useWideReduction = currentCount >= wideParentReductionThreshold
             let useQuadReduction = !useWideReduction
@@ -2276,12 +3033,166 @@ public enum BLAKE3Metal {
             encoder.endEncoding()
             throw BLAKE3Error.metalCommandFailed("Unable to create root digest encoder.")
         }
+        let rootParams = BLAKE3MetalParentParams(
+            inputCount: UInt32(currentCount),
+            key: mode.metalKey,
+            flags: mode.flags
+        )
+        copyParameter(rootParams, into: parameterBuffer, slot: parameterSlot)
         encoder.setComputePipelineState(rootPipeline)
         encoder.setBuffer(currentBuffer, offset: 0, index: 0)
         encoder.setBuffer(digestBuffer, offset: 0, index: 1)
+        encoder.setBuffer(parameterBuffer, offset: parameterOffset(for: parameterSlot), index: 2)
         dispatchThreads(
             count: 1,
             pipeline: rootPipeline,
+            encoder: encoder
+        )
+        encoder.endEncoding()
+    }
+
+    private static func encodeXOFCommands(
+        buffer: MTLBuffer,
+        range: Range<Int>,
+        chunkCount: Int,
+        outputByteCount: Int,
+        seek: UInt64,
+        pipelines: BLAKE3MetalPipelines,
+        mode: HashMode,
+        cvBuffer: MTLBuffer,
+        scratchBuffer: MTLBuffer,
+        outputBuffer: MTLBuffer,
+        parameterBuffer: MTLBuffer,
+        encoder: MTLComputeCommandEncoder
+    ) throws {
+        let canLoadWords = canLoadWords(buffer: buffer, range: range)
+        let params = BLAKE3MetalChunkParams(
+            inputOffset: UInt64(range.lowerBound),
+            inputLength: UInt64(range.count),
+            baseChunkCounter: 0,
+            chunkCount: UInt32(chunkCount),
+            canLoadWords: canLoadWords ? 1 : 0,
+            key: mode.metalKey,
+            flags: mode.flags
+        )
+        copyParameter(params, into: parameterBuffer, slot: 0)
+        let tilePlan = fusedTilePlan(
+            buffer: buffer,
+            range: range,
+            chunkCount: chunkCount,
+            canLoadWords: canLoadWords,
+            pipelines: pipelines
+        )
+
+        var currentBuffer = cvBuffer
+        var nextBuffer = scratchBuffer
+        var currentCount: Int
+        var parameterSlot = 1
+
+        if let tilePlan {
+            encoder.setComputePipelineState(tilePlan.pipeline)
+            encoder.setBuffer(buffer, offset: 0, index: 0)
+            encoder.setBuffer(cvBuffer, offset: 0, index: 1)
+            encoder.setBuffer(parameterBuffer, offset: 0, index: 2)
+            encoder.setThreadgroupMemoryLength(tilePlan.threadgroupMemoryByteCount, index: 0)
+            encoder.dispatchThreadgroups(
+                MTLSize(width: chunkCount / tilePlan.chunkCount, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: tilePlan.chunkCount, height: 1, depth: 1)
+            )
+            currentCount = chunkCount / tilePlan.chunkCount
+        } else {
+            let chunkPipeline = if range.count.isMultiple(of: BLAKE3.chunkByteCount) {
+                canUseAlignedFullChunkKernel(buffer: buffer, range: range)
+                    ? pipelines.chunkFullAlignedCVs
+                    : pipelines.chunkFullCVs
+            } else {
+                pipelines.chunkCVs
+            }
+
+            encoder.setComputePipelineState(chunkPipeline)
+            encoder.setBuffer(buffer, offset: 0, index: 0)
+            encoder.setBuffer(cvBuffer, offset: 0, index: 1)
+            encoder.setBuffer(parameterBuffer, offset: 0, index: 2)
+
+            dispatchThreads(
+                count: chunkCount,
+                pipeline: chunkPipeline,
+                encoder: encoder
+            )
+            currentCount = chunkCount
+        }
+
+        while currentCount > 2 {
+            let parentParams = BLAKE3MetalParentParams(
+                inputCount: UInt32(currentCount),
+                key: mode.metalKey,
+                flags: mode.flags
+            )
+            copyParameter(parentParams, into: parameterBuffer, slot: parameterSlot)
+            let useWideReduction = currentCount >= wideParentReductionThreshold
+            let useQuadReduction = !useWideReduction
+                && currentCount >= quadParentReductionThreshold
+            let pipeline = if useWideReduction {
+                currentCount.isMultiple(of: 16)
+                    ? pipelines.parent16CVs
+                    : pipelines.parent16TailCVs
+            } else if useQuadReduction {
+                currentCount.isMultiple(of: 4)
+                    ? pipelines.parent4ExactCVs
+                    : pipelines.parent4CVs
+            } else {
+                pipelines.parentCVs
+            }
+            let nextCount = if useWideReduction {
+                (currentCount + 15) / 16
+            } else if useQuadReduction {
+                (currentCount + 3) / 4
+            } else {
+                (currentCount + 1) / 2
+            }
+            encoder.setComputePipelineState(pipeline)
+            encoder.setBuffer(currentBuffer, offset: 0, index: 0)
+            encoder.setBuffer(nextBuffer, offset: 0, index: 1)
+            encoder.setBuffer(parameterBuffer, offset: parameterOffset(for: parameterSlot), index: 2)
+            dispatchThreads(
+                count: nextCount,
+                pipeline: pipeline,
+                encoder: encoder
+            )
+
+            swap(&currentBuffer, &nextBuffer)
+            currentCount = nextCount
+            parameterSlot += 1
+        }
+
+        guard currentCount == 2 else {
+            encoder.endEncoding()
+            throw BLAKE3Error.metalCommandFailed("Unable to create BLAKE3 XOF root encoder.")
+        }
+
+        let xofParams = BLAKE3MetalXOFParams(
+            outputByteCount: UInt64(outputByteCount),
+            seek: seek,
+            key: mode.metalKey,
+            flags: mode.flags
+        )
+        copyParameter(xofParams, into: parameterBuffer, slot: parameterSlot)
+
+        let firstBlockOffset = seek % UInt64(BLAKE3Core.blockLen)
+        let outputBlockCount64 = (firstBlockOffset + UInt64(outputByteCount) + UInt64(BLAKE3Core.blockLen - 1))
+            / UInt64(BLAKE3Core.blockLen)
+        guard outputBlockCount64 <= UInt64(Int.max) else {
+            encoder.endEncoding()
+            throw BLAKE3Error.metalCommandFailed("BLAKE3 XOF output requires too many Metal threads.")
+        }
+        let outputBlockCount = Int(outputBlockCount64)
+        encoder.setComputePipelineState(pipelines.rootXOF)
+        encoder.setBuffer(currentBuffer, offset: 0, index: 0)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 1)
+        encoder.setBuffer(parameterBuffer, offset: parameterOffset(for: parameterSlot), index: 2)
+        dispatchThreads(
+            count: outputBlockCount,
+            pipeline: pipelines.rootXOF,
             encoder: encoder
         )
         encoder.endEncoding()
@@ -2731,14 +3642,129 @@ public enum BLAKE3Metal {
         encoder.dispatchThreads(threads, threadsPerThreadgroup: threadsPerThreadgroup)
     }
 
-    private static func hashOnCPU(buffer: MTLBuffer, range: Range<Int>) throws -> BLAKE3.Digest {
+    @inline(__always)
+    private static func validateOutputByteCount(_ outputByteCount: Int) throws {
+        guard outputByteCount >= 0 else {
+            throw BLAKE3Error.invalidOutputLength(outputByteCount)
+        }
+    }
+
+    private static func keyedHashMode(_ keyBytes: UnsafeRawBufferPointer) throws -> HashMode {
+        guard keyBytes.count == BLAKE3.keyByteCount else {
+            throw BLAKE3Error.invalidKeyLength(
+                expected: BLAKE3.keyByteCount,
+                actual: keyBytes.count
+            )
+        }
+        return HashMode(
+            key: BLAKE3Core.keyedWords(keyBytes),
+            flags: BLAKE3Core.keyedHash
+        )
+    }
+
+    private static func deriveKeyMaterialMode(context: String) -> HashMode {
+        let contextBytes = Array(context.utf8)
+        return contextBytes.withUnsafeBytes { contextRaw in
+            HashMode(
+                key: BLAKE3Core.deriveKeyContextKey(contextRaw),
+                flags: BLAKE3Core.deriveKeyMaterial
+            )
+        }
+    }
+
+    private static func hash(
+        input: UnsafeRawBufferPointer,
+        policy: ExecutionPolicy,
+        mode: HashMode
+    ) throws -> BLAKE3.Digest {
+        guard let device = defaultDevice.device else {
+            throw BLAKE3Error.metalUnavailable
+        }
+        return try contextCache.context(device: device).hash(input: input, policy: policy, mode: mode)
+    }
+
+    private static func xof(
+        input: UnsafeRawBufferPointer,
+        outputByteCount: Int,
+        seek: UInt64,
+        policy: ExecutionPolicy,
+        mode: HashMode
+    ) throws -> [UInt8] {
+        guard let device = defaultDevice.device else {
+            throw BLAKE3Error.metalUnavailable
+        }
+        return try contextCache.context(device: device).xof(
+            input: input,
+            outputByteCount: outputByteCount,
+            seek: seek,
+            policy: policy,
+            mode: mode
+        )
+    }
+
+    private static func hashOnCPU(buffer: MTLBuffer, range: Range<Int>, mode: HashMode) throws -> BLAKE3.Digest {
         guard buffer.storageMode != .private else {
             throw BLAKE3Error.metalCommandFailed("CPU fallback requires a CPU-visible Metal buffer.")
         }
         let start = buffer.contents().advanced(by: range.lowerBound)
-        return BLAKE3.hashParallel(
-            UnsafeRawBufferPointer(start: start, count: range.count)
+        return hashOnCPU(
+            input: UnsafeRawBufferPointer(start: start, count: range.count),
+            mode: mode
         )
+    }
+
+    private static func xofOnCPU(
+        buffer: MTLBuffer,
+        range: Range<Int>,
+        mode: HashMode,
+        outputByteCount: Int,
+        seek: UInt64
+    ) throws -> [UInt8] {
+        guard buffer.storageMode != .private else {
+            throw BLAKE3Error.metalCommandFailed("CPU fallback requires a CPU-visible Metal buffer.")
+        }
+        let start = buffer.contents().advanced(by: range.lowerBound)
+        return xofOnCPU(
+            input: UnsafeRawBufferPointer(start: start, count: range.count),
+            mode: mode,
+            outputByteCount: outputByteCount,
+            seek: seek
+        )
+    }
+
+    private static func hashOnCPU(input: UnsafeRawBufferPointer, mode: HashMode) -> BLAKE3.Digest {
+        var workspace = BLAKE3Core.Workspace()
+        let scheduler = BLAKE3Core.defaultScheduler(forByteCount: input.count, maxWorkers: nil)
+        return BLAKE3.Digest(output: BLAKE3Core.rootOutputParallel(
+            input,
+            key: mode.key,
+            flags: mode.flags,
+            maxWorkers: nil,
+            scheduler: scheduler,
+            workspace: &workspace
+        ))
+    }
+
+    private static func xofOnCPU(
+        input: UnsafeRawBufferPointer,
+        mode: HashMode,
+        outputByteCount: Int,
+        seek: UInt64
+    ) -> [UInt8] {
+        guard outputByteCount > 0 else {
+            return []
+        }
+        var workspace = BLAKE3Core.Workspace()
+        let scheduler = BLAKE3Core.defaultScheduler(forByteCount: input.count, maxWorkers: nil)
+        return BLAKE3Core.rootOutputParallel(
+            input,
+            key: mode.key,
+            flags: mode.flags,
+            maxWorkers: nil,
+            scheduler: scheduler,
+            workspace: &workspace
+        )
+        .rootBytes(byteCount: outputByteCount, seek: seek)
     }
 }
 

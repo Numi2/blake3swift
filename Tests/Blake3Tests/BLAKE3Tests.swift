@@ -761,6 +761,7 @@ final class BLAKE3Tests: XCTestCase {
         XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_chunk_tile128_pingpong_cvs"))
         XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_chunk_tile512_cvs"))
         XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_root_digest"))
+        XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_root_xof"))
     }
 
     func testMetalContextRecordsLibrarySource() throws {
@@ -1196,6 +1197,210 @@ final class BLAKE3Tests: XCTestCase {
                 "context no-copy GPU mismatch for byteCount=\(size)"
             )
         }
+    }
+
+    func testMetalKeyedHashMatchesCPUAcrossTreeShapes() throws {
+        guard BLAKE3Metal.isAvailable else {
+            throw XCTSkip("Metal is not available on this host.")
+        }
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let context = try BLAKE3Metal.makeContext(device: device)
+        let key = deterministicInput(byteCount: BLAKE3.keyByteCount)
+        let sizes = [
+            2 * BLAKE3.chunkByteCount,
+            3 * BLAKE3.chunkByteCount,
+            4 * BLAKE3.chunkByteCount,
+            5 * BLAKE3.chunkByteCount + 17,
+            2 * 1_024 * 1_024 + 333
+        ]
+
+        for size in sizes {
+            let input = deterministicInput(byteCount: size)
+            let expected = try BLAKE3.keyedHash(key: key, input: input)
+
+            XCTAssertEqual(
+                try BLAKE3Metal.keyedHash(key: key, input: input, policy: .gpu),
+                expected,
+                "static keyed GPU mismatch for byteCount=\(size)"
+            )
+            XCTAssertEqual(
+                try context.keyedHash(key: key, input: input, policy: .gpu),
+                expected,
+                "context keyed GPU mismatch for byteCount=\(size)"
+            )
+
+            let buffer = try XCTUnwrap(device.makeBuffer(length: input.count + 2, options: .storageModeShared))
+            input.withUnsafeBytes { raw in
+                buffer.contents().advanced(by: 1).copyMemory(
+                    from: raw.baseAddress!,
+                    byteCount: input.count
+                )
+            }
+            XCTAssertEqual(
+                try context.keyedHash(key: key, buffer: buffer, range: 1..<(input.count + 1), policy: .gpu),
+                expected,
+                "resident keyed GPU mismatch for byteCount=\(size)"
+            )
+        }
+    }
+
+    func testMetalXOFMatchesCPUAndSeek() throws {
+        guard BLAKE3Metal.isAvailable else {
+            throw XCTSkip("Metal is not available on this host.")
+        }
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let context = try BLAKE3Metal.makeContext(device: device)
+        let key = deterministicInput(byteCount: BLAKE3.keyByteCount)
+        let input = deterministicInput(byteCount: 5 * BLAKE3.chunkByteCount + 777)
+        let outputSizes = [1, 31, 32, 63, 64, 65, 257, 1_000]
+        let seeks: [UInt64] = [0, 1, 63, 64, 65, 511]
+
+        for outputSize in outputSizes {
+            for seek in seeks {
+                var unkeyedHasher = BLAKE3.Hasher()
+                unkeyedHasher.update(input)
+                let expected = xofBytes(from: unkeyedHasher, count: outputSize, seek: seek)
+                XCTAssertEqual(
+                    try BLAKE3Metal.hash(
+                        input: input,
+                        outputByteCount: outputSize,
+                        seek: seek,
+                        policy: .gpu
+                    ),
+                    expected,
+                    "unkeyed GPU XOF mismatch for outputSize=\(outputSize), seek=\(seek)"
+                )
+
+                var keyedHasher = try BLAKE3.Hasher(key: key)
+                keyedHasher.update(input)
+                let expectedKeyed = xofBytes(from: keyedHasher, count: outputSize, seek: seek)
+                XCTAssertEqual(
+                    try BLAKE3Metal.keyedHash(
+                        key: key,
+                        input: input,
+                        outputByteCount: outputSize,
+                        seek: seek,
+                        policy: .gpu
+                    ),
+                    expectedKeyed,
+                    "keyed GPU XOF mismatch for outputSize=\(outputSize), seek=\(seek)"
+                )
+            }
+        }
+
+        let buffer = try XCTUnwrap(device.makeBuffer(length: input.count + 2, options: .storageModeShared))
+        input.withUnsafeBytes { raw in
+            buffer.contents().advanced(by: 1).copyMemory(
+                from: raw.baseAddress!,
+                byteCount: input.count
+            )
+        }
+        var unkeyedHasher = BLAKE3.Hasher()
+        unkeyedHasher.update(input)
+        XCTAssertEqual(
+            try context.hash(
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu
+            ),
+            xofBytes(from: unkeyedHasher, count: 513, seek: 17)
+        )
+        var keyedHasher = try BLAKE3.Hasher(key: key)
+        keyedHasher.update(input)
+        XCTAssertEqual(
+            try context.keyedHash(
+                key: key,
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu
+            ),
+            xofBytes(from: keyedHasher, count: 513, seek: 17)
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.hash(input: input, outputByteCount: 0, policy: .gpu),
+            []
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.keyedHash(key: key, input: input, outputByteCount: 0, policy: .gpu),
+            []
+        )
+    }
+
+    func testMetalDeriveKeyMatchesCPUAndSeek() throws {
+        guard BLAKE3Metal.isAvailable else {
+            throw XCTSkip("Metal is not available on this host.")
+        }
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let metalContext = try BLAKE3Metal.makeContext(device: device)
+        let kdfContext = "BLAKE3 2026-04-20 test derive-key material acceleration"
+        let input = deterministicInput(byteCount: 5 * BLAKE3.chunkByteCount + 901)
+        let outputSizes = [1, 32, 65, 257, 1_000]
+        let seeks: [UInt64] = [0, 1, 64, 65, 511]
+
+        for outputSize in outputSizes {
+            for seek in seeks {
+                var hasher = BLAKE3.Hasher(deriveKeyContext: kdfContext)
+                hasher.update(input)
+                let expected = xofBytes(from: hasher, count: outputSize, seek: seek)
+
+                XCTAssertEqual(
+                    try BLAKE3Metal.deriveKey(
+                        context: kdfContext,
+                        material: input,
+                        outputByteCount: outputSize,
+                        seek: seek,
+                        policy: .gpu
+                    ),
+                    expected,
+                    "static derive-key GPU mismatch for outputSize=\(outputSize), seek=\(seek)"
+                )
+                XCTAssertEqual(
+                    try metalContext.deriveKey(
+                        context: kdfContext,
+                        material: input,
+                        outputByteCount: outputSize,
+                        seek: seek,
+                        policy: .gpu
+                    ),
+                    expected,
+                    "context derive-key GPU mismatch for outputSize=\(outputSize), seek=\(seek)"
+                )
+            }
+        }
+
+        let buffer = try XCTUnwrap(device.makeBuffer(length: input.count + 2, options: .storageModeShared))
+        input.withUnsafeBytes { raw in
+            buffer.contents().advanced(by: 1).copyMemory(
+                from: raw.baseAddress!,
+                byteCount: input.count
+            )
+        }
+        var hasher = BLAKE3.Hasher(deriveKeyContext: kdfContext)
+        hasher.update(input)
+        XCTAssertEqual(
+            try metalContext.deriveKey(
+                context: kdfContext,
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu
+            ),
+            xofBytes(from: hasher, count: 513, seek: 17)
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.deriveKey(
+                context: kdfContext,
+                material: input,
+                outputByteCount: 0,
+                policy: .gpu
+            ),
+            []
+        )
     }
 
     func testMetalNoCopyHandlesUnalignedWrappedInputBase() throws {
