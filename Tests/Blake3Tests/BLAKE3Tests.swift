@@ -1,5 +1,5 @@
 import XCTest
-@testable import Blake3
+@_spi(Benchmark) @testable import Blake3
 #if canImport(CryptoKit)
 import CryptoKit
 #endif
@@ -1414,6 +1414,27 @@ final class BLAKE3Tests: XCTestCase {
             ranges.count
         )
         XCTAssertEqual(readDigests(planOutputBuffer, count: ranges.count), expected)
+        let pipelineOutputBuffers = try (0..<3).map { _ in
+            try XCTUnwrap(
+                device.makeBuffer(
+                    length: plan.outputByteCount,
+                    options: .storageModeShared
+                )
+            )
+        }
+        let pipeline = try context.makeOneChunkBatchWritePipeline(
+            plan: plan,
+            outputBuffers: pipelineOutputBuffers
+        )
+        XCTAssertEqual(pipeline.inFlightCount, pipelineOutputBuffers.count)
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigests(pipeline: pipeline),
+            pipeline.inFlightCount * plan.digestCount
+        )
+        XCTAssertEqual(
+            readDigests(pipeline.outputBuffers[pipeline.inFlightCount - 1], count: ranges.count),
+            expected
+        )
 
         let aggregateExpected = BLAKE3.hashCPU(expected.flatMap(\.bytes))
         let privateOutputBuffer = try XCTUnwrap(
@@ -1471,6 +1492,29 @@ final class BLAKE3Tests: XCTestCase {
         )
         XCTAssertEqual(
             try BLAKE3Metal.hashOneChunkBatchDigestBytes(plan: plan),
+            aggregateExpected
+        )
+        let privatePipelineOutputBuffers = try (0..<3).map { _ in
+            try XCTUnwrap(
+                device.makeBuffer(
+                    length: plan.outputByteCount,
+                    options: .storageModePrivate
+                )
+            )
+        }
+        let privatePipeline = try context.makeOneChunkBatchWritePipeline(
+            plan: plan,
+            outputBuffers: privatePipelineOutputBuffers
+        )
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigests(pipeline: privatePipeline),
+            privatePipeline.inFlightCount * plan.digestCount
+        )
+        XCTAssertEqual(
+            try context.hashOneChunkBatch(
+                buffer: privatePipeline.outputBuffers[privatePipeline.inFlightCount - 1],
+                ranges: [0..<plan.outputByteCount]
+            ).first,
             aggregateExpected
         )
         let manyRanges = Array(repeating: ranges, count: 4).flatMap { $0 }

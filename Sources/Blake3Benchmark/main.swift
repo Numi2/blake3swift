@@ -398,6 +398,20 @@ private func batchOneChunkItemByteCount() -> Int {
     return min(max(1, parsed), BLAKE3.chunkByteCount)
 }
 
+private func batchPipelineWidth() -> Int {
+    guard let rawValue = argumentValue(named: "--batch-pipeline-width") else {
+        return 0
+    }
+    let normalized = rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if normalized == "none" || normalized == "off" || normalized == "disabled" {
+        return 0
+    }
+    guard let parsed = Int(normalized), parsed > 1 else {
+        return 0
+    }
+    return parsed
+}
+
 #if canImport(Metal)
 private func metalTimingModes() -> [MetalTimingMode] {
     guard let rawValue = argumentValue(named: "--metal-modes") else {
@@ -856,6 +870,33 @@ private func batchOneChunkMetalPlanFusedAggregateGPUForBenchmark(
 }
 
 @inline(never)
+private func batchOneChunkMetalPlanWritePipelinedGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    pipeline: BLAKE3Metal.OneChunkBatchWritePipeline
+) -> BLAKE3.Digest {
+    let digestCount = try! context.writeOneChunkBatchDigests(pipeline: pipeline)
+    precondition(digestCount == pipeline.inFlightCount * pipeline.plan.digestCount)
+    return aggregateBatchDigestBufferForBenchmark(
+        pipeline.outputBuffers[pipeline.outputBuffers.count - 1],
+        digestCount: pipeline.plan.digestCount
+    )
+}
+
+@inline(never)
+private func batchOneChunkMetalPlanWritePrivatePipelinedGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    pipeline: BLAKE3Metal.OneChunkBatchWritePipeline
+) -> BLAKE3.Digest {
+    let digestCount = try! context.writeOneChunkBatchDigests(pipeline: pipeline)
+    precondition(digestCount == pipeline.inFlightCount * pipeline.plan.digestCount)
+    return hashMetalOutputBufferForBenchmark(
+        context: context,
+        outputBuffer: pipeline.outputBuffers[pipeline.outputBuffers.count - 1],
+        byteCount: pipeline.plan.outputByteCount
+    )
+}
+
+@inline(never)
 private func keyedHashMetalGPUForBenchmark(
     context: BLAKE3Metal.Context,
     buffer: MTLBuffer,
@@ -1230,6 +1271,37 @@ private func runBenchmark(
         finalDigest = operation(input)
         let elapsed = DispatchTime.now().uptimeNanoseconds - started
         sampleNanoseconds.append(elapsed)
+    }
+
+    return BenchmarkResult(
+        backend: backend,
+        mode: mode,
+        byteCount: input.count,
+        sampleNanoseconds: sampleNanoseconds,
+        digest: finalDigest,
+        expectedDigest: expectedDigest
+    )
+}
+
+private func runPipelinedBenchmark(
+    backend: String,
+    mode: String,
+    input: [UInt8],
+    iterations: Int,
+    operationsPerSample: Int,
+    expectedDigest: BLAKE3.Digest? = nil,
+    operation: ([UInt8]) -> BLAKE3.Digest
+) -> BenchmarkResult {
+    precondition(operationsPerSample > 0)
+    var sampleNanoseconds = [UInt64]()
+    sampleNanoseconds.reserveCapacity(iterations)
+    var finalDigest = operation(input)
+
+    for _ in 0..<iterations {
+        let started = DispatchTime.now().uptimeNanoseconds
+        finalDigest = operation(input)
+        let elapsed = DispatchTime.now().uptimeNanoseconds - started
+        sampleNanoseconds.append(max(1, elapsed / UInt64(operationsPerSample)))
     }
 
     return BenchmarkResult(
@@ -2677,6 +2749,7 @@ private let requestedOperationTimingModes = operationTimingModes()
 private let requestedFileOperationTimingModes = fileOperationTimingModes()
 private let requestedXOFOutputByteCount = xofOutputByteCount()
 private let requestedBatchOneChunkItemByteCount = batchOneChunkItemByteCount()
+private let requestedBatchPipelineWidth = batchPipelineWidth()
 #if canImport(CryptoKit)
 private let requestedCryptoKitTimingModes = cryptoKitTimingModes()
 #endif
@@ -2756,6 +2829,9 @@ if !requestedOperationTimingModes.isEmpty {
     }
     if requestedOperationTimingModes.contains(.batchOneChunk) {
         print("batchOneChunkItemByteCount=\(requestedBatchOneChunkItemByteCount)")
+        if requestedBatchPipelineWidth > 1 {
+            print("batchPipelineWidth=\(requestedBatchPipelineWidth)")
+        }
     }
     for mode in requestedOperationTimingModes {
         print("operation-\(mode.rawValue) includes: \(mode.description)")
@@ -3203,6 +3279,64 @@ for size in requestedSizes {
         let batchOneChunkPlan: BLAKE3Metal.OneChunkBatchPlan? = if requestedMetalTimingModes.contains(.resident)
             && requestedOperationTimingModes.contains(.batchOneChunk) {
             try? metalContext.makeOneChunkBatchPlan(buffer: metalBuffer, ranges: batchOneChunkRanges)
+        } else {
+            nil
+        }
+        let batchOneChunkPipelinedOutputBuffers: [MTLBuffer]? = {
+            guard requestedMetalTimingModes.contains(.resident),
+                  requestedOperationTimingModes.contains(.batchOneChunk),
+                  requestedBatchPipelineWidth > 1
+            else {
+                return nil
+            }
+            var buffers = [MTLBuffer]()
+            buffers.reserveCapacity(requestedBatchPipelineWidth)
+            for _ in 0..<requestedBatchPipelineWidth {
+                guard let buffer = metalDevice.makeBuffer(
+                    length: max(1, batchOneChunkRanges.count * BLAKE3.digestByteCount),
+                    options: .storageModeShared
+                ) else {
+                    return nil
+                }
+                buffers.append(buffer)
+            }
+            return buffers
+        }()
+        let batchOneChunkPrivatePipelinedOutputBuffers: [MTLBuffer]? = {
+            guard requestedMetalTimingModes.contains(.resident),
+                  requestedOperationTimingModes.contains(.batchOneChunk),
+                  requestedBatchPipelineWidth > 1
+            else {
+                return nil
+            }
+            var buffers = [MTLBuffer]()
+            buffers.reserveCapacity(requestedBatchPipelineWidth)
+            for _ in 0..<requestedBatchPipelineWidth {
+                guard let buffer = metalDevice.makeBuffer(
+                    length: max(1, batchOneChunkRanges.count * BLAKE3.digestByteCount),
+                    options: .storageModePrivate
+                ) else {
+                    return nil
+                }
+                buffers.append(buffer)
+            }
+            return buffers
+        }()
+        let batchOneChunkWritePipeline: BLAKE3Metal.OneChunkBatchWritePipeline? = if let batchOneChunkPlan,
+            let batchOneChunkPipelinedOutputBuffers {
+            try? metalContext.makeOneChunkBatchWritePipeline(
+                plan: batchOneChunkPlan,
+                outputBuffers: batchOneChunkPipelinedOutputBuffers
+            )
+        } else {
+            nil
+        }
+        let batchOneChunkPrivateWritePipeline: BLAKE3Metal.OneChunkBatchWritePipeline? = if let batchOneChunkPlan,
+            let batchOneChunkPrivatePipelinedOutputBuffers {
+            try? metalContext.makeOneChunkBatchWritePipeline(
+                plan: batchOneChunkPlan,
+                outputBuffers: batchOneChunkPrivatePipelinedOutputBuffers
+            )
         } else {
             nil
         }
@@ -3745,6 +3879,26 @@ for size in requestedSizes {
         }
         if requestedMetalTimingModes.contains(.resident),
            let expectedBatchOneChunkDigest,
+           let batchOneChunkWritePipeline,
+           requestedOperationTimingModes.contains(.batchOneChunk) {
+            operationResults.append(
+                runPipelinedBenchmark(
+                    backend: "metal",
+                    mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-plan-write-pipeline-\(requestedBatchPipelineWidth)-gpu",
+                    input: input,
+                    iterations: iterations,
+                    operationsPerSample: requestedBatchPipelineWidth,
+                    expectedDigest: expectedBatchOneChunkDigest
+                ) { _ in
+                    batchOneChunkMetalPlanWritePipelinedGPUForBenchmark(
+                        context: metalContext,
+                        pipeline: batchOneChunkWritePipeline
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedBatchOneChunkDigest,
            let batchOneChunkPrivateOutputBuffer,
            requestedOperationTimingModes.contains(.batchOneChunk) {
             operationResults.append(
@@ -3781,6 +3935,26 @@ for size in requestedSizes {
                         context: metalContext,
                         plan: batchOneChunkPlan,
                         outputBuffer: batchOneChunkPrivateOutputBuffer
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedBatchOneChunkDigest,
+           let batchOneChunkPrivateWritePipeline,
+           requestedOperationTimingModes.contains(.batchOneChunk) {
+            operationResults.append(
+                runPipelinedBenchmark(
+                    backend: "metal",
+                    mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-plan-write-private-pipeline-\(requestedBatchPipelineWidth)-gpu",
+                    input: input,
+                    iterations: iterations,
+                    operationsPerSample: requestedBatchPipelineWidth,
+                    expectedDigest: expectedBatchOneChunkDigest
+                ) { _ in
+                    batchOneChunkMetalPlanWritePrivatePipelinedGPUForBenchmark(
+                        context: metalContext,
+                        pipeline: batchOneChunkPrivateWritePipeline
                     )
                 }
             )
