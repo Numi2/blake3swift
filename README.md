@@ -276,6 +276,9 @@ try context.writeXOF(
 The same pattern is available for keyed XOF and derive-key material with `writeKeyedXOF` and
 `writeDerivedKey`.
 
+Private output buffers can be consumed by later Metal passes without CPU readback. When a compact CPU-visible
+check is needed, hash the private output buffer with Metal and read only the final 32-byte digest.
+
 For many independent small objects already packed into one resident buffer, use the one-chunk batch path. Each range must be at most `BLAKE3.chunkByteCount` bytes and produces one digest:
 
 ```swift
@@ -392,7 +395,8 @@ swift run -c release blake3-bench \
   --cryptokit-modes none
 ```
 
-Resident Metal XOF rows also include `resident-write-gpu` variants for caller-owned output buffers.
+Resident Metal XOF rows also include `resident-write-gpu` variants for caller-owned shared output buffers and
+`resident-write-private-gpu` variants that write to private output buffers and reduce them with Metal.
 
 Measure independent one-chunk batch hashing:
 
@@ -407,8 +411,9 @@ swift run -c release blake3-bench \
   --cryptokit-modes none
 ```
 
-The benchmark emits both the array-returning row and a `resident-write-gpu` row that writes digests into a
-reused output `MTLBuffer`.
+The benchmark emits the array-returning row, a `resident-write-gpu` row that writes digests into a reused
+shared `MTLBuffer`, and a `resident-write-private-gpu` row that writes digest bytes into private GPU storage
+and reduces them with Metal.
 
 By default, `blake3-bench` also includes a `cryptokit sha256` row as a familiar Apple platform baseline. CryptoKit does not provide BLAKE3, so this is a cross-algorithm comparison against Apple's built-in SHA-256 implementation, not a BLAKE3 parity row. CryptoKit rows are emitted after BLAKE3 CPU/Metal rows to avoid perturbing Metal timings. Use `--cryptokit-modes none` when tuning only BLAKE3 backends.
 
