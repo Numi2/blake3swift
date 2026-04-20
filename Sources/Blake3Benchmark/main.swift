@@ -674,6 +674,21 @@ private func hashOutputBufferForBenchmark(
 }
 
 @inline(never)
+private func hashMetalOutputBufferForBenchmark(
+    context: BLAKE3Metal.Context,
+    outputBuffer: MTLBuffer,
+    byteCount: Int
+) -> BLAKE3.Digest {
+    guard byteCount > 0 else {
+        return BLAKE3.hashCPU([UInt8]())
+    }
+    if byteCount <= BLAKE3.chunkByteCount {
+        return try! context.hashOneChunkBatch(buffer: outputBuffer, ranges: [0..<byteCount]).first!
+    }
+    return try! context.hash(buffer: outputBuffer, length: byteCount, policy: .gpu)
+}
+
+@inline(never)
 private func batchOneChunkCPUForBenchmark(
     _ input: UnsafeRawBufferPointer,
     ranges: [Range<Int>]
@@ -747,6 +762,26 @@ private func batchOneChunkMetalWriteGPUForBenchmark(
 }
 
 @inline(never)
+private func batchOneChunkMetalWritePrivateGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    ranges: [Range<Int>],
+    outputBuffer: MTLBuffer
+) -> BLAKE3.Digest {
+    let digestCount = try! context.writeOneChunkBatchDigests(
+        buffer: buffer,
+        ranges: ranges,
+        into: outputBuffer
+    )
+    precondition(digestCount == ranges.count)
+    return hashMetalOutputBufferForBenchmark(
+        context: context,
+        outputBuffer: outputBuffer,
+        byteCount: digestCount * BLAKE3.digestByteCount
+    )
+}
+
+@inline(never)
 private func keyedHashMetalGPUForBenchmark(
     context: BLAKE3Metal.Context,
     buffer: MTLBuffer,
@@ -799,6 +834,29 @@ private func xofMetalWriteGPUForBenchmark(
 }
 
 @inline(never)
+private func xofMetalWritePrivateGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    length: Int,
+    outputByteCount: Int,
+    outputBuffer: MTLBuffer
+) -> BLAKE3.Digest {
+    let writtenByteCount = try! context.writeXOF(
+        buffer: buffer,
+        length: length,
+        outputByteCount: outputByteCount,
+        policy: .gpu,
+        into: outputBuffer
+    )
+    precondition(writtenByteCount == outputByteCount)
+    return hashMetalOutputBufferForBenchmark(
+        context: context,
+        outputBuffer: outputBuffer,
+        byteCount: writtenByteCount
+    )
+}
+
+@inline(never)
 private func xofMetalWrappedGPUForBenchmark(
     context: BLAKE3Metal.Context,
     input: [UInt8],
@@ -847,6 +905,30 @@ private func keyedXOFMetalWriteGPUForBenchmark(
     )
     precondition(writtenByteCount == outputByteCount)
     return hashOutputBufferForBenchmark(outputBuffer, byteCount: writtenByteCount)
+}
+
+@inline(never)
+private func keyedXOFMetalWritePrivateGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    length: Int,
+    outputByteCount: Int,
+    outputBuffer: MTLBuffer
+) -> BLAKE3.Digest {
+    let writtenByteCount = try! context.writeKeyedXOF(
+        key: benchmarkKey,
+        buffer: buffer,
+        length: length,
+        outputByteCount: outputByteCount,
+        policy: .gpu,
+        into: outputBuffer
+    )
+    precondition(writtenByteCount == outputByteCount)
+    return hashMetalOutputBufferForBenchmark(
+        context: context,
+        outputBuffer: outputBuffer,
+        byteCount: writtenByteCount
+    )
 }
 
 @inline(never)
@@ -951,6 +1033,30 @@ private func deriveKeyMetalWriteGPUForBenchmark(
     )
     precondition(writtenByteCount == outputByteCount)
     return hashOutputBufferForBenchmark(outputBuffer, byteCount: writtenByteCount)
+}
+
+@inline(never)
+private func deriveKeyMetalWritePrivateGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    length: Int,
+    outputByteCount: Int,
+    outputBuffer: MTLBuffer
+) -> BLAKE3.Digest {
+    let writtenByteCount = try! context.writeDerivedKey(
+        context: benchmarkDeriveKeyContext,
+        buffer: buffer,
+        length: length,
+        outputByteCount: outputByteCount,
+        policy: .gpu,
+        into: outputBuffer
+    )
+    precondition(writtenByteCount == outputByteCount)
+    return hashMetalOutputBufferForBenchmark(
+        context: context,
+        outputBuffer: outputBuffer,
+        byteCount: writtenByteCount
+    )
 }
 
 @inline(never)
@@ -2960,6 +3066,13 @@ for size in requestedSizes {
                 options: .storageModeShared
             )
             : nil
+        let batchOneChunkPrivateOutputBuffer = requestedMetalTimingModes.contains(.resident)
+            && requestedOperationTimingModes.contains(.batchOneChunk)
+            ? metalDevice.makeBuffer(
+                length: max(1, batchOneChunkRanges.count * BLAKE3.digestByteCount),
+                options: .storageModePrivate
+            )
+            : nil
         let xofOutputBuffer = requestedMetalTimingModes.contains(.resident)
             && (
                 requestedOperationTimingModes.contains(.xof)
@@ -2969,6 +3082,17 @@ for size in requestedSizes {
             ? metalDevice.makeBuffer(
                 length: max(1, requestedXOFOutputByteCount),
                 options: .storageModeShared
+            )
+            : nil
+        let xofPrivateOutputBuffer = requestedMetalTimingModes.contains(.resident)
+            && (
+                requestedOperationTimingModes.contains(.xof)
+                    || requestedOperationTimingModes.contains(.keyedXOF)
+                    || requestedOperationTimingModes.contains(.deriveKey)
+            )
+            ? metalDevice.makeBuffer(
+                length: max(1, requestedXOFOutputByteCount),
+                options: .storageModePrivate
             )
             : nil
         if requestedMetalTimingModes.contains(.resident) {
@@ -3152,6 +3276,28 @@ for size in requestedSizes {
                 }
             )
         }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedXOFDigest,
+           let xofPrivateOutputBuffer,
+           requestedOperationTimingModes.contains(.xof) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "xof-\(requestedXOFOutputByteCount)-resident-write-private-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedXOFDigest
+                ) { _ in
+                    xofMetalWritePrivateGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        length: size,
+                        outputByteCount: requestedXOFOutputByteCount,
+                        outputBuffer: xofPrivateOutputBuffer
+                    )
+                }
+            )
+        }
         if requestedMetalTimingModes.contains(.wrapped),
            let expectedXOFDigest,
            requestedOperationTimingModes.contains(.xof) {
@@ -3209,6 +3355,28 @@ for size in requestedSizes {
                         length: size,
                         outputByteCount: requestedXOFOutputByteCount,
                         outputBuffer: xofOutputBuffer
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedKeyedXOFDigest,
+           let xofPrivateOutputBuffer,
+           requestedOperationTimingModes.contains(.keyedXOF) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "keyed-xof-\(requestedXOFOutputByteCount)-resident-write-private-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedKeyedXOFDigest
+                ) { _ in
+                    keyedXOFMetalWritePrivateGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        length: size,
+                        outputByteCount: requestedXOFOutputByteCount,
+                        outputBuffer: xofPrivateOutputBuffer
                     )
                 }
             )
@@ -3275,6 +3443,28 @@ for size in requestedSizes {
             )
         }
         if requestedMetalTimingModes.contains(.resident),
+           let expectedDeriveKeyDigest,
+           let xofPrivateOutputBuffer,
+           requestedOperationTimingModes.contains(.deriveKey) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "derive-key-\(requestedXOFOutputByteCount)-resident-write-private-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedDeriveKeyDigest
+                ) { _ in
+                    deriveKeyMetalWritePrivateGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        length: size,
+                        outputByteCount: requestedXOFOutputByteCount,
+                        outputBuffer: xofPrivateOutputBuffer
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
            let expectedBatchOneChunkDigest,
            requestedOperationTimingModes.contains(.batchOneChunk) {
             operationResults.append(
@@ -3310,6 +3500,27 @@ for size in requestedSizes {
                         buffer: metalBuffer,
                         ranges: batchOneChunkRanges,
                         outputBuffer: batchOneChunkOutputBuffer
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedBatchOneChunkDigest,
+           let batchOneChunkPrivateOutputBuffer,
+           requestedOperationTimingModes.contains(.batchOneChunk) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-write-private-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedBatchOneChunkDigest
+                ) { _ in
+                    batchOneChunkMetalWritePrivateGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        ranges: batchOneChunkRanges,
+                        outputBuffer: batchOneChunkPrivateOutputBuffer
                     )
                 }
             )

@@ -1393,6 +1393,25 @@ final class BLAKE3Tests: XCTestCase {
         )
         XCTAssertEqual(readDigests(staticOutputBuffer, count: ranges.count), expected)
 
+        let aggregateExpected = BLAKE3.hashCPU(expected.flatMap(\.bytes))
+        let privateOutputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: ranges.count * BLAKE3.digestByteCount,
+                options: .storageModePrivate
+            )
+        )
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigests(buffer: buffer, ranges: ranges, into: privateOutputBuffer),
+            ranges.count
+        )
+        XCTAssertEqual(
+            try context.hashOneChunkBatch(
+                buffer: privateOutputBuffer,
+                ranges: [0..<(ranges.count * BLAKE3.digestByteCount)]
+            ).first,
+            aggregateExpected
+        )
+
         let emptyOutputBuffer = try XCTUnwrap(device.makeBuffer(length: 1, options: .storageModeShared))
         XCTAssertEqual(
             try context.writeOneChunkBatchDigests(buffer: buffer, ranges: [], into: emptyOutputBuffer),
@@ -1449,6 +1468,30 @@ final class BLAKE3Tests: XCTestCase {
             ranges.count
         )
         XCTAssertEqual(readDigests(staticKeyedOutputBuffer, count: ranges.count), expectedKeyed)
+
+        let aggregateExpectedKeyed = BLAKE3.hashCPU(expectedKeyed.flatMap(\.bytes))
+        let privateKeyedOutputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: ranges.count * BLAKE3.digestByteCount,
+                options: .storageModePrivate
+            )
+        )
+        XCTAssertEqual(
+            try context.writeKeyedOneChunkBatchDigests(
+                key: key,
+                buffer: buffer,
+                ranges: ranges,
+                into: privateKeyedOutputBuffer
+            ),
+            ranges.count
+        )
+        XCTAssertEqual(
+            try context.hashOneChunkBatch(
+                buffer: privateKeyedOutputBuffer,
+                ranges: [0..<(ranges.count * BLAKE3.digestByteCount)]
+            ).first,
+            aggregateExpectedKeyed
+        )
 
         let tooSmallOutputBuffer = try XCTUnwrap(
             device.makeBuffer(
@@ -1642,6 +1685,10 @@ final class BLAKE3Tests: XCTestCase {
         commandBuffer.waitUntilCompleted()
         XCTAssertNil(commandBuffer.error)
         XCTAssertEqual(readOutput(readbackBuffer, count: 513), expectedResidentXOF)
+        XCTAssertEqual(
+            try context.hashOneChunkBatch(buffer: privateOutputBuffer, ranges: [0..<513]).first,
+            BLAKE3.hashCPU(expectedResidentXOF)
+        )
 
         var keyedHasher = try BLAKE3.Hasher(key: key)
         keyedHasher.update(input)
