@@ -1313,35 +1313,63 @@ private func runBenchmark(
     )
 }
 
-private func runPipelinedBenchmark(
-    backend: String,
-    mode: String,
+private struct PipelinedBenchmarkCandidate {
+    let backend: String
+    let mode: String
+    let byteCount: Int
+    let operationsPerSample: Int
+    let expectedDigest: BLAKE3.Digest?
+    let operation: ([UInt8]) -> BLAKE3.Digest
+}
+
+private func runInterleavedPipelinedBenchmarks(
     input: [UInt8],
     iterations: Int,
-    operationsPerSample: Int,
-    expectedDigest: BLAKE3.Digest? = nil,
-    operation: ([UInt8]) -> BLAKE3.Digest
-) -> BenchmarkResult {
-    precondition(operationsPerSample > 0)
-    var sampleNanoseconds = [UInt64]()
-    sampleNanoseconds.reserveCapacity(iterations)
-    var finalDigest = operation(input)
-
-    for _ in 0..<iterations {
-        let started = DispatchTime.now().uptimeNanoseconds
-        finalDigest = operation(input)
-        let elapsed = DispatchTime.now().uptimeNanoseconds - started
-        sampleNanoseconds.append(max(1, elapsed / UInt64(operationsPerSample)))
+    candidates: [PipelinedBenchmarkCandidate]
+) -> [BenchmarkResult] {
+    guard !candidates.isEmpty else {
+        return []
     }
 
-    return BenchmarkResult(
-        backend: backend,
-        mode: mode,
-        byteCount: input.count,
-        sampleNanoseconds: sampleNanoseconds,
-        digest: finalDigest,
-        expectedDigest: expectedDigest
-    )
+    var sampleNanoseconds = Array(repeating: [UInt64](), count: candidates.count)
+    for index in sampleNanoseconds.indices {
+        sampleNanoseconds[index].reserveCapacity(iterations)
+    }
+    var finalDigests = candidates.map { $0.operation(input) }
+    let candidateIndices = Array(candidates.indices)
+
+    for pass in 0..<iterations {
+        // Alternate direction so a multi-width sweep does not always benchmark the same
+        // candidate first or last within a run.
+        if pass.isMultiple(of: 2) {
+            for candidateIndex in candidateIndices {
+                let candidate = candidates[candidateIndex]
+                let started = DispatchTime.now().uptimeNanoseconds
+                finalDigests[candidateIndex] = candidate.operation(input)
+                let elapsed = DispatchTime.now().uptimeNanoseconds - started
+                sampleNanoseconds[candidateIndex].append(max(1, elapsed / UInt64(candidate.operationsPerSample)))
+            }
+        } else {
+            for candidateIndex in candidateIndices.reversed() {
+                let candidate = candidates[candidateIndex]
+                let started = DispatchTime.now().uptimeNanoseconds
+                finalDigests[candidateIndex] = candidate.operation(input)
+                let elapsed = DispatchTime.now().uptimeNanoseconds - started
+                sampleNanoseconds[candidateIndex].append(max(1, elapsed / UInt64(candidate.operationsPerSample)))
+            }
+        }
+    }
+
+    return candidates.enumerated().map { index, candidate in
+        BenchmarkResult(
+            backend: candidate.backend,
+            mode: candidate.mode,
+            byteCount: candidate.byteCount,
+            sampleNanoseconds: sampleNanoseconds[index],
+            digest: finalDigests[index],
+            expectedDigest: candidate.expectedDigest
+        )
+    }
 }
 
 private func runRawBenchmark(
@@ -1490,6 +1518,40 @@ private struct BenchmarkResult {
     }
 }
 
+private struct BatchPipelineSweepRow: Codable {
+    let size: String
+    let byteCount: Int
+    let family: String
+    let mode: String
+    let width: Int
+    let iterations: Int
+    let medianGiBPerSecond: Double
+    let stabilityAdjustedGiBPerSecond: Double
+    let stabilityPenaltyPercent: Double
+    let minimumGiBPerSecond: Double
+    let firstHalfMedianGiBPerSecond: Double
+    let lastHalfMedianGiBPerSecond: Double
+    let driftPercent: Double
+    let correct: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case size
+        case byteCount = "byte_count"
+        case family
+        case mode
+        case width
+        case iterations
+        case medianGiBPerSecond = "median_gib_per_second"
+        case stabilityAdjustedGiBPerSecond = "stability_adjusted_gib_per_second"
+        case stabilityPenaltyPercent = "stability_penalty_percent"
+        case minimumGiBPerSecond = "minimum_gib_per_second"
+        case firstHalfMedianGiBPerSecond = "first_half_median_gib_per_second"
+        case lastHalfMedianGiBPerSecond = "last_half_median_gib_per_second"
+        case driftPercent = "drift_percent"
+        case correct
+    }
+}
+
 private struct BenchmarkReport: Codable {
     let schemaVersion: Int
     let generatedAtUTC: String
@@ -1497,6 +1559,7 @@ private struct BenchmarkReport: Codable {
     let environment: BenchmarkEnvironment
     let request: BenchmarkRequest
     let rows: [BenchmarkRow]
+    let batchPipelineSweepRows: [BatchPipelineSweepRow]?
     let sustainedRows: [SustainedRow]
     let memorySamples: [MemorySample]
 
@@ -1507,6 +1570,7 @@ private struct BenchmarkReport: Codable {
         case environment
         case request
         case rows
+        case batchPipelineSweepRows = "batch_pipeline_sweep_rows"
         case sustainedRows = "sustained_rows"
         case memorySamples = "memory_samples"
     }
@@ -1695,6 +1759,12 @@ private struct ThroughputStats {
     let maximum: Double
 }
 
+private let batchPipelineSweepFamilies = [
+    "resident-plan-write-pipeline",
+    "resident-plan-write-private-pipeline",
+    "resident-plan-write-private-chained-pipeline"
+]
+
 private func throughput(byteCount: Int, nanoseconds: UInt64) -> Double {
     guard byteCount > 0, nanoseconds > 0 else {
         return 0
@@ -1735,6 +1805,104 @@ private func percentile(_ sorted: [Double], _ percentile: Double) -> Double {
     let rank = Int(ceil(clamped * Double(sorted.count))) - 1
     let index = min(max(rank, 0), sorted.count - 1)
     return sorted[index]
+}
+
+private func batchPipelineSweepComponents(mode: String) -> (family: String, width: Int)? {
+    guard mode.hasPrefix("batch-one-chunk-"), mode.hasSuffix("-gpu") else {
+        return nil
+    }
+    for family in batchPipelineSweepFamilies {
+        let marker = "-\(family)-"
+        guard let widthStart = mode.range(of: marker)?.upperBound,
+              let gpuSuffix = mode.range(of: "-gpu", range: widthStart..<mode.endIndex),
+              let width = Int(mode[widthStart..<gpuSuffix.lowerBound]),
+              width > 1
+        else {
+            continue
+        }
+        return (family, width)
+    }
+    return nil
+}
+
+private func makeBatchPipelineSweepRows(from rows: [BenchmarkRow]) -> [BatchPipelineSweepRow] {
+    rows
+        .compactMap { row -> BatchPipelineSweepRow? in
+            guard let components = batchPipelineSweepComponents(mode: row.mode) else {
+                return nil
+            }
+            let samples = row.sampleNanoseconds.map { throughput(byteCount: row.byteCount, nanoseconds: $0) }
+            let halfWindow = max(1, (samples.count + 1) / 2)
+            let firstHalfMedian = median(Array(samples.prefix(halfWindow)).sorted())
+            let lastHalfMedian = median(Array(samples.suffix(halfWindow)).sorted())
+            let stabilityAdjusted = min(row.medianGiBPerSecond, firstHalfMedian, lastHalfMedian)
+            let stabilityPenalty = row.medianGiBPerSecond > 0
+                ? ((row.medianGiBPerSecond - stabilityAdjusted) / row.medianGiBPerSecond) * 100.0
+                : 0
+            let driftPercent = firstHalfMedian > 0
+                ? ((lastHalfMedian - firstHalfMedian) / firstHalfMedian) * 100.0
+                : 0
+            return BatchPipelineSweepRow(
+                size: row.size,
+                byteCount: row.byteCount,
+                family: components.family,
+                mode: row.mode,
+                width: components.width,
+                iterations: row.iterations,
+                medianGiBPerSecond: row.medianGiBPerSecond,
+                stabilityAdjustedGiBPerSecond: stabilityAdjusted,
+                stabilityPenaltyPercent: stabilityPenalty,
+                minimumGiBPerSecond: row.minimumGiBPerSecond,
+                firstHalfMedianGiBPerSecond: firstHalfMedian,
+                lastHalfMedianGiBPerSecond: lastHalfMedian,
+                driftPercent: driftPercent,
+                correct: row.correct
+            )
+        }
+        .sorted { lhs, rhs in
+            if lhs.byteCount != rhs.byteCount {
+                return lhs.byteCount < rhs.byteCount
+            }
+            let lhsFamilyRank = batchPipelineSweepFamilies.firstIndex(of: lhs.family) ?? .max
+            let rhsFamilyRank = batchPipelineSweepFamilies.firstIndex(of: rhs.family) ?? .max
+            if lhsFamilyRank != rhsFamilyRank {
+                return lhsFamilyRank < rhsFamilyRank
+            }
+            if lhs.stabilityAdjustedGiBPerSecond != rhs.stabilityAdjustedGiBPerSecond {
+                return lhs.stabilityAdjustedGiBPerSecond > rhs.stabilityAdjustedGiBPerSecond
+            }
+            if lhs.medianGiBPerSecond != rhs.medianGiBPerSecond {
+                return lhs.medianGiBPerSecond > rhs.medianGiBPerSecond
+            }
+            return lhs.width < rhs.width
+        }
+}
+
+private func printBatchPipelineSweepRows(_ rows: [BatchPipelineSweepRow]) {
+    guard !rows.isEmpty else {
+        return
+    }
+    print("")
+    print("batchPipelineSweepSummary=stability-adjusted=min(full-median,first-half-median,last-half-median)")
+    print("| Size | Sweep | Width | Median GiB/s | Stability-adj GiB/s | Penalty % | First-half | Last-half | Drift % | Min |")
+    print("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+    for row in rows {
+        print(
+            String(
+                format: "| %@ | %@ | %d | %.2f | %.2f | %.2f | %.2f | %.2f | %.2f | %.2f |",
+                row.size as NSString,
+                row.family as NSString,
+                row.width,
+                row.medianGiBPerSecond,
+                row.stabilityAdjustedGiBPerSecond,
+                row.stabilityPenaltyPercent,
+                row.firstHalfMedianGiBPerSecond,
+                row.lastHalfMedianGiBPerSecond,
+                row.driftPercent,
+                row.minimumGiBPerSecond
+            )
+        )
+    }
 }
 
 private func digestPrefix(_ digest: BLAKE3.Digest) -> String {
@@ -1937,6 +2105,11 @@ private func validate(_ report: BenchmarkReport) throws {
     for row in report.rows {
         try validate(row, requestedSizes: requestedSizes)
     }
+    if let batchPipelineSweepRows = report.batchPipelineSweepRows {
+        for row in batchPipelineSweepRows {
+            try validate(row, requestedSizes: requestedSizes)
+        }
+    }
 
     if let sustainedSeconds = report.request.sustainedSeconds, sustainedSeconds > 0 {
         try require(!report.sustainedRows.isEmpty, "sustained run requested but no sustained rows found")
@@ -1991,6 +2164,45 @@ private func validate(_ row: BenchmarkRow, requestedSizes: Set<Int>) throws {
         label: "\(row.backend) \(row.mode) \(row.size)"
     )
     try validateDigest(row.digest, label: "\(row.backend) \(row.mode) \(row.size)")
+}
+
+private func validate(_ row: BatchPipelineSweepRow, requestedSizes: Set<Int>) throws {
+    try require(requestedSizes.contains(row.byteCount), "batch pipeline sweep byte_count \(row.byteCount) was not requested")
+    try require(!row.size.isEmpty, "batch pipeline sweep row has empty size label")
+    try require(!row.family.isEmpty, "batch pipeline sweep row has empty family")
+    try require(!row.mode.isEmpty, "batch pipeline sweep row has empty mode")
+    try require(row.width > 1, "batch pipeline sweep row has invalid width")
+    try require(row.correct, "\(row.mode) \(row.size) is not correct")
+    try require(row.iterations > 0, "\(row.mode) \(row.size) has no iterations")
+    try require(
+        batchPipelineSweepComponents(mode: row.mode)?.family == row.family,
+        "\(row.mode) family does not match summary row"
+    )
+    try require(
+        batchPipelineSweepComponents(mode: row.mode)?.width == row.width,
+        "\(row.mode) width does not match summary row"
+    )
+    for (value, label) in [
+        (row.medianGiBPerSecond, "median"),
+        (row.stabilityAdjustedGiBPerSecond, "stability-adjusted"),
+        (row.minimumGiBPerSecond, "minimum"),
+        (row.firstHalfMedianGiBPerSecond, "first-half median"),
+        (row.lastHalfMedianGiBPerSecond, "last-half median"),
+        (row.stabilityPenaltyPercent, "stability penalty"),
+        (row.driftPercent, "drift")
+    ] {
+        try require(value.isFinite, "\(row.mode) has invalid \(label)")
+    }
+    try require(row.medianGiBPerSecond >= 0, "\(row.mode) has negative median throughput")
+    try require(row.stabilityAdjustedGiBPerSecond >= 0, "\(row.mode) has negative stability-adjusted throughput")
+    try require(row.minimumGiBPerSecond >= 0, "\(row.mode) has negative minimum throughput")
+    try require(row.firstHalfMedianGiBPerSecond >= 0, "\(row.mode) has negative first-half median throughput")
+    try require(row.lastHalfMedianGiBPerSecond >= 0, "\(row.mode) has negative last-half median throughput")
+    try require(row.stabilityPenaltyPercent >= 0, "\(row.mode) has negative stability penalty")
+    try require(
+        row.stabilityAdjustedGiBPerSecond <= row.medianGiBPerSecond + 0.000_001,
+        "\(row.mode) stability-adjusted throughput exceeds median"
+    )
 }
 
 private func validate(_ row: SustainedRow, requestedSizes: Set<Int>) throws {
@@ -2863,6 +3075,7 @@ if !requestedOperationTimingModes.isEmpty {
             print("batchPipelineWidth=\(width)")
         } else if !requestedBatchPipelineWidths.isEmpty {
             print("batchPipelineWidths=\(requestedBatchPipelineWidths.map(String.init).joined(separator: ","))")
+            print("batchPipelineSweep=interleaved-ping-pong")
         }
     }
     for mode in requestedOperationTimingModes {
@@ -3872,6 +4085,8 @@ for size in requestedSizes {
            let expectedBatchOneChunkDigest,
            let batchOneChunkPlan,
            requestedOperationTimingModes.contains(.batchOneChunk) {
+            var candidates = [PipelinedBenchmarkCandidate]()
+            candidates.reserveCapacity(requestedBatchPipelineWidths.count)
             for width in requestedBatchPipelineWidths {
                 guard let outputBuffers = makeBatchOneChunkOutputBuffers(width: width, options: .storageModeShared),
                       let pipeline = try? metalContext.makeOneChunkBatchWritePipeline(
@@ -3881,22 +4096,29 @@ for size in requestedSizes {
                 else {
                     continue
                 }
-                operationResults.append(
-                    runPipelinedBenchmark(
+                candidates.append(
+                    PipelinedBenchmarkCandidate(
                         backend: "metal",
                         mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-plan-write-pipeline-\(width)-gpu",
-                        input: input,
-                        iterations: iterations,
+                        byteCount: input.count,
                         operationsPerSample: width,
-                        expectedDigest: expectedBatchOneChunkDigest
-                    ) { _ in
-                        batchOneChunkMetalPlanWritePipelinedGPUForBenchmark(
-                            context: metalContext,
-                            pipeline: pipeline
-                        )
-                    }
+                        expectedDigest: expectedBatchOneChunkDigest,
+                        operation: { _ in
+                            batchOneChunkMetalPlanWritePipelinedGPUForBenchmark(
+                                context: metalContext,
+                                pipeline: pipeline
+                            )
+                        }
+                    )
                 )
             }
+            operationResults.append(
+                contentsOf: runInterleavedPipelinedBenchmarks(
+                    input: input,
+                    iterations: iterations,
+                    candidates: candidates
+                )
+            )
         }
         if requestedMetalTimingModes.contains(.resident),
            let expectedBatchOneChunkDigest,
@@ -3944,6 +4166,8 @@ for size in requestedSizes {
            let expectedBatchOneChunkDigest,
            let batchOneChunkPlan,
            requestedOperationTimingModes.contains(.batchOneChunk) {
+            var candidates = [PipelinedBenchmarkCandidate]()
+            candidates.reserveCapacity(requestedBatchPipelineWidths.count)
             for width in requestedBatchPipelineWidths {
                 guard let outputBuffers = makeBatchOneChunkOutputBuffers(width: width, options: .storageModePrivate),
                       let pipeline = try? metalContext.makeOneChunkBatchWritePipeline(
@@ -3953,22 +4177,29 @@ for size in requestedSizes {
                 else {
                     continue
                 }
-                operationResults.append(
-                    runPipelinedBenchmark(
+                candidates.append(
+                    PipelinedBenchmarkCandidate(
                         backend: "metal",
                         mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-plan-write-private-pipeline-\(width)-gpu",
-                        input: input,
-                        iterations: iterations,
+                        byteCount: input.count,
                         operationsPerSample: width,
-                        expectedDigest: expectedBatchOneChunkDigest
-                    ) { _ in
-                        batchOneChunkMetalPlanWritePrivatePipelinedGPUForBenchmark(
-                            context: metalContext,
-                            pipeline: pipeline
-                        )
-                    }
+                        expectedDigest: expectedBatchOneChunkDigest,
+                        operation: { _ in
+                            batchOneChunkMetalPlanWritePrivatePipelinedGPUForBenchmark(
+                                context: metalContext,
+                                pipeline: pipeline
+                            )
+                        }
+                    )
                 )
             }
+            operationResults.append(
+                contentsOf: runInterleavedPipelinedBenchmarks(
+                    input: input,
+                    iterations: iterations,
+                    candidates: candidates
+                )
+            )
         }
         if requestedMetalTimingModes.contains(.resident),
            let expectedBatchOneChunkDigest,
@@ -4016,6 +4247,8 @@ for size in requestedSizes {
            let expectedBatchOneChunkDigest,
            let batchOneChunkPlan,
            requestedOperationTimingModes.contains(.batchOneChunk) {
+            var candidates = [PipelinedBenchmarkCandidate]()
+            candidates.reserveCapacity(requestedBatchPipelineWidths.count)
             for width in requestedBatchPipelineWidths {
                 guard let outputBuffers = makeBatchOneChunkOutputBuffers(width: width, options: .storageModePrivate),
                       let pipeline = try? metalContext.makeOneChunkBatchChainedPipeline(
@@ -4025,22 +4258,29 @@ for size in requestedSizes {
                 else {
                     continue
                 }
-                operationResults.append(
-                    runPipelinedBenchmark(
+                candidates.append(
+                    PipelinedBenchmarkCandidate(
                         backend: "metal",
                         mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-plan-write-private-chained-pipeline-\(width)-gpu",
-                        input: input,
-                        iterations: iterations,
+                        byteCount: input.count,
                         operationsPerSample: width,
-                        expectedDigest: expectedBatchOneChunkDigest
-                    ) { _ in
-                        batchOneChunkMetalPlanWritePrivateChainedPipelinedGPUForBenchmark(
-                            context: metalContext,
-                            pipeline: pipeline
-                        )
-                    }
+                        expectedDigest: expectedBatchOneChunkDigest,
+                        operation: { _ in
+                            batchOneChunkMetalPlanWritePrivateChainedPipelinedGPUForBenchmark(
+                                context: metalContext,
+                                pipeline: pipeline
+                            )
+                        }
+                    )
                 )
             }
+            operationResults.append(
+                contentsOf: runInterleavedPipelinedBenchmarks(
+                    input: input,
+                    iterations: iterations,
+                    candidates: candidates
+                )
+            )
         }
         if requestedMetalTimingModes.contains(.resident),
            let expectedBatchOneChunkDigest,
@@ -4289,6 +4529,10 @@ for size in requestedSizes {
     recordMemoryStats(size: label, phase: "after-size", into: &memorySamples)
 }
 
+private let batchPipelineSweepRows = requestedBatchPipelineWidths.count > 1
+    ? makeBatchPipelineSweepRows(from: benchmarkRows)
+    : []
+printBatchPipelineSweepRows(batchPipelineSweepRows)
 printMemoryStats(memorySamples)
 
 if let requestedJSONOutputPath {
@@ -4348,6 +4592,7 @@ if let requestedJSONOutputPath {
             sustainedSeconds: reportSustainedSeconds
         ),
         rows: benchmarkRows,
+        batchPipelineSweepRows: batchPipelineSweepRows.isEmpty ? nil : batchPipelineSweepRows,
         sustainedRows: sustainedRows,
         memorySamples: memorySamples
     )

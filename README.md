@@ -40,7 +40,7 @@ Metal timing classes are separated by ownership and transfer cost. Resident mode
 | 512 MiB | 60.80 | 64.90 | 23.05 | 51.01 | 6.31 |
 | 1 GiB | 63.15 | 59.21 | 23.95 | 34.00 | 2.22 |
 
-Focused one-chunk batch records from April 20, 2026 use resident Metal buffers on Apple M4 with runtime
+Focused one-chunk batch records from April 20-21, 2026 use resident Metal buffers on Apple M4 with runtime
 Metal source, 64 MiB input, 5 iterations, and JSON validation. These targeted rows are tuning records for
 the batch APIs; they do not replace the full publication sweep above. The 64 B rows use the contiguous
 single-block Metal batch kernel with row-specific pipeline widths; the 1024 B rows use the full-chunk
@@ -50,7 +50,7 @@ plan/write pipelines. The fused aggregate path is correct, but it was not the re
 | ---: | ---: | --- | ---: | ---: | ---: |
 | 64 B | 23 | `resident-plan-write-pipeline-23-gpu` | 42.67 | 32.24 | 43.79 |
 | 64 B | 28 | `resident-plan-write-private-pipeline-28-gpu` | 46.97 | 45.98 | 47.60 |
-| 64 B | 28 | `resident-plan-write-private-chained-pipeline-28-gpu` | 33.64 | 33.13 | 34.17 |
+| 64 B | 27 | `resident-plan-write-private-chained-pipeline-27-gpu` | 33.84 | 33.54 | 34.34 |
 | 1024 B | 8 | `resident-plan-write-pipeline-8-gpu` | 62.91 | 53.47 | 64.98 |
 | 1024 B | 8 | `resident-plan-write-private-chained-pipeline-8-gpu` | 59.76 | 50.84 | 66.17 |
 
@@ -78,6 +78,17 @@ swift run -c release blake3-bench \
   --file-modes none \
   --cryptokit-modes none \
   --json-output /tmp/blake3-batch-width28-chained-confirm.json
+
+swift run -c release blake3-bench \
+  --sizes 64m \
+  --iterations 5 \
+  --metal-modes resident \
+  --operation-modes batch-one-chunk \
+  --batch-item-bytes 64 \
+  --batch-pipeline-width 27 \
+  --file-modes none \
+  --cryptokit-modes none \
+  --json-output /tmp/blake3-batch-width27-stability-confirm-seq.json
 
 swift run -c release blake3-bench \
   --sizes 64m \
@@ -487,6 +498,12 @@ swift run -c release blake3-bench \
   --cryptokit-modes none \
   --json-output /tmp/blake3-batch-width-matrix.json
 ```
+
+Multi-width sweeps run in an interleaved ping-pong order so each width is measured across roughly the same
+thermal position instead of finishing one candidate family before starting the next. These sweeps also emit a
+stability summary in the CLI output and a `batch_pipeline_sweep_rows` JSON section. The stability-adjusted
+throughput is `min(full median, first-half median, last-half median)`, which is a better filter for widths
+that actually survive focused confirmation.
 
 By default, `blake3-bench` also includes a `cryptokit sha256` row as a familiar Apple platform baseline. CryptoKit does not provide BLAKE3, so this is a cross-algorithm comparison against Apple's built-in SHA-256 implementation, not a BLAKE3 parity row. CryptoKit rows are emitted after BLAKE3 CPU/Metal rows to avoid perturbing Metal timings. Use `--cryptokit-modes none` when tuning only BLAKE3 backends.
 
