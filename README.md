@@ -49,8 +49,8 @@ plan/write pipelines. The fused aggregate path is correct, but it was not the re
 | Batch item | Pipeline width | Metal row | Median GiB/s | Min GiB/s | P95 GiB/s |
 | ---: | ---: | --- | ---: | ---: | ---: |
 | 64 B | 23 | `resident-plan-write-pipeline-23-gpu` | 42.67 | 32.24 | 43.79 |
-| 64 B | 28 | `resident-plan-write-private-pipeline-28-gpu` | 46.95 | 45.75 | 47.50 |
-| 64 B | 28 | `resident-plan-write-private-chained-pipeline-28-gpu` | 33.23 | 32.40 | 33.64 |
+| 64 B | 28 | `resident-plan-write-private-pipeline-28-gpu` | 46.97 | 45.98 | 47.60 |
+| 64 B | 28 | `resident-plan-write-private-chained-pipeline-28-gpu` | 33.64 | 33.13 | 34.17 |
 | 1024 B | 8 | `resident-plan-write-pipeline-8-gpu` | 62.91 | 53.47 | 64.98 |
 | 1024 B | 8 | `resident-plan-write-private-chained-pipeline-8-gpu` | 59.76 | 50.84 | 66.17 |
 
@@ -77,7 +77,7 @@ swift run -c release blake3-bench \
   --batch-pipeline-width 28 \
   --file-modes none \
   --cryptokit-modes none \
-  --json-output /tmp/blake3-batch-contiguous-block-64-w28-next.json
+  --json-output /tmp/blake3-batch-width28-chained-confirm.json
 
 swift run -c release blake3-bench \
   --sizes 64m \
