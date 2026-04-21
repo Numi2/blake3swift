@@ -302,6 +302,39 @@ Follow-up isolated file harness and staged tile experiment: `benchmarks/run-file
 
 Follow-up async staged-read pipeline experiment: staged-read now launches tile reductions through Metal's async workspace and leases separate staging and chunk-CV buffers per in-flight slot, then drains completed tile CVs in file order. Two-repeat isolated staged-read runs showed `BLAKE3_SWIFT_METAL_STAGED_READ_INFLIGHT=2` at 10.09/10.56 and 10.23/10.51 GiB/s for 512 MiB/1 GiB, `=3` at 11.15/11.51 and 10.17/11.25 GiB/s, and `=4` at 10.75/11.52 and 10.85/11.48 GiB/s. The default staged-read in-flight count is now 4 because it gave the most stable 1 GiB row while keeping the 512 MiB row ahead of the prior default. The final implementation also creates a staged-read-specific async workspace with four preallocated resource leases, avoiding transient scratch allocation in the timed path. A final-code staged-only repeat under `/tmp/blake3swift-file-reality-async-workspace-default4` measured 10.44/11.58 and 10.15/11.27 GiB/s, and the final-code all-file isolated pass under `/tmp/blake3swift-file-reality-async-workspace-default4-all` measured 7.53/7.71 GiB/s for `read`, 9.41/9.42 GiB/s for `mmap-parallel`, 7.37/9.60 GiB/s for tiled Metal mmap, and 11.80/11.99 GiB/s for staged-read Metal.
 
+## April 21, 2026 Mapped Metal File Threshold and Tile Follow-Up
+
+Promoted local artifacts:
+
+```sh
+benchmarks/results/20260421T-local-file-threshold-max
+benchmarks/results/20260421T-local-file-tiled-64m
+benchmarks/results/20260421T-local-file-tiled-128m
+benchmarks/results/20260421T-local-file-tiled-default128
+```
+
+This pass revisited the weak `metal-tiled-mmap` file path. The first change forces mapped Metal tiles onto the chunk-CV write plus CPU stack-merge path by effectively disabling the older mapped-file subtree-decomposition shortcut. On local isolated file runs, that raised `metal-tiled-mmap-gpu` from the prior same-day `5.03/6.01 GiB/s` band at `256 MiB/1 GiB` to `5.92/6.26 GiB/s` under `20260421T-local-file-threshold-max`.
+
+The second change retuned the mapped Metal tile size around that new execution shape. A mixed quick sweep suggested larger mapped tiles, so the default `64 MiB` and candidate `128 MiB` settings were rerun in isolated one-mode file processes:
+
+| File input | Tiled mmap GPU, isolated `64 MiB` tile | Tiled mmap GPU, isolated `128 MiB` tile |
+| --- | ---: | ---: |
+| 256 MiB | 4.78 | 5.28 |
+| 1 GiB | 4.31 | 5.87 |
+
+That A/B was large enough to promote, so `BLAKE3File.metalMappedTileByteCount` now defaults to `128 MiB`. A default-behavior confirm under `20260421T-local-file-tiled-default128` measured:
+
+| File input | Tiled mmap GPU, default `128 MiB` confirm |
+| --- | ---: |
+| 256 MiB | 5.14 |
+| 1 GiB | 6.11 |
+
+Interpretation:
+
+- The mapped Metal file path still trails `metal-staged-read`, but the chunk-CV-only mapped path is a better fit for this local M4 than the earlier subtree-heavy mapped reduction path.
+- After that structural change, a larger `128 MiB` mapped tile was clearly better than the previous `64 MiB` default in the isolated A/B.
+- These file rows remain sensitive to cache warmth, paging, and run order, so they are recorded as isolated file-path records rather than being promoted into the main buffer-hashing publication table.
+
 ## April 19, 2026 Head Publication Run
 
 Prior full publication artifact:

@@ -71,6 +71,17 @@ The integrated isolated overhead harness is kept as a separate acceptance record
 
 These harness rows are inserted for traceability, not as blind replacements for the curated publication rows. In this rerun, the clearest harness improvement was `resident-gpu` at `64 MiB`, while `private`, `staged`, and `wrapped` were mixed enough that the earlier curated references remain the cleaner headline table.
 
+### File Reality Check
+
+The current promoted file-path tuning records come from the local isolated artifacts `benchmarks/results/20260421T-local-file-threshold-max`, `benchmarks/results/20260421T-local-file-tiled-64m`, `benchmarks/results/20260421T-local-file-tiled-128m`, and `benchmarks/results/20260421T-local-file-tiled-default128`. The important change is that tiled Metal mmap now stays on the chunk-CV write plus CPU merge path, and the default tiled mmap file tile is now `128 MiB` instead of `64 MiB`.
+
+| File input | Metal tiled mmap GPU, old 64 MiB isolated A/B | Metal tiled mmap GPU, promoted 128 MiB isolated A/B | Metal tiled mmap GPU, default 128 MiB confirm |
+| --- | ---: | ---: | ---: |
+| 256 MiB | 4.78 | 5.28 | 5.14 |
+| 1 GiB | 4.31 | 5.87 | 6.11 |
+
+These are still reality-check file rows, not resident-buffer claims. `metal-staged-read` remains the stronger bounded file strategy on this machine, but the mapped no-copy path is no longer leaving as much performance on the table as it did with the older subtree-heavy and smaller-tile defaults.
+
 ### SIMD4 CPU One-Shot Baseline
 
 | Input | Official C one-shot | Swift scalar | Swift SIMD4 | Swift SIMD4 as % of C |
@@ -254,7 +265,7 @@ let digest = try await BLAKE3File.hashAsync(
 print(digest)
 ```
 
-The default tiled mmap Metal file tile is 64 MiB on this branch, while staged-read Metal now defaults to 32 MiB. `.metalTiledMemoryMapped()` remains available as the no-copy mmap path, but `.metalStagedRead()` is the preferred reality-check path when mmap page-in noise dominates. Metal file strategies accelerate complete chunk/subtree chaining-value work on the GPU; the final canonical CV-stack merge and any final partial chunk remain on the CPU. Staged-read Metal uses four bounded shared buffers and separate per-slot CV buffers by default so file reads can overlap pending GPU tile work without sharing scratch or CV output buffers. CPU mapped parallel hashing uses the direct one-shot parallel tree for files up to 2 GiB, then falls back to the smaller 16 MiB subtree-tiled path to avoid unbounded CV workspace growth. CPU regular-file reads use bounded 64 MiB read tiles, two read buffers below 128 MiB, four read buffers at and above 128 MiB, and CPU subtree reductions overlapped with the next file read. Set `BLAKE3_SWIFT_READ_INFLIGHT` to `1`, `2`, `3`, or `4` to override that default for local sweeps.
+The default tiled mmap Metal file tile is 128 MiB on this branch, while staged-read Metal now defaults to 32 MiB. `.metalTiledMemoryMapped()` remains available as the no-copy mmap path, but `.metalStagedRead()` is the preferred reality-check path when mmap page-in noise dominates. Metal file strategies accelerate complete chunk/subtree chaining-value work on the GPU; the final canonical CV-stack merge and any final partial chunk remain on the CPU. Tiled mmap Metal now prefers writing chunk CVs and merging them on the CPU over the older subtree-heavy mapped path, which improved the local isolated `256 MiB` and `1 GiB` file rows enough to justify the larger default tile. Staged-read Metal uses four bounded shared buffers and separate per-slot CV buffers by default so file reads can overlap pending GPU tile work without sharing scratch or CV output buffers. CPU mapped parallel hashing uses the direct one-shot parallel tree for files up to 2 GiB, then falls back to the smaller 16 MiB subtree-tiled path to avoid unbounded CV workspace growth. CPU regular-file reads use bounded 64 MiB read tiles, two read buffers below 128 MiB, four read buffers at and above 128 MiB, and CPU subtree reductions overlapped with the next file read. Set `BLAKE3_SWIFT_READ_INFLIGHT` to `1`, `2`, `3`, or `4` to override that default for local sweeps.
 
 ## Metal Resident Hashing
 
@@ -648,9 +659,3 @@ Useful docs:
 ## Status
 
 This repository is an active performance engineering project. The Swift and Metal APIs are intended to be explicit about ownership, buffering, timing, and concurrency, but APIs may evolve as benchmarks and hardware tuning improve. See [docs/api-stability.md](docs/api-stability.md) before pinning an integration.
-
-## License
-
-This repository is **not open source**. It is proprietary source-available software for evaluation, audit, verification, and benchmark review only. Production, commercial, hosted, redistributed, or revenue-connected use requires a separate commercial license. See [LICENSE.md](LICENSE.md).
-
-Vendored upstream BLAKE3 materials remain under their upstream license terms. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

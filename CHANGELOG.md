@@ -6,7 +6,6 @@ This project uses semantic versioning for public releases. Until `1.0.0`, source
 
 ### Added
 
-- Proprietary source-available license and commercial-use boundary.
 - Release process, API stability notes, benchmark fixture scripts, example package, and security review notes.
 - Fast differential tests for awkward BLAKE3 block, chunk, and subtree boundaries.
 - Reusable CPU parallel scheduler inside `BLAKE3.Context`.
@@ -42,10 +41,6 @@ Use this structure for GitHub releases:
 
 ```md
 # BLAKE3Swift vX.Y.Z
-
-## License
-
-This is proprietary source-available software. Production, commercial, hosted, redistributed, or revenue-connected use requires a separate commercial license.
 
 ## API Stability
 

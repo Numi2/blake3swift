@@ -19,7 +19,7 @@ public enum BLAKE3File {
     public static let readTileByteCount = 64 * 1024 * 1024
 
     /// Default tile size used by tiled Metal file paths.
-    public static let metalMappedTileByteCount = readTileByteCount
+    public static let metalMappedTileByteCount = 128 * 1024 * 1024
 
     /// Default tile size used by staged Metal read paths.
     public static let metalStagedReadTileByteCount = 32 * 1024 * 1024
@@ -1620,6 +1620,7 @@ public enum BLAKE3File {
             return try body(MappedRegion(pointer: nil, size: 0))
         }
 
+        enableReadAhead(fd: fd)
         let pointer = mmap(nil, size, PROT_READ, MAP_PRIVATE, fd, 0)
         guard let pointer,
               pointer != MAP_FAILED
@@ -1628,6 +1629,7 @@ public enum BLAKE3File {
         }
         defer { munmap(pointer, size) }
 
+        adviseMappedRead(pointer: pointer, size: size)
         return try body(MappedRegion(pointer: pointer, size: size))
     }
 
@@ -1660,6 +1662,7 @@ public enum BLAKE3File {
             return try await body(MappedRegion(pointer: nil, size: 0))
         }
 
+        enableReadAhead(fd: fd)
         let pointer = mmap(nil, size, PROT_READ, MAP_PRIVATE, fd, 0)
         guard let pointer,
               pointer != MAP_FAILED
@@ -1668,12 +1671,23 @@ public enum BLAKE3File {
         }
         defer { munmap(pointer, size) }
 
+        adviseMappedRead(pointer: pointer, size: size)
         try Task.checkCancellation()
         return try await body(MappedRegion(pointer: pointer, size: size))
     }
 
     private static func isRegularFile(mode: mode_t) -> Bool {
         (mode & S_IFMT) == S_IFREG
+    }
+
+    private static func adviseMappedRead(pointer: UnsafeMutableRawPointer, size: Int) {
+        #if canImport(Darwin)
+        guard size > 0 else {
+            return
+        }
+        _ = posix_madvise(pointer, size, POSIX_MADV_SEQUENTIAL)
+        _ = posix_madvise(pointer, size, POSIX_MADV_WILLNEED)
+        #endif
     }
 
     #if canImport(Metal)
@@ -1794,7 +1808,7 @@ public enum BLAKE3File {
         }
     }
 
-    private static let metalMappedSubtreeDecompositionChunkThreshold = 8 * 1_024
+    private static let metalMappedSubtreeDecompositionChunkThreshold = Int.max
     private static let metalStagedReadSubtreeDecompositionChunkThreshold = 32 * 1_024
     #endif
 }

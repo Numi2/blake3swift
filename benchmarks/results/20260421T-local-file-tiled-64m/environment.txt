@@ -1,0 +1,28 @@
+date_utc=2026-04-21T17:36:41Z
+commit=b008a55335b8c6487e255b6c9b5f559cb3872cec
+working_tree=dirty
+git_status= M CHANGELOG.md
+git_status= M README.md
+git_status= M Sources/Blake3/BLAKE3File.swift
+git_status=?? benchmarks/results/20260421T-local-file-reality-madvise/
+git_status=?? benchmarks/results/20260421T-local-file-threshold-max/
+git_status=?? benchmarks/results/20260421T-local-file-tiled-128m/
+git_status=?? benchmarks/results/20260421T-local-file-tiled-64m/
+swift=Apple Swift version 6.3 (swiftlang-6.3.0.123.5 clang-2100.0.123.102) Target: arm64-apple-macosx26.0 
+ProductName:		macOS
+ProductVersion:		26.5
+BuildVersion:		25F5058e
+Apple M4
+Mac16,12
+performance_cores=4
+active_cpus=10
+metal_library=runtime-source
+sizes=256m,1g
+iterations=5
+file_modes=metal-tiled-mmap
+repeats=1
+cooldown_seconds=0
+read_inflight=default
+metal_staged_read_inflight=default
+metal_tile_size=64m
+cryptokit_modes=none
