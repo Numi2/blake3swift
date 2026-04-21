@@ -6,19 +6,7 @@ The goal is straightforward: a Swift-first BLAKE3 implementation with explicit e
 
 ## Performance Snapshot
 
-Unless noted otherwise, the numbers below are medians from local release runs on Apple M4 with 10 active CPUs, macOS 26.5, and Swift 6.3. All promoted rows come from validated JSON artifacts under `benchmarks/results`. The first table is the apples-to-apples comparison that matters most for evaluating the core implementation: in-process CPU one-shot hashing against the vendored official C implementation. Parallel CPU, default dispatch, and Metal rows are reported separately because they are different execution models and timing classes.
-
-### Apples-to-Apples CPU One-Shot Baseline
-
-| Input | Official C one-shot | Swift scalar | Swift SIMD4 | Swift SIMD4 as % of C |
-| --- | ---: | ---: | ---: | ---: |
-| 16 MiB | 2.27 | 1.17 | 1.84 | 81% |
-| 64 MiB | 2.24 | 1.17 | 1.80 | 80% |
-| 256 MiB | 2.21 | 1.17 | 1.80 | 81% |
-| 512 MiB | 2.20 | 1.17 | 1.79 | 81% |
-| 1 GiB | 2.20 | 1.17 | 1.79 | 81% |
-
-On this machine, the fastest pure Swift one-shot CPU path in the promoted artifact is the SIMD4 implementation at `1.79` to `1.84 GiB/s`, which is about `80%` to `81%` of the vendored official C one-shot. That is the fairest benchmark in this README for judging the core implementation itself. It is not a claim about threaded upstream C, other compilers, or other hardware.
+Unless noted otherwise, the numbers below are medians from local release runs on Apple M4 with 10 active CPUs, macOS 26.5, and Swift 6.3. All promoted rows come from validated JSON artifacts under `benchmarks/results`. Parallel CPU, default dispatch, and Metal rows are reported separately because they are different execution models and timing classes. The strict in-process SIMD4 versus vendored official C CPU comparison is kept below the higher-level tables.
 
 ### Detailed Engineering Results
 
@@ -70,6 +58,18 @@ Metal timing classes:
 | 256 MiB | 51.90 | 57.43 | 19.91 | 45.50 | 11.03 |
 | 512 MiB | 60.80 | 64.90 | 23.05 | 51.01 | 6.31 |
 | 1 GiB | 63.15 | 59.21 | 23.95 | 34.00 | 2.22 |
+
+### SIMD4 CPU One-Shot Baseline
+
+| Input | Official C one-shot | Swift scalar | Swift SIMD4 | Swift SIMD4 as % of C |
+| --- | ---: | ---: | ---: | ---: |
+| 16 MiB | 2.27 | 1.17 | 1.84 | 81% |
+| 64 MiB | 2.24 | 1.17 | 1.80 | 80% |
+| 256 MiB | 2.21 | 1.17 | 1.80 | 81% |
+| 512 MiB | 2.20 | 1.17 | 1.79 | 81% |
+| 1 GiB | 2.20 | 1.17 | 1.79 | 81% |
+
+On this machine, the fastest pure Swift one-shot CPU path in the promoted artifact is the SIMD4 implementation at `1.79` to `1.84 GiB/s`, which is about `80%` to `81%` of the vendored official C one-shot. That is the fairest benchmark in this README for judging the core implementation itself. It is not a claim about threaded upstream C, other compilers, or other hardware.
 
 The full experiment log, including focused `e2e` follow-ups, small/mid-size digest-only Metal recovery, file-path results, one-chunk batch results, and rejected tuning experiments, is tracked in [docs/performance-results.md](docs/performance-results.md).
 
