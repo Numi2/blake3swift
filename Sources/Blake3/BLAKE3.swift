@@ -111,8 +111,8 @@ public enum BLAKE3 {
 
     /// Hashes raw input and returns `outputByteCount` BLAKE3 output bytes.
     ///
-    /// The 32-byte case uses the default backend policy. Longer output is expanded through the CPU
-    /// root-output path because Metal kernels produce the standard digest.
+    /// The 32-byte case uses the default backend policy. Longer output uses Metal when the default policy
+    /// selects it, and otherwise expands through the CPU root-output path.
     public static func hash(
         _ input: UnsafeRawBufferPointer,
         outputByteCount: Int
@@ -124,6 +124,23 @@ public enum BLAKE3 {
         if outputByteCount == digestByteCount {
             return hash(input).bytes
         }
+
+        #if canImport(Metal)
+        if shouldUseMetalForDefaultHash(byteCount: input.count) {
+            do {
+                return try BLAKE3Metal.hash(input: input, outputByteCount: outputByteCount, policy: .gpu)
+            } catch {
+                return rootBytes(
+                    input,
+                    key: BLAKE3Core.iv,
+                    flags: 0,
+                    mode: .parallel(maxWorkers: nil),
+                    outputByteCount: outputByteCount,
+                    wipingWorkspace: false
+                )
+            }
+        }
+        #endif
 
         return rootBytes(
             input,
@@ -330,14 +347,29 @@ public enum BLAKE3 {
             return []
         }
 
-        let contextBytes = Array(context.utf8)
-        return contextBytes.withUnsafeBytes { contextRaw in
-            var contextKey = BLAKE3Core.deriveKeyContextKey(contextRaw)
-            defer {
-                BLAKE3Core.secureWipe(&contextKey)
+        return material.withUnsafeBytes { materialRaw in
+            #if canImport(Metal)
+            if shouldUseMetalForDefaultHash(byteCount: materialRaw.count) {
+                do {
+                    return try BLAKE3Metal.deriveKey(
+                        context: context,
+                        material: materialRaw,
+                        outputByteCount: outputByteCount,
+                        policy: .gpu
+                    )
+                } catch {
+                    // Fall through to the CPU derivation path when Metal is unavailable or rejected.
+                }
             }
-            return material.withUnsafeBytes { materialRaw in
-                rootBytes(
+            #endif
+
+            let contextBytes = Array(context.utf8)
+            return contextBytes.withUnsafeBytes { contextRaw in
+                var contextKey = BLAKE3Core.deriveKeyContextKey(contextRaw)
+                defer {
+                    BLAKE3Core.secureWipe(&contextKey)
+                }
+                return rootBytes(
                     materialRaw,
                     key: contextKey,
                     flags: BLAKE3Core.deriveKeyMaterial,

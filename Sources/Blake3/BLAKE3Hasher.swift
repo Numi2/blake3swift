@@ -4,26 +4,36 @@ import CryptoKit
 #endif
 
 private final class BLAKE3HasherStorage: @unchecked Sendable {
+    private static let chunkBlockCount = BLAKE3Core.chunkLen / BLAKE3Core.blockLen
+
     private var key: BLAKE3Core.ChainingValue
     let flags: UInt32
     private var cvStack: BLAKE3Core.CVStack
-    private var chunkBuffer: [UInt8]
+    private var currentCV: BLAKE3Core.ChainingValue
+    private var bufferedBlockWords: BLAKE3Core.BlockWords
+    private var bufferedBlockLength: Int
+    private var compressedBlockCount: Int
     private var parallelChunkCVs: [BLAKE3Core.ChainingValue]
 
     init(key: BLAKE3Core.ChainingValue = BLAKE3Core.iv, flags: UInt32 = 0) {
         self.key = key
         self.flags = flags
         self.cvStack = BLAKE3Core.CVStack()
-        self.chunkBuffer = []
+        self.currentCV = key
+        self.bufferedBlockWords = BLAKE3Core.BlockWords(repeating: 0)
+        self.bufferedBlockLength = 0
+        self.compressedBlockCount = 0
         self.parallelChunkCVs = []
-        self.chunkBuffer.reserveCapacity(BLAKE3Core.chunkLen)
     }
 
     init(copying other: BLAKE3HasherStorage) {
         self.key = other.key
         self.flags = other.flags
         self.cvStack = other.cvStack
-        self.chunkBuffer = other.chunkBuffer
+        self.currentCV = other.currentCV
+        self.bufferedBlockWords = other.bufferedBlockWords
+        self.bufferedBlockLength = other.bufferedBlockLength
+        self.compressedBlockCount = other.compressedBlockCount
         self.parallelChunkCVs = other.parallelChunkCVs
     }
 
@@ -32,7 +42,11 @@ private final class BLAKE3HasherStorage: @unchecked Sendable {
     }
 
     deinit {
-        reset(keepingCapacity: false, wiping: containsSecretState)
+        clearState(
+            keepingCapacity: false,
+            wiping: containsSecretState,
+            restoreCurrentChunk: false
+        )
         if containsSecretState {
             BLAKE3Core.secureWipe(&key)
         }
@@ -47,40 +61,79 @@ private final class BLAKE3HasherStorage: @unchecked Sendable {
 
         var offset = 0
 
-        if chunkBuffer.count == BLAKE3Core.chunkLen {
+        if currentChunkIsComplete {
             appendCurrentChunkCV()
         }
 
-        if !chunkBuffer.isEmpty {
-            let byteCount = min(BLAKE3Core.chunkLen - chunkBuffer.count, input.count)
+        if bufferedBlockLength == BLAKE3Core.blockLen {
+            compressBufferedBlock()
+        }
+
+        if bufferedBlockLength > 0 {
+            let byteCount = min(BLAKE3Core.blockLen - bufferedBlockLength, input.count)
             appendBytes(from: baseAddress.advanced(by: offset), count: byteCount)
             offset += byteCount
 
-            if chunkBuffer.count == BLAKE3Core.chunkLen, offset < input.count {
-                appendCurrentChunkCV()
+            if bufferedBlockLength == BLAKE3Core.blockLen, offset < input.count {
+                if compressedBlockCount == Self.chunkBlockCount - 1 {
+                    appendCurrentChunkCV()
+                } else {
+                    compressBufferedBlock()
+                }
             } else {
                 return
             }
         }
 
-        if input.count - offset > BLAKE3Core.chunkLen {
-            while input.count - offset > BLAKE3Core.chunkLen {
-                appendChunkCV(
-                    BLAKE3Core.blake3ProcessFullChunk(
-                        baseAddress: baseAddress,
-                        chunkByteOffset: offset,
-                        chunkCounter: cvStack.finalizedChunkCount,
-                        key: key,
-                        flags: flags
-                    )
+        while currentChunkIsEmpty, input.count - offset > BLAKE3Core.chunkLen {
+            appendChunkCV(
+                BLAKE3Core.blake3ProcessFullChunk(
+                    baseAddress: baseAddress,
+                    chunkByteOffset: offset,
+                    chunkCounter: cvStack.finalizedChunkCount,
+                    key: key,
+                    flags: flags
                 )
-                offset += BLAKE3Core.chunkLen
-            }
+            )
+            offset += BLAKE3Core.chunkLen
         }
 
-        let remaining = input.count - offset
-        if remaining > 0 {
-            appendBytes(from: baseAddress.advanced(by: offset), count: remaining)
+        if currentChunkIsEmpty, input.count - offset > BLAKE3Core.blockLen {
+            loadCurrentChunk(from: baseAddress.advanced(by: offset), count: input.count - offset)
+            return
+        }
+
+        while offset < input.count {
+            if currentChunkIsComplete {
+                appendCurrentChunkCV()
+            }
+
+            let remaining = input.count - offset
+            if bufferedBlockLength == 0, remaining > BLAKE3Core.blockLen {
+                if compressedBlockCount == Self.chunkBlockCount - 1 {
+                    appendCurrentChunkCV(
+                        finalBlockBaseAddress: baseAddress.advanced(by: offset)
+                    )
+                } else {
+                    compressFullBlock(
+                        baseAddress: baseAddress.advanced(by: offset)
+                    )
+                }
+                offset += BLAKE3Core.blockLen
+                continue
+            }
+
+            let byteCount = min(BLAKE3Core.blockLen - bufferedBlockLength, remaining)
+            appendBytes(from: baseAddress.advanced(by: offset), count: byteCount)
+            offset += byteCount
+
+            if bufferedBlockLength == BLAKE3Core.blockLen, offset < input.count {
+                if compressedBlockCount == Self.chunkBlockCount - 1 {
+                    appendCurrentChunkCV()
+                } else {
+                    compressBufferedBlock()
+                }
+            }
         }
     }
 
@@ -89,11 +142,11 @@ private final class BLAKE3HasherStorage: @unchecked Sendable {
         maxWorkers: Int? = nil,
         leavesTrailingChunk: Bool = true
     ) {
-        if chunkBuffer.count == BLAKE3Core.chunkLen {
+        if currentChunkIsComplete {
             appendCurrentChunkCV()
         }
 
-        guard chunkBuffer.isEmpty,
+        guard currentChunkIsEmpty,
               input.count >= BLAKE3Core.parallelMinBytes,
               maxWorkers != 1
         else {
@@ -140,67 +193,186 @@ private final class BLAKE3HasherStorage: @unchecked Sendable {
 
         let remaining = input.count - parallelLength
         if remaining > 0 {
-            appendBytes(from: baseAddress.advanced(by: parallelLength), count: remaining)
+            update(
+                UnsafeRawBufferPointer(
+                    start: baseAddress.advanced(by: parallelLength),
+                    count: remaining
+                )
+            )
         }
     }
 
     func reset(keepingCapacity: Bool = true, wiping: Bool? = nil) {
-        let shouldWipe = wiping ?? containsSecretState
+        clearState(
+            keepingCapacity: keepingCapacity,
+            wiping: wiping ?? containsSecretState,
+            restoreCurrentChunk: true
+        )
+    }
+
+    private func clearState(
+        keepingCapacity: Bool,
+        wiping: Bool,
+        restoreCurrentChunk: Bool
+    ) {
+        let shouldWipe = wiping
         cvStack.reset(keepingCapacity: keepingCapacity, wiping: shouldWipe)
         if shouldWipe {
-            BLAKE3Core.secureWipeBytes(&chunkBuffer)
+            BLAKE3Core.secureWipe(&currentCV)
+            withUnsafeMutableBytes(of: &bufferedBlockWords) { raw in
+                BLAKE3Core.secureWipe(raw)
+            }
             BLAKE3Core.secureWipeChainingValues(&parallelChunkCVs)
         }
-        chunkBuffer.removeAll(keepingCapacity: keepingCapacity)
+        if restoreCurrentChunk {
+            resetCurrentChunk()
+        } else {
+            discardCurrentChunk()
+        }
         parallelChunkCVs.removeAll(keepingCapacity: keepingCapacity)
     }
 
     var retainedTreeNodeCount: Int {
-        cvStack.retainedTreeNodeCount(hasCurrentChunk: !chunkBuffer.isEmpty)
+        cvStack.retainedTreeNodeCount(hasCurrentChunk: !currentChunkIsEmpty)
     }
 
     private var containsSecretState: Bool {
         flags != 0
     }
 
+    private var currentChunkIsEmpty: Bool {
+        compressedBlockCount == 0 && bufferedBlockLength == 0
+    }
+
+    private var currentChunkIsComplete: Bool {
+        compressedBlockCount == Self.chunkBlockCount - 1
+            && bufferedBlockLength == BLAKE3Core.blockLen
+    }
+
     func rootOutput() -> BLAKE3Core.Output {
-        let currentChunkOutput = chunkBuffer.withUnsafeBytes { raw in
-            BLAKE3Core.chunkOutput(
-                raw,
-                chunkCounter: cvStack.finalizedChunkCount,
-                key: key,
-                flags: flags
-            )
-        }
+        let outputFlags = flags
+            | (compressedBlockCount == 0 ? BLAKE3Core.chunkStart : 0)
+            | BLAKE3Core.chunkEnd
+        let currentChunkOutput = BLAKE3Core.Output(
+            inputCV: currentCV,
+            blockWords: currentBlockWords(),
+            blockLength: UInt32(bufferedBlockLength),
+            counter: cvStack.finalizedChunkCount,
+            flags: outputFlags
+        )
 
         return cvStack.rootOutput(currentChunkOutput: currentChunkOutput, key: key, flags: flags)
     }
 
     private func appendCurrentChunkCV() {
-        precondition(chunkBuffer.count == BLAKE3Core.chunkLen)
-        let cv = chunkBuffer.withUnsafeBytes { raw in
-            BLAKE3Core.blake3ProcessFullChunk(
-                baseAddress: raw.baseAddress!,
-                chunkByteOffset: 0,
-                chunkCounter: cvStack.finalizedChunkCount,
-                key: key,
-                flags: flags
-            )
-        }
+        precondition(currentChunkIsComplete)
+        let cv = BLAKE3Core.compressChainingValue(
+            cv: currentCV,
+            blockWords: currentBlockWords(),
+            blockLength: UInt32(BLAKE3Core.blockLen),
+            counter: cvStack.finalizedChunkCount,
+            flags: flags | BLAKE3Core.chunkEnd
+        )
         appendChunkCV(cv)
-        chunkBuffer.removeAll(keepingCapacity: true)
+        resetCurrentChunk()
+    }
+
+    private func appendCurrentChunkCV(finalBlockBaseAddress: UnsafeRawPointer) {
+        precondition(compressedBlockCount == Self.chunkBlockCount - 1)
+        precondition(bufferedBlockLength == 0)
+        let cv = BLAKE3Core.blake3CompressWithPerm(
+            cv: currentCV,
+            blockBaseAddress: finalBlockBaseAddress,
+            blockLength: UInt32(BLAKE3Core.blockLen),
+            counter: cvStack.finalizedChunkCount,
+            flags: flags | BLAKE3Core.chunkEnd
+        )
+        appendChunkCV(cv)
+        resetCurrentChunk()
     }
 
     private func appendChunkCV(_ cv: BLAKE3Core.ChainingValue) {
         cvStack.pushChunkCV(cv, key: key, flags: flags)
     }
 
+    private func compressBufferedBlock() {
+        precondition(bufferedBlockLength == BLAKE3Core.blockLen)
+        precondition(compressedBlockCount < Self.chunkBlockCount - 1)
+        let blockFlags = flags | (compressedBlockCount == 0 ? BLAKE3Core.chunkStart : 0)
+        currentCV = BLAKE3Core.compressChainingValue(
+            cv: currentCV,
+            blockWords: currentBlockWords(),
+            blockLength: UInt32(BLAKE3Core.blockLen),
+            counter: cvStack.finalizedChunkCount,
+            flags: blockFlags
+        )
+        compressedBlockCount += 1
+        resetBufferedBlock()
+    }
+
+    private func compressFullBlock(baseAddress: UnsafeRawPointer) {
+        precondition(bufferedBlockLength == 0)
+        precondition(compressedBlockCount < Self.chunkBlockCount - 1)
+        let blockFlags = flags | (compressedBlockCount == 0 ? BLAKE3Core.chunkStart : 0)
+        currentCV = BLAKE3Core.blake3CompressWithPerm(
+            cv: currentCV,
+            blockBaseAddress: baseAddress,
+            blockLength: UInt32(BLAKE3Core.blockLen),
+            counter: cvStack.finalizedChunkCount,
+            flags: blockFlags
+        )
+        compressedBlockCount += 1
+    }
+
+    private func currentBlockWords() -> BLAKE3Core.BlockWords {
+        var words = bufferedBlockWords
+        BLAKE3Core.canonicalLittleEndianWords(&words)
+        return words
+    }
+
+    private func resetCurrentChunk() {
+        currentCV = key
+        compressedBlockCount = 0
+        resetBufferedBlock()
+    }
+
+    private func discardCurrentChunk() {
+        currentCV = BLAKE3Core.ChainingValue(repeating: 0)
+        compressedBlockCount = 0
+        resetBufferedBlock()
+    }
+
+    private func resetBufferedBlock() {
+        bufferedBlockWords = BLAKE3Core.BlockWords(repeating: 0)
+        bufferedBlockLength = 0
+    }
+
+    private func loadCurrentChunk(from pointer: UnsafeRawPointer, count: Int) {
+        precondition(currentChunkIsEmpty)
+        precondition(count > BLAKE3Core.blockLen && count <= BLAKE3Core.chunkLen)
+        let output = BLAKE3Core.chunkOutput(
+            UnsafeRawBufferPointer(start: pointer, count: count),
+            chunkCounter: cvStack.finalizedChunkCount,
+            key: key,
+            flags: flags
+        )
+        currentCV = output.inputCV
+        bufferedBlockWords = output.blockWords
+        bufferedBlockLength = Int(output.blockLength)
+        compressedBlockCount = (count + BLAKE3Core.blockLen - 1) / BLAKE3Core.blockLen - 1
+    }
+
     private func appendBytes(from pointer: UnsafeRawPointer, count: Int) {
         guard count > 0 else {
             return
         }
-        let bytes = UnsafeRawBufferPointer(start: pointer, count: count).bindMemory(to: UInt8.self)
-        chunkBuffer.append(contentsOf: bytes)
+        precondition(bufferedBlockLength + count <= BLAKE3Core.blockLen)
+        withUnsafeMutableBytes(of: &bufferedBlockWords) { destination in
+            destination.baseAddress!
+                .advanced(by: bufferedBlockLength)
+                .copyMemory(from: pointer, byteCount: count)
+        }
+        bufferedBlockLength += count
     }
 }
 
@@ -208,7 +380,7 @@ public extension BLAKE3 {
     /// Incremental BLAKE3 hasher with copy-on-write value semantics.
     ///
     /// `Hasher` is intended to be mutated by one task at a time. Copying a hasher is cheap until either
-    /// copy is mutated, at which point the internal chaining-value stack and buffered chunk are copied.
+    /// copy is mutated, at which point the internal chaining-value stack and current block state are copied.
     struct Hasher {
         private var storage: BLAKE3HasherStorage
 
@@ -254,6 +426,10 @@ public extension BLAKE3 {
                 key: contextKey,
                 flags: BLAKE3Core.deriveKeyMaterial
             )
+        }
+
+        init(key: BLAKE3Core.ChainingValue, flags: UInt32) {
+            self.storage = BLAKE3HasherStorage(key: key, flags: flags)
         }
 
         private mutating func ensureUniqueStorage() {

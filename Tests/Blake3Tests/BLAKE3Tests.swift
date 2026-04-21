@@ -1,5 +1,5 @@
 import XCTest
-@testable import Blake3
+@_spi(Benchmark) @testable import Blake3
 #if canImport(CryptoKit)
 import CryptoKit
 #endif
@@ -688,6 +688,113 @@ final class BLAKE3Tests: XCTestCase {
         }
     }
 
+    func testFileKeyedDeriveAndXOFStrategiesMatchOneShot() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("blake3swift-file-mode-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let fileURL = directory.appendingPathComponent("input.bin")
+        let input = deterministicInput(byteCount: 5 * BLAKE3.chunkByteCount + 901)
+        try Data(input).write(to: fileURL, options: .atomic)
+
+        let key = deterministicInput(byteCount: BLAKE3.keyByteCount)
+        let kdfContext = "BLAKE3 file mode test context"
+        let outputByteCount = 513
+        let seek: UInt64 = 17
+
+        var unkeyedHasher = BLAKE3.Hasher()
+        unkeyedHasher.update(input)
+        let expectedXOF = xofBytes(from: unkeyedHasher, count: outputByteCount, seek: seek)
+        let expectedKeyedDigest = try BLAKE3.keyedHash(key: key, input: input)
+        var keyedHasher = try BLAKE3.Hasher(key: key)
+        keyedHasher.update(input)
+        let expectedKeyedXOF = xofBytes(from: keyedHasher, count: outputByteCount, seek: seek)
+        var deriveHasher = BLAKE3.Hasher(deriveKeyContext: kdfContext)
+        deriveHasher.update(input)
+        let expectedDerived = xofBytes(from: deriveHasher, count: outputByteCount, seek: seek)
+
+        var strategies: [(String, BLAKE3File.Strategy)] = [
+            ("read", .read(bufferSize: 2 * BLAKE3.chunkByteCount)),
+            ("mmap", .memoryMapped),
+            ("mmap-parallel", .memoryMappedParallel(maxThreads: 2))
+        ]
+        #if canImport(Metal)
+        if BLAKE3Metal.isAvailable {
+            strategies.append(
+                ("metal-mmap", .metalMemoryMapped(policy: .gpu, fallbackToCPU: false))
+            )
+            strategies.append(
+                (
+                    "metal-tiled",
+                    .metalTiledMemoryMapped(
+                        tileByteCount: 2 * BLAKE3.chunkByteCount,
+                        fallbackToCPU: false
+                    )
+                )
+            )
+            strategies.append(
+                (
+                    "metal-staged",
+                    .metalStagedRead(
+                        tileByteCount: 2 * BLAKE3.chunkByteCount,
+                        fallbackToCPU: false
+                    )
+                )
+            )
+        }
+        #endif
+
+        for (label, strategy) in strategies {
+            XCTAssertEqual(
+                try BLAKE3File.hash(
+                    path: fileURL.path,
+                    strategy: strategy,
+                    outputByteCount: outputByteCount,
+                    seek: seek
+                ),
+                expectedXOF,
+                "file XOF mismatch for strategy=\(label)"
+            )
+            XCTAssertEqual(
+                try BLAKE3File.keyedHash(key: key, path: fileURL.path, strategy: strategy),
+                expectedKeyedDigest,
+                "file keyed digest mismatch for strategy=\(label)"
+            )
+            XCTAssertEqual(
+                try BLAKE3File.keyedHash(
+                    key: key,
+                    path: fileURL.path,
+                    strategy: strategy,
+                    outputByteCount: outputByteCount,
+                    seek: seek
+                ),
+                expectedKeyedXOF,
+                "file keyed XOF mismatch for strategy=\(label)"
+            )
+            XCTAssertEqual(
+                try BLAKE3File.deriveKey(
+                    context: kdfContext,
+                    path: fileURL.path,
+                    strategy: strategy,
+                    outputByteCount: outputByteCount,
+                    seek: seek
+                ),
+                expectedDerived,
+                "file derive-key mismatch for strategy=\(label)"
+            )
+        }
+
+        XCTAssertEqual(
+            try BLAKE3File.deriveKey(
+                context: kdfContext,
+                path: fileURL.path,
+                outputByteCount: 0
+            ),
+            []
+        )
+    }
+
     func testFileAsyncHashing() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("blake3swift-async-tests-\(UUID().uuidString)", isDirectory: true)
@@ -761,6 +868,12 @@ final class BLAKE3Tests: XCTestCase {
         XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_chunk_tile128_pingpong_cvs"))
         XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_chunk_tile512_cvs"))
         XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_root_digest"))
+        XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_root_xof"))
+        XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_batch_contiguous_block_digest"))
+        XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_batch_contiguous_block_output_chunk_cvs"))
+        XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_batch_one_block_digest"))
+        XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_batch_one_block_output_chunk_cvs"))
+        XCTAssertTrue(BLAKE3Metal.kernelSource.contains("blake3_batch_one_full_chunk_output_chunk_cvs"))
     }
 
     func testMetalContextRecordsLibrarySource() throws {
@@ -1196,6 +1309,1133 @@ final class BLAKE3Tests: XCTestCase {
                 "context no-copy GPU mismatch for byteCount=\(size)"
             )
         }
+    }
+
+    func testMetalOneChunkBatchMatchesCPUAcrossSmallRanges() throws {
+        guard BLAKE3Metal.isAvailable else {
+            throw XCTSkip("Metal is not available on this host.")
+        }
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let context = try BLAKE3Metal.makeContext(device: device)
+        let lengths = [0, 1, 2, 63, 64, 65, 255, 1_023, 1_024]
+        var input = [UInt8]()
+        var ranges = [Range<Int>]()
+        for (index, length) in lengths.enumerated() {
+            let lowerBound = input.count
+            input.append(
+                contentsOf: (0..<length).map { byteIndex in
+                    UInt8((byteIndex + index * 17) % 251)
+                }
+            )
+            ranges.append(lowerBound..<input.count)
+        }
+
+        let buffer = try XCTUnwrap(input.withUnsafeBytes { raw in
+            device.makeBuffer(bytes: raw.baseAddress!, length: raw.count, options: .storageModeShared)
+        })
+        let expected = ranges.map { range in
+            input.withUnsafeBytes { raw in
+                BLAKE3.hash(
+                    UnsafeRawBufferPointer(
+                        start: raw.baseAddress!.advanced(by: range.lowerBound),
+                        count: range.count
+                    )
+                )
+            }
+        }
+
+        XCTAssertEqual(
+            try context.hashOneChunkBatch(buffer: buffer, ranges: ranges),
+            expected
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.hashOneChunkBatch(buffer: buffer, ranges: ranges),
+            expected
+        )
+        XCTAssertEqual(try context.hashOneChunkBatch(buffer: buffer, ranges: []), [])
+
+        func readDigests(_ outputBuffer: MTLBuffer, count: Int) -> [BLAKE3.Digest] {
+            let rawOutput = UnsafeRawBufferPointer(
+                start: outputBuffer.contents(),
+                count: count * BLAKE3.digestByteCount
+            )
+            let baseAddress = rawOutput.baseAddress!
+            return (0..<count).map { index in
+                BLAKE3.Digest(
+                    UnsafeRawBufferPointer(
+                        start: baseAddress.advanced(by: index * BLAKE3.digestByteCount),
+                        count: BLAKE3.digestByteCount
+                    )
+                )
+            }
+        }
+
+        let outputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: ranges.count * BLAKE3.digestByteCount,
+                options: .storageModeShared
+            )
+        )
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigests(buffer: buffer, ranges: ranges, into: outputBuffer),
+            ranges.count
+        )
+        XCTAssertEqual(readDigests(outputBuffer, count: ranges.count), expected)
+
+        let staticOutputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: ranges.count * BLAKE3.digestByteCount,
+                options: .storageModeShared
+            )
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.writeOneChunkBatchDigests(
+                buffer: buffer,
+                ranges: ranges,
+                into: staticOutputBuffer
+            ),
+            ranges.count
+        )
+        XCTAssertEqual(readDigests(staticOutputBuffer, count: ranges.count), expected)
+
+        let plan = try context.makeOneChunkBatchPlan(buffer: buffer, ranges: ranges)
+        XCTAssertEqual(plan.digestCount, ranges.count)
+        XCTAssertEqual(plan.outputByteCount, ranges.count * BLAKE3.digestByteCount)
+        XCTAssertEqual(try context.hashOneChunkBatch(plan: plan), expected)
+        XCTAssertEqual(try BLAKE3Metal.hashOneChunkBatch(plan: plan), expected)
+        let planOutputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: plan.outputByteCount,
+                options: .storageModeShared
+            )
+        )
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigests(plan: plan, into: planOutputBuffer),
+            ranges.count
+        )
+        XCTAssertEqual(readDigests(planOutputBuffer, count: ranges.count), expected)
+        XCTAssertEqual(
+            try BLAKE3Metal.writeOneChunkBatchDigests(plan: plan, into: planOutputBuffer),
+            ranges.count
+        )
+        XCTAssertEqual(readDigests(planOutputBuffer, count: ranges.count), expected)
+        let pipelineOutputBuffers = try (0..<3).map { _ in
+            try XCTUnwrap(
+                device.makeBuffer(
+                    length: plan.outputByteCount,
+                    options: .storageModeShared
+                )
+            )
+        }
+        let pipeline = try context.makeOneChunkBatchWritePipeline(
+            plan: plan,
+            outputBuffers: pipelineOutputBuffers
+        )
+        XCTAssertEqual(pipeline.inFlightCount, pipelineOutputBuffers.count)
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigests(pipeline: pipeline),
+            pipeline.inFlightCount * plan.digestCount
+        )
+        XCTAssertEqual(
+            readDigests(pipeline.outputBuffers[pipeline.inFlightCount - 1], count: ranges.count),
+            expected
+        )
+
+        let aggregateExpected = BLAKE3.hashCPU(expected.flatMap(\.bytes))
+        let privateOutputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: ranges.count * BLAKE3.digestByteCount,
+                options: .storageModePrivate
+            )
+        )
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigests(buffer: buffer, ranges: ranges, into: privateOutputBuffer),
+            ranges.count
+        )
+        XCTAssertEqual(
+            try context.hashOneChunkBatch(
+                buffer: privateOutputBuffer,
+                ranges: [0..<(ranges.count * BLAKE3.digestByteCount)]
+            ).first,
+            aggregateExpected
+        )
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigestsAndHashOutput(
+                buffer: buffer,
+                ranges: ranges,
+                into: privateOutputBuffer
+            ),
+            aggregateExpected
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.writeOneChunkBatchDigestsAndHashOutput(
+                buffer: buffer,
+                ranges: ranges,
+                into: privateOutputBuffer
+            ),
+            aggregateExpected
+        )
+        XCTAssertEqual(
+            try context.hashOneChunkBatchDigestBytes(buffer: buffer, ranges: ranges),
+            aggregateExpected
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.hashOneChunkBatchDigestBytes(buffer: buffer, ranges: ranges),
+            aggregateExpected
+        )
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigestsAndHashOutput(plan: plan, into: privateOutputBuffer),
+            aggregateExpected
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.writeOneChunkBatchDigestsAndHashOutput(plan: plan, into: privateOutputBuffer),
+            aggregateExpected
+        )
+        XCTAssertEqual(
+            try context.hashOneChunkBatchDigestBytes(plan: plan),
+            aggregateExpected
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.hashOneChunkBatchDigestBytes(plan: plan),
+            aggregateExpected
+        )
+        let privatePipelineOutputBuffers = try (0..<3).map { _ in
+            try XCTUnwrap(
+                device.makeBuffer(
+                    length: plan.outputByteCount,
+                    options: .storageModePrivate
+                )
+            )
+        }
+        let privatePipeline = try context.makeOneChunkBatchWritePipeline(
+            plan: plan,
+            outputBuffers: privatePipelineOutputBuffers
+        )
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigests(pipeline: privatePipeline),
+            privatePipeline.inFlightCount * plan.digestCount
+        )
+        XCTAssertEqual(
+            try context.hashOneChunkBatch(
+                buffer: privatePipeline.outputBuffers[privatePipeline.inFlightCount - 1],
+                ranges: [0..<plan.outputByteCount]
+            ).first,
+            aggregateExpected
+        )
+        let chainedPipeline = try context.makeOneChunkBatchChainedPipeline(
+            plan: plan,
+            outputBuffers: privatePipelineOutputBuffers
+        )
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigestsAndHashOutput(pipeline: chainedPipeline),
+            aggregateExpected
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.writeOneChunkBatchDigestsAndHashOutput(pipeline: chainedPipeline),
+            aggregateExpected
+        )
+        let manyRanges = Array(repeating: ranges, count: 4).flatMap { $0 }
+        let manyExpected = Array(repeating: expected, count: 4).flatMap { $0 }
+        let manyAggregateExpected = BLAKE3.hashCPU(manyExpected.flatMap(\.bytes))
+        let manyOutputByteCount = manyRanges.count * BLAKE3.digestByteCount
+        XCTAssertGreaterThan(manyOutputByteCount, BLAKE3.chunkByteCount)
+        let manyPrivateOutputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: manyOutputByteCount,
+                options: .storageModePrivate
+            )
+        )
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigestsAndHashOutput(
+                buffer: buffer,
+                ranges: manyRanges,
+                into: manyPrivateOutputBuffer
+            ),
+            manyAggregateExpected
+        )
+        XCTAssertEqual(
+            try context.hashOneChunkBatchDigestBytes(buffer: buffer, ranges: manyRanges),
+            manyAggregateExpected
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.hashOneChunkBatchDigestBytes(buffer: buffer, ranges: manyRanges),
+            manyAggregateExpected
+        )
+
+        let blockInput = deterministicInput(byteCount: BLAKE3.blockByteCount * 40)
+        let blockRanges = (0..<40).map { index in
+            let lowerBound = index * BLAKE3.blockByteCount
+            return lowerBound..<(lowerBound + BLAKE3.blockByteCount)
+        }
+        let blockBuffer = try XCTUnwrap(blockInput.withUnsafeBytes { raw in
+            device.makeBuffer(bytes: raw.baseAddress!, length: raw.count, options: .storageModeShared)
+        })
+        let blockExpected = blockRanges.map { range in
+            blockInput.withUnsafeBytes { raw in
+                BLAKE3.hash(
+                    UnsafeRawBufferPointer(
+                        start: raw.baseAddress!.advanced(by: range.lowerBound),
+                        count: range.count
+                    )
+                )
+            }
+        }
+        XCTAssertEqual(
+            try context.hashOneChunkBatch(buffer: blockBuffer, ranges: blockRanges),
+            blockExpected
+        )
+        let blockPlan = try context.makeOneChunkBatchPlan(buffer: blockBuffer, ranges: blockRanges)
+        XCTAssertEqual(try context.hashOneChunkBatch(plan: blockPlan), blockExpected)
+        let blockOutputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: blockPlan.outputByteCount,
+                options: .storageModeShared
+            )
+        )
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigests(plan: blockPlan, into: blockOutputBuffer),
+            blockRanges.count
+        )
+        XCTAssertEqual(readDigests(blockOutputBuffer, count: blockRanges.count), blockExpected)
+        let blockAggregateExpected = BLAKE3.hashCPU(blockExpected.flatMap(\.bytes))
+        let blockPrivateOutputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: blockPlan.outputByteCount,
+                options: .storageModePrivate
+            )
+        )
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigestsAndHashOutput(
+                plan: blockPlan,
+                into: blockPrivateOutputBuffer
+            ),
+            blockAggregateExpected
+        )
+        XCTAssertEqual(
+            try context.hashOneChunkBatchDigestBytes(plan: blockPlan),
+            blockAggregateExpected
+        )
+        let blockKey = deterministicInput(byteCount: BLAKE3.keyByteCount)
+        let blockExpectedKeyed = blockRanges.map { range in
+            blockInput.withUnsafeBytes { raw in
+                try! BLAKE3.keyedHash(
+                    key: blockKey,
+                    input: UnsafeRawBufferPointer(
+                        start: raw.baseAddress!.advanced(by: range.lowerBound),
+                        count: range.count
+                    )
+                )
+            }
+        }
+        XCTAssertEqual(
+            try context.keyedHashOneChunkBatch(key: blockKey, plan: blockPlan),
+            blockExpectedKeyed
+        )
+        XCTAssertEqual(
+            try context.writeKeyedOneChunkBatchDigests(
+                key: blockKey,
+                plan: blockPlan,
+                into: blockOutputBuffer
+            ),
+            blockRanges.count
+        )
+        XCTAssertEqual(readDigests(blockOutputBuffer, count: blockRanges.count), blockExpectedKeyed)
+
+        let fullChunkInput = deterministicInput(byteCount: BLAKE3.chunkByteCount * 4)
+        let fullChunkRanges = (0..<4).map { index in
+            let lowerBound = index * BLAKE3.chunkByteCount
+            return lowerBound..<(lowerBound + BLAKE3.chunkByteCount)
+        }
+        let fullChunkBuffer = try XCTUnwrap(fullChunkInput.withUnsafeBytes { raw in
+            device.makeBuffer(bytes: raw.baseAddress!, length: raw.count, options: .storageModeShared)
+        })
+        let fullChunkExpected = fullChunkRanges.map { range in
+            fullChunkInput.withUnsafeBytes { raw in
+                BLAKE3.hash(
+                    UnsafeRawBufferPointer(
+                        start: raw.baseAddress!.advanced(by: range.lowerBound),
+                        count: range.count
+                    )
+                )
+            }
+        }
+        XCTAssertEqual(
+            try context.hashOneChunkBatch(buffer: fullChunkBuffer, ranges: fullChunkRanges),
+            fullChunkExpected
+        )
+        let fullChunkOutputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: fullChunkRanges.count * BLAKE3.digestByteCount,
+                options: .storageModeShared
+            )
+        )
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigests(
+                buffer: fullChunkBuffer,
+                ranges: fullChunkRanges,
+                into: fullChunkOutputBuffer
+            ),
+            fullChunkRanges.count
+        )
+        XCTAssertEqual(readDigests(fullChunkOutputBuffer, count: fullChunkRanges.count), fullChunkExpected)
+        let fullChunkAggregateExpected = BLAKE3.hashCPU(fullChunkExpected.flatMap(\.bytes))
+        let fullChunkPrivateOutputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: fullChunkRanges.count * BLAKE3.digestByteCount,
+                options: .storageModePrivate
+            )
+        )
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigestsAndHashOutput(
+                buffer: fullChunkBuffer,
+                ranges: fullChunkRanges,
+                into: fullChunkPrivateOutputBuffer
+            ),
+            fullChunkAggregateExpected
+        )
+        let fullChunkPlan = try context.makeOneChunkBatchPlan(buffer: fullChunkBuffer, ranges: fullChunkRanges)
+        XCTAssertEqual(try context.hashOneChunkBatch(plan: fullChunkPlan), fullChunkExpected)
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigests(
+                plan: fullChunkPlan,
+                into: fullChunkOutputBuffer
+            ),
+            fullChunkRanges.count
+        )
+        XCTAssertEqual(readDigests(fullChunkOutputBuffer, count: fullChunkRanges.count), fullChunkExpected)
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigestsAndHashOutput(
+                plan: fullChunkPlan,
+                into: fullChunkPrivateOutputBuffer
+            ),
+            fullChunkAggregateExpected
+        )
+        XCTAssertEqual(
+            try context.hashOneChunkBatchDigestBytes(plan: fullChunkPlan),
+            fullChunkAggregateExpected
+        )
+
+        let prefixedFullChunkOffset = 13
+        let prefixedFullChunkInput = deterministicInput(
+            byteCount: prefixedFullChunkOffset + BLAKE3.chunkByteCount * 3
+        )
+        let prefixedFullChunkRanges = (0..<3).map { index in
+            let lowerBound = prefixedFullChunkOffset + index * BLAKE3.chunkByteCount
+            return lowerBound..<(lowerBound + BLAKE3.chunkByteCount)
+        }
+        let prefixedFullChunkBuffer = try XCTUnwrap(prefixedFullChunkInput.withUnsafeBytes { raw in
+            device.makeBuffer(bytes: raw.baseAddress!, length: raw.count, options: .storageModeShared)
+        })
+        let prefixedFullChunkExpected = prefixedFullChunkRanges.map { range in
+            prefixedFullChunkInput.withUnsafeBytes { raw in
+                BLAKE3.hash(
+                    UnsafeRawBufferPointer(
+                        start: raw.baseAddress!.advanced(by: range.lowerBound),
+                        count: range.count
+                    )
+                )
+            }
+        }
+        let prefixedFullChunkPlan = try context.makeOneChunkBatchPlan(
+            buffer: prefixedFullChunkBuffer,
+            ranges: prefixedFullChunkRanges
+        )
+        XCTAssertEqual(try context.hashOneChunkBatch(plan: prefixedFullChunkPlan), prefixedFullChunkExpected)
+        let prefixedFullChunkOutputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: prefixedFullChunkPlan.outputByteCount,
+                options: .storageModeShared
+            )
+        )
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigests(
+                plan: prefixedFullChunkPlan,
+                into: prefixedFullChunkOutputBuffer
+            ),
+            prefixedFullChunkRanges.count
+        )
+        XCTAssertEqual(
+            readDigests(prefixedFullChunkOutputBuffer, count: prefixedFullChunkRanges.count),
+            prefixedFullChunkExpected
+        )
+        let prefixedFullChunkAggregateExpected = BLAKE3.hashCPU(prefixedFullChunkExpected.flatMap(\.bytes))
+        XCTAssertEqual(
+            try context.hashOneChunkBatchDigestBytes(plan: prefixedFullChunkPlan),
+            prefixedFullChunkAggregateExpected
+        )
+
+        let emptyOutputBuffer = try XCTUnwrap(device.makeBuffer(length: 1, options: .storageModeShared))
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigests(buffer: buffer, ranges: [], into: emptyOutputBuffer),
+            0
+        )
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigestsAndHashOutput(buffer: buffer, ranges: [], into: emptyOutputBuffer),
+            BLAKE3.hashCPU([UInt8]())
+        )
+        XCTAssertEqual(
+            try context.hashOneChunkBatchDigestBytes(buffer: buffer, ranges: []),
+            BLAKE3.hashCPU([UInt8]())
+        )
+        let emptyPlan = try context.makeOneChunkBatchPlan(buffer: buffer, ranges: [])
+        XCTAssertEqual(emptyPlan.digestCount, 0)
+        XCTAssertEqual(emptyPlan.outputByteCount, 0)
+        XCTAssertEqual(try context.hashOneChunkBatch(plan: emptyPlan), [])
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigests(plan: emptyPlan, into: emptyOutputBuffer),
+            0
+        )
+        XCTAssertEqual(
+            try context.writeOneChunkBatchDigestsAndHashOutput(plan: emptyPlan, into: emptyOutputBuffer),
+            BLAKE3.hashCPU([UInt8]())
+        )
+        XCTAssertEqual(
+            try context.hashOneChunkBatchDigestBytes(plan: emptyPlan),
+            BLAKE3.hashCPU([UInt8]())
+        )
+
+        let key = deterministicInput(byteCount: BLAKE3.keyByteCount)
+        let expectedKeyed = ranges.map { range in
+            input.withUnsafeBytes { raw in
+                try! BLAKE3.keyedHash(
+                    key: key,
+                    input: UnsafeRawBufferPointer(
+                        start: raw.baseAddress!.advanced(by: range.lowerBound),
+                        count: range.count
+                    )
+                )
+            }
+        }
+        let fullChunkExpectedKeyed = fullChunkRanges.map { range in
+            fullChunkInput.withUnsafeBytes { raw in
+                try! BLAKE3.keyedHash(
+                    key: key,
+                    input: UnsafeRawBufferPointer(
+                        start: raw.baseAddress!.advanced(by: range.lowerBound),
+                        count: range.count
+                    )
+                )
+            }
+        }
+        XCTAssertEqual(
+            try context.keyedHashOneChunkBatch(key: key, buffer: buffer, ranges: ranges),
+            expectedKeyed
+        )
+        XCTAssertEqual(
+            try context.keyedHashOneChunkBatch(key: key, buffer: fullChunkBuffer, ranges: fullChunkRanges),
+            fullChunkExpectedKeyed
+        )
+        XCTAssertEqual(
+            try context.keyedHashOneChunkBatch(key: key, plan: plan),
+            expectedKeyed
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.keyedHashOneChunkBatch(key: key, plan: plan),
+            expectedKeyed
+        )
+        XCTAssertEqual(
+            try context.keyedHashOneChunkBatch(key: key, plan: fullChunkPlan),
+            fullChunkExpectedKeyed
+        )
+
+        let keyedOutputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: ranges.count * BLAKE3.digestByteCount,
+                options: .storageModeShared
+            )
+        )
+        XCTAssertEqual(
+            try context.writeKeyedOneChunkBatchDigests(
+                key: key,
+                buffer: buffer,
+                ranges: ranges,
+                into: keyedOutputBuffer
+            ),
+            ranges.count
+        )
+        XCTAssertEqual(readDigests(keyedOutputBuffer, count: ranges.count), expectedKeyed)
+
+        let staticKeyedOutputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: ranges.count * BLAKE3.digestByteCount,
+                options: .storageModeShared
+            )
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.writeKeyedOneChunkBatchDigests(
+                key: key,
+                buffer: buffer,
+                ranges: ranges,
+                into: staticKeyedOutputBuffer
+            ),
+            ranges.count
+        )
+        XCTAssertEqual(readDigests(staticKeyedOutputBuffer, count: ranges.count), expectedKeyed)
+        XCTAssertEqual(
+            try context.writeKeyedOneChunkBatchDigests(
+                key: key,
+                plan: plan,
+                into: keyedOutputBuffer
+            ),
+            ranges.count
+        )
+        XCTAssertEqual(readDigests(keyedOutputBuffer, count: ranges.count), expectedKeyed)
+        XCTAssertEqual(
+            try BLAKE3Metal.writeKeyedOneChunkBatchDigests(
+                key: key,
+                plan: plan,
+                into: staticKeyedOutputBuffer
+            ),
+            ranges.count
+        )
+        XCTAssertEqual(readDigests(staticKeyedOutputBuffer, count: ranges.count), expectedKeyed)
+
+        let aggregateExpectedKeyed = BLAKE3.hashCPU(expectedKeyed.flatMap(\.bytes))
+        let privateKeyedOutputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: ranges.count * BLAKE3.digestByteCount,
+                options: .storageModePrivate
+            )
+        )
+        XCTAssertEqual(
+            try context.writeKeyedOneChunkBatchDigests(
+                key: key,
+                buffer: buffer,
+                ranges: ranges,
+                into: privateKeyedOutputBuffer
+            ),
+            ranges.count
+        )
+        XCTAssertEqual(
+            try context.hashOneChunkBatch(
+                buffer: privateKeyedOutputBuffer,
+                ranges: [0..<(ranges.count * BLAKE3.digestByteCount)]
+            ).first,
+            aggregateExpectedKeyed
+        )
+        XCTAssertEqual(
+            try context.writeKeyedOneChunkBatchDigestsAndHashOutput(
+                key: key,
+                buffer: buffer,
+                ranges: ranges,
+                into: privateKeyedOutputBuffer
+            ),
+            aggregateExpectedKeyed
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.writeKeyedOneChunkBatchDigestsAndHashOutput(
+                key: key,
+                buffer: buffer,
+                ranges: ranges,
+                into: privateKeyedOutputBuffer
+            ),
+            aggregateExpectedKeyed
+        )
+        XCTAssertEqual(
+            try context.hashKeyedOneChunkBatchDigestBytes(key: key, buffer: buffer, ranges: ranges),
+            aggregateExpectedKeyed
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.hashKeyedOneChunkBatchDigestBytes(key: key, buffer: buffer, ranges: ranges),
+            aggregateExpectedKeyed
+        )
+        XCTAssertEqual(
+            try context.writeKeyedOneChunkBatchDigestsAndHashOutput(
+                key: key,
+                plan: plan,
+                into: privateKeyedOutputBuffer
+            ),
+            aggregateExpectedKeyed
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.writeKeyedOneChunkBatchDigestsAndHashOutput(
+                key: key,
+                plan: plan,
+                into: privateKeyedOutputBuffer
+            ),
+            aggregateExpectedKeyed
+        )
+        XCTAssertEqual(
+            try context.hashKeyedOneChunkBatchDigestBytes(key: key, plan: plan),
+            aggregateExpectedKeyed
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.hashKeyedOneChunkBatchDigestBytes(key: key, plan: plan),
+            aggregateExpectedKeyed
+        )
+        let fullChunkPrivateKeyedOutputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: fullChunkRanges.count * BLAKE3.digestByteCount,
+                options: .storageModePrivate
+            )
+        )
+        XCTAssertEqual(
+            try context.writeKeyedOneChunkBatchDigestsAndHashOutput(
+                key: key,
+                buffer: fullChunkBuffer,
+                ranges: fullChunkRanges,
+                into: fullChunkPrivateKeyedOutputBuffer
+            ),
+            BLAKE3.hashCPU(fullChunkExpectedKeyed.flatMap(\.bytes))
+        )
+        XCTAssertEqual(
+            try context.writeKeyedOneChunkBatchDigestsAndHashOutput(
+                key: key,
+                plan: fullChunkPlan,
+                into: fullChunkPrivateKeyedOutputBuffer
+            ),
+            BLAKE3.hashCPU(fullChunkExpectedKeyed.flatMap(\.bytes))
+        )
+
+        let tooSmallOutputBuffer = try XCTUnwrap(
+            device.makeBuffer(
+                length: ranges.count * BLAKE3.digestByteCount - 1,
+                options: .storageModeShared
+            )
+        )
+        XCTAssertThrowsError(
+            try context.writeOneChunkBatchDigests(buffer: buffer, ranges: ranges, into: tooSmallOutputBuffer)
+        )
+
+        XCTAssertThrowsError(
+            try context.hashOneChunkBatch(buffer: buffer, ranges: [0..<(BLAKE3.chunkByteCount + 1)])
+        )
+        XCTAssertThrowsError(
+            try context.hashOneChunkBatch(buffer: buffer, ranges: [0..<(buffer.length + 1)])
+        )
+    }
+
+    func testMetalKeyedHashMatchesCPUAcrossTreeShapes() throws {
+        guard BLAKE3Metal.isAvailable else {
+            throw XCTSkip("Metal is not available on this host.")
+        }
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let context = try BLAKE3Metal.makeContext(device: device)
+        let key = deterministicInput(byteCount: BLAKE3.keyByteCount)
+        let sizes = [
+            2 * BLAKE3.chunkByteCount,
+            3 * BLAKE3.chunkByteCount,
+            4 * BLAKE3.chunkByteCount,
+            5 * BLAKE3.chunkByteCount + 17,
+            2 * 1_024 * 1_024 + 333
+        ]
+
+        for size in sizes {
+            let input = deterministicInput(byteCount: size)
+            let expected = try BLAKE3.keyedHash(key: key, input: input)
+
+            XCTAssertEqual(
+                try BLAKE3Metal.keyedHash(key: key, input: input, policy: .gpu),
+                expected,
+                "static keyed GPU mismatch for byteCount=\(size)"
+            )
+            XCTAssertEqual(
+                try context.keyedHash(key: key, input: input, policy: .gpu),
+                expected,
+                "context keyed GPU mismatch for byteCount=\(size)"
+            )
+
+            let buffer = try XCTUnwrap(device.makeBuffer(length: input.count + 2, options: .storageModeShared))
+            input.withUnsafeBytes { raw in
+                buffer.contents().advanced(by: 1).copyMemory(
+                    from: raw.baseAddress!,
+                    byteCount: input.count
+                )
+            }
+            XCTAssertEqual(
+                try context.keyedHash(key: key, buffer: buffer, range: 1..<(input.count + 1), policy: .gpu),
+                expected,
+                "resident keyed GPU mismatch for byteCount=\(size)"
+            )
+        }
+    }
+
+    func testMetalXOFMatchesCPUAndSeek() throws {
+        guard BLAKE3Metal.isAvailable else {
+            throw XCTSkip("Metal is not available on this host.")
+        }
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let context = try BLAKE3Metal.makeContext(device: device)
+        let key = deterministicInput(byteCount: BLAKE3.keyByteCount)
+        let input = deterministicInput(byteCount: 5 * BLAKE3.chunkByteCount + 777)
+        let outputSizes = [1, 31, 32, 63, 64, 65, 257, 1_000]
+        let seeks: [UInt64] = [0, 1, 63, 64, 65, 511]
+
+        for outputSize in outputSizes {
+            for seek in seeks {
+                var unkeyedHasher = BLAKE3.Hasher()
+                unkeyedHasher.update(input)
+                let expected = xofBytes(from: unkeyedHasher, count: outputSize, seek: seek)
+                XCTAssertEqual(
+                    try BLAKE3Metal.hash(
+                        input: input,
+                        outputByteCount: outputSize,
+                        seek: seek,
+                        policy: .gpu
+                    ),
+                    expected,
+                    "unkeyed GPU XOF mismatch for outputSize=\(outputSize), seek=\(seek)"
+                )
+
+                var keyedHasher = try BLAKE3.Hasher(key: key)
+                keyedHasher.update(input)
+                let expectedKeyed = xofBytes(from: keyedHasher, count: outputSize, seek: seek)
+                XCTAssertEqual(
+                    try BLAKE3Metal.keyedHash(
+                        key: key,
+                        input: input,
+                        outputByteCount: outputSize,
+                        seek: seek,
+                        policy: .gpu
+                    ),
+                    expectedKeyed,
+                    "keyed GPU XOF mismatch for outputSize=\(outputSize), seek=\(seek)"
+                )
+            }
+        }
+
+        let buffer = try XCTUnwrap(device.makeBuffer(length: input.count + 2, options: .storageModeShared))
+        input.withUnsafeBytes { raw in
+            buffer.contents().advanced(by: 1).copyMemory(
+                from: raw.baseAddress!,
+                byteCount: input.count
+            )
+        }
+        var unkeyedHasher = BLAKE3.Hasher()
+        unkeyedHasher.update(input)
+        let expectedResidentXOF = xofBytes(from: unkeyedHasher, count: 513, seek: 17)
+        XCTAssertEqual(
+            try context.hash(
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu
+            ),
+            expectedResidentXOF
+        )
+        func readOutput(_ outputBuffer: MTLBuffer, count: Int) -> [UInt8] {
+            Array(
+                UnsafeRawBufferPointer(
+                    start: outputBuffer.contents(),
+                    count: count
+                )
+            )
+        }
+
+        let outputBuffer = try XCTUnwrap(device.makeBuffer(length: 513, options: .storageModeShared))
+        XCTAssertEqual(
+            try context.writeXOF(
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu,
+                into: outputBuffer
+            ),
+            513
+        )
+        XCTAssertEqual(readOutput(outputBuffer, count: 513), expectedResidentXOF)
+
+        let staticOutputBuffer = try XCTUnwrap(device.makeBuffer(length: 513, options: .storageModeShared))
+        XCTAssertEqual(
+            try BLAKE3Metal.writeXOF(
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu,
+                into: staticOutputBuffer
+            ),
+            513
+        )
+        XCTAssertEqual(readOutput(staticOutputBuffer, count: 513), expectedResidentXOF)
+
+        let privateOutputBuffer = try XCTUnwrap(device.makeBuffer(length: 513, options: .storageModePrivate))
+        XCTAssertEqual(
+            try context.writeXOF(
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu,
+                into: privateOutputBuffer
+            ),
+            513
+        )
+        let readbackBuffer = try XCTUnwrap(device.makeBuffer(length: 513, options: .storageModeShared))
+        let commandQueue = try XCTUnwrap(device.makeCommandQueue())
+        let commandBuffer = try XCTUnwrap(commandQueue.makeCommandBuffer())
+        let blitEncoder = try XCTUnwrap(commandBuffer.makeBlitCommandEncoder())
+        blitEncoder.copy(
+            from: privateOutputBuffer,
+            sourceOffset: 0,
+            to: readbackBuffer,
+            destinationOffset: 0,
+            size: 513
+        )
+        blitEncoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        XCTAssertNil(commandBuffer.error)
+        XCTAssertEqual(readOutput(readbackBuffer, count: 513), expectedResidentXOF)
+        XCTAssertEqual(
+            try context.hashOneChunkBatch(buffer: privateOutputBuffer, ranges: [0..<513]).first,
+            BLAKE3.hashCPU(expectedResidentXOF)
+        )
+        XCTAssertEqual(
+            try context.writeXOFAndHashOutput(
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu,
+                into: privateOutputBuffer
+            ),
+            BLAKE3.hashCPU(expectedResidentXOF)
+        )
+
+        var largeOutputHasher = BLAKE3.Hasher()
+        largeOutputHasher.update(input)
+        let expectedLargeResidentXOF = xofBytes(from: largeOutputHasher, count: 4_096, seek: 17)
+        let largePrivateOutputBuffer = try XCTUnwrap(device.makeBuffer(length: 4_096, options: .storageModePrivate))
+        XCTAssertEqual(
+            try context.writeXOFAndHashOutput(
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 4_096,
+                seek: 17,
+                policy: .gpu,
+                into: largePrivateOutputBuffer
+            ),
+            BLAKE3.hashCPU(expectedLargeResidentXOF)
+        )
+
+        var keyedHasher = try BLAKE3.Hasher(key: key)
+        keyedHasher.update(input)
+        let expectedResidentKeyedXOF = xofBytes(from: keyedHasher, count: 513, seek: 17)
+        XCTAssertEqual(
+            try context.keyedHash(
+                key: key,
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu
+            ),
+            expectedResidentKeyedXOF
+        )
+        let keyedOutputBuffer = try XCTUnwrap(device.makeBuffer(length: 513, options: .storageModeShared))
+        XCTAssertEqual(
+            try context.writeKeyedXOF(
+                key: key,
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu,
+                into: keyedOutputBuffer
+            ),
+            513
+        )
+        XCTAssertEqual(readOutput(keyedOutputBuffer, count: 513), expectedResidentKeyedXOF)
+
+        let staticKeyedOutputBuffer = try XCTUnwrap(device.makeBuffer(length: 513, options: .storageModeShared))
+        XCTAssertEqual(
+            try BLAKE3Metal.writeKeyedXOF(
+                key: key,
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu,
+                into: staticKeyedOutputBuffer
+            ),
+            513
+        )
+        XCTAssertEqual(readOutput(staticKeyedOutputBuffer, count: 513), expectedResidentKeyedXOF)
+        let privateKeyedOutputBuffer = try XCTUnwrap(device.makeBuffer(length: 513, options: .storageModePrivate))
+        XCTAssertEqual(
+            try context.writeKeyedXOFAndHashOutput(
+                key: key,
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu,
+                into: privateKeyedOutputBuffer
+            ),
+            BLAKE3.hashCPU(expectedResidentKeyedXOF)
+        )
+
+        let tooSmallOutputBuffer = try XCTUnwrap(device.makeBuffer(length: 512, options: .storageModeShared))
+        XCTAssertThrowsError(
+            try context.writeXOF(
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu,
+                into: tooSmallOutputBuffer
+            )
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.hash(input: input, outputByteCount: 0, policy: .gpu),
+            []
+        )
+        XCTAssertEqual(
+            try BLAKE3Metal.keyedHash(key: key, input: input, outputByteCount: 0, policy: .gpu),
+            []
+        )
+        XCTAssertEqual(
+            try context.writeXOF(
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 0,
+                policy: .gpu,
+                into: tooSmallOutputBuffer
+            ),
+            0
+        )
+    }
+
+    func testMetalDeriveKeyMatchesCPUAndSeek() throws {
+        guard BLAKE3Metal.isAvailable else {
+            throw XCTSkip("Metal is not available on this host.")
+        }
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let metalContext = try BLAKE3Metal.makeContext(device: device)
+        let kdfContext = "BLAKE3 2026-04-20 test derive-key material acceleration"
+        let input = deterministicInput(byteCount: 5 * BLAKE3.chunkByteCount + 901)
+        let outputSizes = [1, 32, 65, 257, 1_000]
+        let seeks: [UInt64] = [0, 1, 64, 65, 511]
+
+        for outputSize in outputSizes {
+            for seek in seeks {
+                var hasher = BLAKE3.Hasher(deriveKeyContext: kdfContext)
+                hasher.update(input)
+                let expected = xofBytes(from: hasher, count: outputSize, seek: seek)
+
+                XCTAssertEqual(
+                    try BLAKE3Metal.deriveKey(
+                        context: kdfContext,
+                        material: input,
+                        outputByteCount: outputSize,
+                        seek: seek,
+                        policy: .gpu
+                    ),
+                    expected,
+                    "static derive-key GPU mismatch for outputSize=\(outputSize), seek=\(seek)"
+                )
+                XCTAssertEqual(
+                    try metalContext.deriveKey(
+                        context: kdfContext,
+                        material: input,
+                        outputByteCount: outputSize,
+                        seek: seek,
+                        policy: .gpu
+                    ),
+                    expected,
+                    "context derive-key GPU mismatch for outputSize=\(outputSize), seek=\(seek)"
+                )
+            }
+        }
+
+        let buffer = try XCTUnwrap(device.makeBuffer(length: input.count + 2, options: .storageModeShared))
+        input.withUnsafeBytes { raw in
+            buffer.contents().advanced(by: 1).copyMemory(
+                from: raw.baseAddress!,
+                byteCount: input.count
+            )
+        }
+        var hasher = BLAKE3.Hasher(deriveKeyContext: kdfContext)
+        hasher.update(input)
+        let expectedResidentDerived = xofBytes(from: hasher, count: 513, seek: 17)
+        XCTAssertEqual(
+            try metalContext.deriveKey(
+                context: kdfContext,
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu
+            ),
+            expectedResidentDerived
+        )
+
+        func readOutput(_ outputBuffer: MTLBuffer, count: Int) -> [UInt8] {
+            Array(
+                UnsafeRawBufferPointer(
+                    start: outputBuffer.contents(),
+                    count: count
+                )
+            )
+        }
+
+        let outputBuffer = try XCTUnwrap(device.makeBuffer(length: 513, options: .storageModeShared))
+        XCTAssertEqual(
+            try metalContext.writeDerivedKey(
+                context: kdfContext,
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu,
+                into: outputBuffer
+            ),
+            513
+        )
+        XCTAssertEqual(readOutput(outputBuffer, count: 513), expectedResidentDerived)
+
+        let staticOutputBuffer = try XCTUnwrap(device.makeBuffer(length: 513, options: .storageModeShared))
+        XCTAssertEqual(
+            try BLAKE3Metal.writeDerivedKey(
+                context: kdfContext,
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu,
+                into: staticOutputBuffer
+            ),
+            513
+        )
+        XCTAssertEqual(readOutput(staticOutputBuffer, count: 513), expectedResidentDerived)
+
+        let privateOutputBuffer = try XCTUnwrap(device.makeBuffer(length: 513, options: .storageModePrivate))
+        XCTAssertEqual(
+            try metalContext.writeDerivedKeyAndHashOutput(
+                context: kdfContext,
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 513,
+                seek: 17,
+                policy: .gpu,
+                into: privateOutputBuffer
+            ),
+            BLAKE3.hashCPU(expectedResidentDerived)
+        )
+
+        XCTAssertEqual(
+            try BLAKE3Metal.deriveKey(
+                context: kdfContext,
+                material: input,
+                outputByteCount: 0,
+                policy: .gpu
+            ),
+            []
+        )
+        XCTAssertEqual(
+            try metalContext.writeDerivedKey(
+                context: kdfContext,
+                buffer: buffer,
+                range: 1..<(input.count + 1),
+                outputByteCount: 0,
+                policy: .gpu,
+                into: outputBuffer
+            ),
+            0
+        )
     }
 
     func testMetalNoCopyHandlesUnalignedWrappedInputBase() throws {

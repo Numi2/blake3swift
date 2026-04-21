@@ -1,0 +1,18 @@
+date_utc=2026-04-19T18:58:22Z
+commit=110e7a9c3b3bbc77dd63c8f0d597b01162ebae8e
+working_tree=dirty
+git_status=?? benchmarks/results/20260419T-readme-flatkernels-current/
+swift=Apple Swift version 6.3 (swiftlang-6.3.0.123.5 clang-2100.0.123.102) Target: arm64-apple-macosx26.0 
+ProductName:		macOS
+ProductVersion:		26.5
+BuildVersion:		25F5042g
+Apple M4
+Mac16,12
+performance_cores=4
+active_cpus=10
+metal_library=runtime-source
+minimum_gpu_bytes=default
+metal_tile_size=default
+metal_modes=resident,private,staged,wrapped,e2e
+cryptokit_modes=sha256
+cryptokit_metal_modes=resident,staged,wrapped,e2e

@@ -78,7 +78,7 @@ private enum FileTimingMode: String {
         case .metalTiledMemoryMapped:
             return "timed file open/stat, mmap, no-copy Metal buffer wrapper, tiled GPU chunk-CV dispatches, CPU CV-stack merge, digest read, munmap, close; benchmark file creation excluded"
         case .metalStagedRead:
-            return "timed file open/stat, bounded read directly into shared Metal staging buffers, async tiled GPU chunk-CV dispatches, CPU CV-stack merge, digest read, close; benchmark file creation excluded"
+            return "timed file open/stat, bounded reads directly into shared Metal staging buffers, tiled GPU chunk-CV dispatches, CPU CV-stack merge, digest read, close; benchmark file creation excluded"
         #endif
         }
     }
@@ -96,6 +96,44 @@ private enum CryptoKitTimingMode: String {
     }
 }
 #endif
+
+private enum OperationTimingMode: String {
+    case keyed
+    case xof
+    case keyedXOF = "keyed-xof"
+    case deriveKey = "derive-key"
+    case batchOneChunk = "batch-one-chunk"
+
+    var description: String {
+        switch self {
+        case .keyed:
+            return "timed BLAKE3 keyed hash over existing Swift bytes, plus matching Metal variants for requested Metal ownership modes"
+        case .xof:
+            return "timed BLAKE3 XOF output over existing Swift bytes, with output length controlled by --xof-output-bytes"
+        case .keyedXOF:
+            return "timed BLAKE3 keyed XOF output over existing Swift bytes, with output length controlled by --xof-output-bytes"
+        case .deriveKey:
+            return "timed BLAKE3 derive-key material hashing over existing Swift bytes, with output length controlled by --xof-output-bytes"
+        case .batchOneChunk:
+            return "timed independent one-chunk BLAKE3 hashes over one resident buffer, aggregated for correctness"
+        }
+    }
+
+    var fileDescription: String {
+        switch self {
+        case .keyed:
+            return "timed BLAKE3 keyed digest over each requested file strategy"
+        case .xof:
+            return "timed BLAKE3 XOF output over each requested file strategy, with output length controlled by --xof-output-bytes"
+        case .keyedXOF:
+            return "timed BLAKE3 keyed XOF output over each requested file strategy, with output length controlled by --xof-output-bytes"
+        case .deriveKey:
+            return "timed BLAKE3 derive-key material hashing over each requested file strategy, with output length controlled by --xof-output-bytes"
+        case .batchOneChunk:
+            return "not supported for file strategy benchmarks"
+        }
+    }
+}
 
 private let defaultSizes = [
     1,
@@ -280,6 +318,122 @@ private func cryptoKitTimingModes() -> [CryptoKitTimingMode] {
 }
 #endif
 
+private func operationTimingModes() -> [OperationTimingMode] {
+    guard let rawValue = argumentValue(named: "--operation-modes") else {
+        return []
+    }
+
+    let tokens = rawValue
+        .split(separator: ",")
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+
+    if tokens.contains("none") || tokens.contains("off") || tokens.contains("disabled") {
+        return []
+    }
+
+    let modes = tokens.compactMap { token -> OperationTimingMode? in
+        switch token {
+        case "keyed", "keyed-hash", "keyed-digest":
+            return .keyed
+        case "xof", "extendable", "extendable-output":
+            return .xof
+        case "keyed-xof", "xof-keyed", "keyed-extendable", "keyed-extendable-output":
+            return .keyedXOF
+        case "derive-key", "derive", "kdf", "key-derivation", "derived-key":
+            return .deriveKey
+        case "batch-one-chunk", "batch", "one-chunk-batch", "small-batch", "batched":
+            return .batchOneChunk
+        default:
+            return nil
+        }
+    }
+
+    return modes
+}
+
+private func fileOperationTimingModes() -> [OperationTimingMode] {
+    guard let rawValue = argumentValue(named: "--file-operation-modes") else {
+        return []
+    }
+
+    let tokens = rawValue
+        .split(separator: ",")
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+
+    if tokens.contains("none") || tokens.contains("off") || tokens.contains("disabled") {
+        return []
+    }
+
+    return tokens.compactMap { token -> OperationTimingMode? in
+        switch token {
+        case "keyed", "keyed-hash", "keyed-digest":
+            return .keyed
+        case "xof", "extendable", "extendable-output":
+            return .xof
+        case "keyed-xof", "xof-keyed", "keyed-extendable", "keyed-extendable-output":
+            return .keyedXOF
+        case "derive-key", "derive", "kdf", "key-derivation", "derived-key":
+            return .deriveKey
+        default:
+            return nil
+        }
+    }
+}
+
+private func xofOutputByteCount() -> Int {
+    guard let rawValue = argumentValue(named: "--xof-output-bytes"),
+          let parsed = parseByteCount(Substring(rawValue))
+    else {
+        return 1_024
+    }
+    return max(BLAKE3.digestByteCount, parsed)
+}
+
+private func batchOneChunkItemByteCount() -> Int {
+    guard let rawValue = argumentValue(named: "--batch-item-bytes"),
+          let parsed = parseByteCount(Substring(rawValue))
+    else {
+        return BLAKE3.chunkByteCount
+    }
+    return min(max(1, parsed), BLAKE3.chunkByteCount)
+}
+
+private func batchPipelineWidth() -> Int {
+    guard let rawValue = argumentValue(named: "--batch-pipeline-width") else {
+        return 0
+    }
+    let normalized = rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if normalized == "none" || normalized == "off" || normalized == "disabled" {
+        return 0
+    }
+    guard let parsed = Int(normalized), parsed > 1 else {
+        return 0
+    }
+    return parsed
+}
+
+private func batchPipelineWidths() -> [Int] {
+    if let rawValue = argumentValue(named: "--batch-pipeline-widths") {
+        let normalized = rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized == "none" || normalized == "off" || normalized == "disabled" {
+            return []
+        }
+        var seen = Set<Int>()
+        return normalized
+            .split(separator: ",")
+            .compactMap { token -> Int? in
+                let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let width = Int(trimmed), width > 1 else {
+                    return nil
+                }
+                return seen.insert(width).inserted ? width : nil
+            }
+    }
+
+    let width = batchPipelineWidth()
+    return width > 1 ? [width] : []
+}
+
 #if canImport(Metal)
 private func metalTimingModes() -> [MetalTimingMode] {
     guard let rawValue = argumentValue(named: "--metal-modes") else {
@@ -425,6 +579,11 @@ private func fillDeterministically(_ bytes: inout [UInt8]) {
     }
 }
 
+private let benchmarkKey: [UInt8] = {
+    (0..<BLAKE3.keyByteCount).map { UInt8(truncatingIfNeeded: ($0 &* 7) &+ 3) }
+}()
+private let benchmarkDeriveKeyContext = "blake3swift benchmark derive-key context 2026-04-20"
+
 @inline(never)
 private func hashScalarForBenchmark(_ input: UnsafeRawBufferPointer) -> BLAKE3.Digest {
     BLAKE3.hashScalar(input)
@@ -448,6 +607,140 @@ private func hashParallelForBenchmark(_ input: UnsafeRawBufferPointer, maxWorker
 @inline(never)
 private func hashOfficialCForBenchmark(_ input: UnsafeRawBufferPointer) -> BLAKE3.Digest {
     OfficialCBLAKE3.hash(input)
+}
+
+@inline(never)
+private func keyedHashCPUForBenchmark(_ input: UnsafeRawBufferPointer) -> BLAKE3.Digest {
+    try! BLAKE3.keyedHash(key: benchmarkKey, input: input)
+}
+
+@inline(never)
+private func xofCPUForBenchmark(
+    _ input: UnsafeRawBufferPointer,
+    outputByteCount: Int
+) -> BLAKE3.Digest {
+    var hasher = BLAKE3.Hasher()
+    hasher.updateParallel(input)
+    var output = [UInt8](repeating: 0, count: outputByteCount)
+    output.withUnsafeMutableBytes { rawOutput in
+        hasher.finalize(into: rawOutput)
+    }
+    return BLAKE3.hashCPU(output)
+}
+
+@inline(never)
+private func keyedXOFCPUForBenchmark(
+    _ input: UnsafeRawBufferPointer,
+    outputByteCount: Int
+) -> BLAKE3.Digest {
+    var hasher = try! BLAKE3.Hasher(key: benchmarkKey)
+    hasher.updateParallel(input)
+    var output = [UInt8](repeating: 0, count: outputByteCount)
+    output.withUnsafeMutableBytes { rawOutput in
+        hasher.finalize(into: rawOutput)
+    }
+    return BLAKE3.hashCPU(output)
+}
+
+@inline(never)
+private func deriveKeyCPUForBenchmark(
+    _ input: UnsafeRawBufferPointer,
+    outputByteCount: Int
+) -> BLAKE3.Digest {
+    let output = try! BLAKE3.deriveKeyParallel(
+        context: benchmarkDeriveKeyContext,
+        material: input,
+        outputByteCount: outputByteCount
+    )
+    return BLAKE3.hashCPU(output)
+}
+
+private func oneChunkBatchRanges(byteCount: Int, itemByteCount: Int) -> [Range<Int>] {
+    guard byteCount > 0 else {
+        return []
+    }
+    var ranges = [Range<Int>]()
+    ranges.reserveCapacity((byteCount + itemByteCount - 1) / itemByteCount)
+    var offset = 0
+    while offset < byteCount {
+        let upperBound = min(byteCount, offset + itemByteCount)
+        ranges.append(offset..<upperBound)
+        offset = upperBound
+    }
+    return ranges
+}
+
+private func aggregateBatchDigestsForBenchmark(_ digests: [BLAKE3.Digest]) -> BLAKE3.Digest {
+    var bytes = [UInt8]()
+    bytes.reserveCapacity(digests.count * BLAKE3.digestByteCount)
+    for digest in digests {
+        bytes.append(contentsOf: digest.bytes)
+    }
+    return BLAKE3.hashCPU(bytes)
+}
+
+private func aggregateBatchDigestBufferForBenchmark(
+    _ outputBuffer: MTLBuffer,
+    digestCount: Int
+) -> BLAKE3.Digest {
+    guard digestCount > 0 else {
+        return aggregateBatchDigestsForBenchmark([])
+    }
+    return BLAKE3.hashCPU(
+        UnsafeRawBufferPointer(
+            start: outputBuffer.contents(),
+            count: digestCount * BLAKE3.digestByteCount
+        )
+    )
+}
+
+private func hashOutputBufferForBenchmark(
+    _ outputBuffer: MTLBuffer,
+    byteCount: Int
+) -> BLAKE3.Digest {
+    guard byteCount > 0 else {
+        return BLAKE3.hashCPU([UInt8]())
+    }
+    return BLAKE3.hashCPU(
+        UnsafeRawBufferPointer(
+            start: outputBuffer.contents(),
+            count: byteCount
+        )
+    )
+}
+
+@inline(never)
+private func hashMetalOutputBufferForBenchmark(
+    context: BLAKE3Metal.Context,
+    outputBuffer: MTLBuffer,
+    byteCount: Int
+) -> BLAKE3.Digest {
+    guard byteCount > 0 else {
+        return BLAKE3.hashCPU([UInt8]())
+    }
+    if byteCount <= BLAKE3.chunkByteCount {
+        return try! context.hashOneChunkBatch(buffer: outputBuffer, ranges: [0..<byteCount]).first!
+    }
+    return try! context.hash(buffer: outputBuffer, length: byteCount, policy: .gpu)
+}
+
+@inline(never)
+private func batchOneChunkCPUForBenchmark(
+    _ input: UnsafeRawBufferPointer,
+    ranges: [Range<Int>]
+) -> BLAKE3.Digest {
+    guard let baseAddress = input.baseAddress else {
+        return aggregateBatchDigestsForBenchmark([])
+    }
+    let digests = ranges.map { range in
+        BLAKE3.hash(
+            UnsafeRawBufferPointer(
+                start: baseAddress.advanced(by: range.lowerBound),
+                count: range.count
+            )
+        )
+    }
+    return aggregateBatchDigestsForBenchmark(digests)
 }
 
 #if canImport(CryptoKit)
@@ -475,6 +768,508 @@ private func hashMetalGPUForBenchmark(
     length: Int
 ) -> BLAKE3.Digest {
     try! context.hash(buffer: buffer, length: length, policy: .gpu)
+}
+
+@inline(never)
+private func batchOneChunkMetalGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    ranges: [Range<Int>]
+) -> BLAKE3.Digest {
+    aggregateBatchDigestsForBenchmark(
+        try! context.hashOneChunkBatch(buffer: buffer, ranges: ranges)
+    )
+}
+
+@inline(never)
+private func batchOneChunkMetalWriteGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    ranges: [Range<Int>],
+    outputBuffer: MTLBuffer
+) -> BLAKE3.Digest {
+    let digestCount = try! context.writeOneChunkBatchDigests(
+        buffer: buffer,
+        ranges: ranges,
+        into: outputBuffer
+    )
+    precondition(digestCount == ranges.count)
+    return aggregateBatchDigestBufferForBenchmark(outputBuffer, digestCount: digestCount)
+}
+
+@inline(never)
+private func batchOneChunkMetalWritePrivateGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    ranges: [Range<Int>],
+    outputBuffer: MTLBuffer
+) -> BLAKE3.Digest {
+    let digestCount = try! context.writeOneChunkBatchDigests(
+        buffer: buffer,
+        ranges: ranges,
+        into: outputBuffer
+    )
+    precondition(digestCount == ranges.count)
+    return hashMetalOutputBufferForBenchmark(
+        context: context,
+        outputBuffer: outputBuffer,
+        byteCount: digestCount * BLAKE3.digestByteCount
+    )
+}
+
+@inline(never)
+private func batchOneChunkMetalWritePrivateChainedGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    ranges: [Range<Int>],
+    outputBuffer: MTLBuffer
+) -> BLAKE3.Digest {
+    try! context.writeOneChunkBatchDigestsAndHashOutput(
+        buffer: buffer,
+        ranges: ranges,
+        into: outputBuffer
+    )
+}
+
+@inline(never)
+private func batchOneChunkMetalFusedAggregateGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    ranges: [Range<Int>]
+) -> BLAKE3.Digest {
+    try! context.hashOneChunkBatchDigestBytes(buffer: buffer, ranges: ranges)
+}
+
+@inline(never)
+private func batchOneChunkMetalPlanGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    plan: BLAKE3Metal.OneChunkBatchPlan
+) -> BLAKE3.Digest {
+    aggregateBatchDigestsForBenchmark(try! context.hashOneChunkBatch(plan: plan))
+}
+
+@inline(never)
+private func batchOneChunkMetalPlanWriteGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    plan: BLAKE3Metal.OneChunkBatchPlan,
+    outputBuffer: MTLBuffer
+) -> BLAKE3.Digest {
+    let digestCount = try! context.writeOneChunkBatchDigests(plan: plan, into: outputBuffer)
+    precondition(digestCount == plan.digestCount)
+    return aggregateBatchDigestBufferForBenchmark(outputBuffer, digestCount: digestCount)
+}
+
+@inline(never)
+private func batchOneChunkMetalPlanWritePrivateGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    plan: BLAKE3Metal.OneChunkBatchPlan,
+    outputBuffer: MTLBuffer
+) -> BLAKE3.Digest {
+    let digestCount = try! context.writeOneChunkBatchDigests(plan: plan, into: outputBuffer)
+    precondition(digestCount == plan.digestCount)
+    return hashMetalOutputBufferForBenchmark(
+        context: context,
+        outputBuffer: outputBuffer,
+        byteCount: digestCount * BLAKE3.digestByteCount
+    )
+}
+
+@inline(never)
+private func batchOneChunkMetalPlanWritePrivateChainedGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    plan: BLAKE3Metal.OneChunkBatchPlan,
+    outputBuffer: MTLBuffer
+) -> BLAKE3.Digest {
+    try! context.writeOneChunkBatchDigestsAndHashOutput(plan: plan, into: outputBuffer)
+}
+
+@inline(never)
+private func batchOneChunkMetalPlanWritePrivateChainedPipelinedGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    pipeline: BLAKE3Metal.OneChunkBatchChainedPipeline
+) -> BLAKE3.Digest {
+    try! context.writeOneChunkBatchDigestsAndHashOutput(pipeline: pipeline)
+}
+
+@inline(never)
+private func batchOneChunkMetalPlanFusedAggregateGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    plan: BLAKE3Metal.OneChunkBatchPlan
+) -> BLAKE3.Digest {
+    try! context.hashOneChunkBatchDigestBytes(plan: plan)
+}
+
+@inline(never)
+private func batchOneChunkMetalPlanWritePipelinedGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    pipeline: BLAKE3Metal.OneChunkBatchWritePipeline
+) -> BLAKE3.Digest {
+    let digestCount = try! context.writeOneChunkBatchDigests(pipeline: pipeline)
+    precondition(digestCount == pipeline.inFlightCount * pipeline.plan.digestCount)
+    return aggregateBatchDigestBufferForBenchmark(
+        pipeline.outputBuffers[pipeline.outputBuffers.count - 1],
+        digestCount: pipeline.plan.digestCount
+    )
+}
+
+@inline(never)
+private func batchOneChunkMetalPlanWritePrivatePipelinedGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    pipeline: BLAKE3Metal.OneChunkBatchWritePipeline
+) -> BLAKE3.Digest {
+    let digestCount = try! context.writeOneChunkBatchDigests(pipeline: pipeline)
+    precondition(digestCount == pipeline.inFlightCount * pipeline.plan.digestCount)
+    return hashMetalOutputBufferForBenchmark(
+        context: context,
+        outputBuffer: pipeline.outputBuffers[pipeline.outputBuffers.count - 1],
+        byteCount: pipeline.plan.outputByteCount
+    )
+}
+
+@inline(never)
+private func keyedHashMetalGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    length: Int
+) -> BLAKE3.Digest {
+    try! context.keyedHash(key: benchmarkKey, buffer: buffer, length: length, policy: .gpu)
+}
+
+@inline(never)
+private func keyedHashMetalWrappedGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    input: [UInt8]
+) -> BLAKE3.Digest {
+    try! context.keyedHash(key: benchmarkKey, input: input, policy: .gpu)
+}
+
+@inline(never)
+private func xofMetalGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    length: Int,
+    outputByteCount: Int
+) -> BLAKE3.Digest {
+    let output = try! context.hash(
+        buffer: buffer,
+        length: length,
+        outputByteCount: outputByteCount,
+        policy: .gpu
+    )
+    return BLAKE3.hashCPU(output)
+}
+
+@inline(never)
+private func xofMetalWriteGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    length: Int,
+    outputByteCount: Int,
+    outputBuffer: MTLBuffer
+) -> BLAKE3.Digest {
+    let writtenByteCount = try! context.writeXOF(
+        buffer: buffer,
+        length: length,
+        outputByteCount: outputByteCount,
+        policy: .gpu,
+        into: outputBuffer
+    )
+    precondition(writtenByteCount == outputByteCount)
+    return hashOutputBufferForBenchmark(outputBuffer, byteCount: writtenByteCount)
+}
+
+@inline(never)
+private func xofMetalWritePrivateGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    length: Int,
+    outputByteCount: Int,
+    outputBuffer: MTLBuffer
+) -> BLAKE3.Digest {
+    let writtenByteCount = try! context.writeXOF(
+        buffer: buffer,
+        length: length,
+        outputByteCount: outputByteCount,
+        policy: .gpu,
+        into: outputBuffer
+    )
+    precondition(writtenByteCount == outputByteCount)
+    return hashMetalOutputBufferForBenchmark(
+        context: context,
+        outputBuffer: outputBuffer,
+        byteCount: writtenByteCount
+    )
+}
+
+@inline(never)
+private func xofMetalWritePrivateChainedGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    length: Int,
+    outputByteCount: Int,
+    outputBuffer: MTLBuffer
+) -> BLAKE3.Digest {
+    try! context.writeXOFAndHashOutput(
+        buffer: buffer,
+        length: length,
+        outputByteCount: outputByteCount,
+        policy: .gpu,
+        into: outputBuffer
+    )
+}
+
+@inline(never)
+private func xofMetalWrappedGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    input: [UInt8],
+    outputByteCount: Int
+) -> BLAKE3.Digest {
+    let output = try! context.hash(
+        input: input,
+        outputByteCount: outputByteCount,
+        policy: .gpu
+    )
+    return BLAKE3.hashCPU(output)
+}
+
+@inline(never)
+private func keyedXOFMetalGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    length: Int,
+    outputByteCount: Int
+) -> BLAKE3.Digest {
+    let output = try! context.keyedHash(
+        key: benchmarkKey,
+        buffer: buffer,
+        length: length,
+        outputByteCount: outputByteCount,
+        policy: .gpu
+    )
+    return BLAKE3.hashCPU(output)
+}
+
+@inline(never)
+private func keyedXOFMetalWriteGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    length: Int,
+    outputByteCount: Int,
+    outputBuffer: MTLBuffer
+) -> BLAKE3.Digest {
+    let writtenByteCount = try! context.writeKeyedXOF(
+        key: benchmarkKey,
+        buffer: buffer,
+        length: length,
+        outputByteCount: outputByteCount,
+        policy: .gpu,
+        into: outputBuffer
+    )
+    precondition(writtenByteCount == outputByteCount)
+    return hashOutputBufferForBenchmark(outputBuffer, byteCount: writtenByteCount)
+}
+
+@inline(never)
+private func keyedXOFMetalWritePrivateGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    length: Int,
+    outputByteCount: Int,
+    outputBuffer: MTLBuffer
+) -> BLAKE3.Digest {
+    let writtenByteCount = try! context.writeKeyedXOF(
+        key: benchmarkKey,
+        buffer: buffer,
+        length: length,
+        outputByteCount: outputByteCount,
+        policy: .gpu,
+        into: outputBuffer
+    )
+    precondition(writtenByteCount == outputByteCount)
+    return hashMetalOutputBufferForBenchmark(
+        context: context,
+        outputBuffer: outputBuffer,
+        byteCount: writtenByteCount
+    )
+}
+
+@inline(never)
+private func keyedXOFMetalWritePrivateChainedGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    length: Int,
+    outputByteCount: Int,
+    outputBuffer: MTLBuffer
+) -> BLAKE3.Digest {
+    try! context.writeKeyedXOFAndHashOutput(
+        key: benchmarkKey,
+        buffer: buffer,
+        length: length,
+        outputByteCount: outputByteCount,
+        policy: .gpu,
+        into: outputBuffer
+    )
+}
+
+@inline(never)
+private func keyedXOFMetalWrappedGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    input: [UInt8],
+    outputByteCount: Int
+) -> BLAKE3.Digest {
+    let output = try! context.keyedHash(
+        key: benchmarkKey,
+        input: input,
+        outputByteCount: outputByteCount,
+        policy: .gpu
+    )
+    return BLAKE3.hashCPU(output)
+}
+
+@inline(never)
+private func xofFileForBenchmark(
+    path: String,
+    strategy: BLAKE3File.Strategy,
+    outputByteCount: Int
+) throws -> BLAKE3.Digest {
+    let output = try BLAKE3File.hash(
+        path: path,
+        strategy: strategy,
+        outputByteCount: outputByteCount
+    )
+    return BLAKE3.hashCPU(output)
+}
+
+@inline(never)
+private func keyedHashFileForBenchmark(
+    path: String,
+    strategy: BLAKE3File.Strategy
+) throws -> BLAKE3.Digest {
+    try BLAKE3File.keyedHash(key: benchmarkKey, path: path, strategy: strategy)
+}
+
+@inline(never)
+private func keyedXOFFileForBenchmark(
+    path: String,
+    strategy: BLAKE3File.Strategy,
+    outputByteCount: Int
+) throws -> BLAKE3.Digest {
+    let output = try BLAKE3File.keyedHash(
+        key: benchmarkKey,
+        path: path,
+        strategy: strategy,
+        outputByteCount: outputByteCount
+    )
+    return BLAKE3.hashCPU(output)
+}
+
+@inline(never)
+private func deriveKeyFileForBenchmark(
+    path: String,
+    strategy: BLAKE3File.Strategy,
+    outputByteCount: Int
+) throws -> BLAKE3.Digest {
+    let output = try BLAKE3File.deriveKey(
+        context: benchmarkDeriveKeyContext,
+        path: path,
+        strategy: strategy,
+        outputByteCount: outputByteCount
+    )
+    return BLAKE3.hashCPU(output)
+}
+
+@inline(never)
+private func deriveKeyMetalGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    length: Int,
+    outputByteCount: Int
+) -> BLAKE3.Digest {
+    let output = try! context.deriveKey(
+        context: benchmarkDeriveKeyContext,
+        buffer: buffer,
+        length: length,
+        outputByteCount: outputByteCount,
+        policy: .gpu
+    )
+    return BLAKE3.hashCPU(output)
+}
+
+@inline(never)
+private func deriveKeyMetalWriteGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    length: Int,
+    outputByteCount: Int,
+    outputBuffer: MTLBuffer
+) -> BLAKE3.Digest {
+    let writtenByteCount = try! context.writeDerivedKey(
+        context: benchmarkDeriveKeyContext,
+        buffer: buffer,
+        length: length,
+        outputByteCount: outputByteCount,
+        policy: .gpu,
+        into: outputBuffer
+    )
+    precondition(writtenByteCount == outputByteCount)
+    return hashOutputBufferForBenchmark(outputBuffer, byteCount: writtenByteCount)
+}
+
+@inline(never)
+private func deriveKeyMetalWritePrivateGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    length: Int,
+    outputByteCount: Int,
+    outputBuffer: MTLBuffer
+) -> BLAKE3.Digest {
+    let writtenByteCount = try! context.writeDerivedKey(
+        context: benchmarkDeriveKeyContext,
+        buffer: buffer,
+        length: length,
+        outputByteCount: outputByteCount,
+        policy: .gpu,
+        into: outputBuffer
+    )
+    precondition(writtenByteCount == outputByteCount)
+    return hashMetalOutputBufferForBenchmark(
+        context: context,
+        outputBuffer: outputBuffer,
+        byteCount: writtenByteCount
+    )
+}
+
+@inline(never)
+private func deriveKeyMetalWritePrivateChainedGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    length: Int,
+    outputByteCount: Int,
+    outputBuffer: MTLBuffer
+) -> BLAKE3.Digest {
+    try! context.writeDerivedKeyAndHashOutput(
+        context: benchmarkDeriveKeyContext,
+        buffer: buffer,
+        length: length,
+        outputByteCount: outputByteCount,
+        policy: .gpu,
+        into: outputBuffer
+    )
+}
+
+@inline(never)
+private func deriveKeyMetalWrappedGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    input: [UInt8],
+    outputByteCount: Int
+) -> BLAKE3.Digest {
+    let output = try! context.deriveKey(
+        context: benchmarkDeriveKeyContext,
+        material: input,
+        outputByteCount: outputByteCount,
+        policy: .gpu
+    )
+    return BLAKE3.hashCPU(output)
 }
 
 private func makeMetalBuffer(device: MTLDevice, input: [UInt8]) -> MTLBuffer? {
@@ -516,6 +1311,65 @@ private func runBenchmark(
         digest: finalDigest,
         expectedDigest: expectedDigest
     )
+}
+
+private struct PipelinedBenchmarkCandidate {
+    let backend: String
+    let mode: String
+    let byteCount: Int
+    let operationsPerSample: Int
+    let expectedDigest: BLAKE3.Digest?
+    let operation: ([UInt8]) -> BLAKE3.Digest
+}
+
+private func runInterleavedPipelinedBenchmarks(
+    input: [UInt8],
+    iterations: Int,
+    candidates: [PipelinedBenchmarkCandidate]
+) -> [BenchmarkResult] {
+    guard !candidates.isEmpty else {
+        return []
+    }
+
+    var sampleNanoseconds = Array(repeating: [UInt64](), count: candidates.count)
+    for index in sampleNanoseconds.indices {
+        sampleNanoseconds[index].reserveCapacity(iterations)
+    }
+    var finalDigests = candidates.map { $0.operation(input) }
+    let candidateIndices = Array(candidates.indices)
+
+    for pass in 0..<iterations {
+        // Alternate direction so a multi-width sweep does not always benchmark the same
+        // candidate first or last within a run.
+        if pass.isMultiple(of: 2) {
+            for candidateIndex in candidateIndices {
+                let candidate = candidates[candidateIndex]
+                let started = DispatchTime.now().uptimeNanoseconds
+                finalDigests[candidateIndex] = candidate.operation(input)
+                let elapsed = DispatchTime.now().uptimeNanoseconds - started
+                sampleNanoseconds[candidateIndex].append(max(1, elapsed / UInt64(candidate.operationsPerSample)))
+            }
+        } else {
+            for candidateIndex in candidateIndices.reversed() {
+                let candidate = candidates[candidateIndex]
+                let started = DispatchTime.now().uptimeNanoseconds
+                finalDigests[candidateIndex] = candidate.operation(input)
+                let elapsed = DispatchTime.now().uptimeNanoseconds - started
+                sampleNanoseconds[candidateIndex].append(max(1, elapsed / UInt64(candidate.operationsPerSample)))
+            }
+        }
+    }
+
+    return candidates.enumerated().map { index, candidate in
+        BenchmarkResult(
+            backend: candidate.backend,
+            mode: candidate.mode,
+            byteCount: candidate.byteCount,
+            sampleNanoseconds: sampleNanoseconds[index],
+            digest: finalDigests[index],
+            expectedDigest: candidate.expectedDigest
+        )
+    }
 }
 
 private func runRawBenchmark(
@@ -664,6 +1518,40 @@ private struct BenchmarkResult {
     }
 }
 
+private struct BatchPipelineSweepRow: Codable {
+    let size: String
+    let byteCount: Int
+    let family: String
+    let mode: String
+    let width: Int
+    let iterations: Int
+    let medianGiBPerSecond: Double
+    let stabilityAdjustedGiBPerSecond: Double
+    let stabilityPenaltyPercent: Double
+    let minimumGiBPerSecond: Double
+    let firstHalfMedianGiBPerSecond: Double
+    let lastHalfMedianGiBPerSecond: Double
+    let driftPercent: Double
+    let correct: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case size
+        case byteCount = "byte_count"
+        case family
+        case mode
+        case width
+        case iterations
+        case medianGiBPerSecond = "median_gib_per_second"
+        case stabilityAdjustedGiBPerSecond = "stability_adjusted_gib_per_second"
+        case stabilityPenaltyPercent = "stability_penalty_percent"
+        case minimumGiBPerSecond = "minimum_gib_per_second"
+        case firstHalfMedianGiBPerSecond = "first_half_median_gib_per_second"
+        case lastHalfMedianGiBPerSecond = "last_half_median_gib_per_second"
+        case driftPercent = "drift_percent"
+        case correct
+    }
+}
+
 private struct BenchmarkReport: Codable {
     let schemaVersion: Int
     let generatedAtUTC: String
@@ -671,6 +1559,7 @@ private struct BenchmarkReport: Codable {
     let environment: BenchmarkEnvironment
     let request: BenchmarkRequest
     let rows: [BenchmarkRow]
+    let batchPipelineSweepRows: [BatchPipelineSweepRow]?
     let sustainedRows: [SustainedRow]
     let memorySamples: [MemorySample]
 
@@ -681,6 +1570,7 @@ private struct BenchmarkReport: Codable {
         case environment
         case request
         case rows
+        case batchPipelineSweepRows = "batch_pipeline_sweep_rows"
         case sustainedRows = "sustained_rows"
         case memorySamples = "memory_samples"
     }
@@ -869,6 +1759,12 @@ private struct ThroughputStats {
     let maximum: Double
 }
 
+private let batchPipelineSweepFamilies = [
+    "resident-plan-write-pipeline",
+    "resident-plan-write-private-pipeline",
+    "resident-plan-write-private-chained-pipeline"
+]
+
 private func throughput(byteCount: Int, nanoseconds: UInt64) -> Double {
     guard byteCount > 0, nanoseconds > 0 else {
         return 0
@@ -909,6 +1805,104 @@ private func percentile(_ sorted: [Double], _ percentile: Double) -> Double {
     let rank = Int(ceil(clamped * Double(sorted.count))) - 1
     let index = min(max(rank, 0), sorted.count - 1)
     return sorted[index]
+}
+
+private func batchPipelineSweepComponents(mode: String) -> (family: String, width: Int)? {
+    guard mode.hasPrefix("batch-one-chunk-"), mode.hasSuffix("-gpu") else {
+        return nil
+    }
+    for family in batchPipelineSweepFamilies {
+        let marker = "-\(family)-"
+        guard let widthStart = mode.range(of: marker)?.upperBound,
+              let gpuSuffix = mode.range(of: "-gpu", range: widthStart..<mode.endIndex),
+              let width = Int(mode[widthStart..<gpuSuffix.lowerBound]),
+              width > 1
+        else {
+            continue
+        }
+        return (family, width)
+    }
+    return nil
+}
+
+private func makeBatchPipelineSweepRows(from rows: [BenchmarkRow]) -> [BatchPipelineSweepRow] {
+    rows
+        .compactMap { row -> BatchPipelineSweepRow? in
+            guard let components = batchPipelineSweepComponents(mode: row.mode) else {
+                return nil
+            }
+            let samples = row.sampleNanoseconds.map { throughput(byteCount: row.byteCount, nanoseconds: $0) }
+            let halfWindow = max(1, (samples.count + 1) / 2)
+            let firstHalfMedian = median(Array(samples.prefix(halfWindow)).sorted())
+            let lastHalfMedian = median(Array(samples.suffix(halfWindow)).sorted())
+            let stabilityAdjusted = min(row.medianGiBPerSecond, firstHalfMedian, lastHalfMedian)
+            let stabilityPenalty = row.medianGiBPerSecond > 0
+                ? ((row.medianGiBPerSecond - stabilityAdjusted) / row.medianGiBPerSecond) * 100.0
+                : 0
+            let driftPercent = firstHalfMedian > 0
+                ? ((lastHalfMedian - firstHalfMedian) / firstHalfMedian) * 100.0
+                : 0
+            return BatchPipelineSweepRow(
+                size: row.size,
+                byteCount: row.byteCount,
+                family: components.family,
+                mode: row.mode,
+                width: components.width,
+                iterations: row.iterations,
+                medianGiBPerSecond: row.medianGiBPerSecond,
+                stabilityAdjustedGiBPerSecond: stabilityAdjusted,
+                stabilityPenaltyPercent: stabilityPenalty,
+                minimumGiBPerSecond: row.minimumGiBPerSecond,
+                firstHalfMedianGiBPerSecond: firstHalfMedian,
+                lastHalfMedianGiBPerSecond: lastHalfMedian,
+                driftPercent: driftPercent,
+                correct: row.correct
+            )
+        }
+        .sorted { lhs, rhs in
+            if lhs.byteCount != rhs.byteCount {
+                return lhs.byteCount < rhs.byteCount
+            }
+            let lhsFamilyRank = batchPipelineSweepFamilies.firstIndex(of: lhs.family) ?? .max
+            let rhsFamilyRank = batchPipelineSweepFamilies.firstIndex(of: rhs.family) ?? .max
+            if lhsFamilyRank != rhsFamilyRank {
+                return lhsFamilyRank < rhsFamilyRank
+            }
+            if lhs.stabilityAdjustedGiBPerSecond != rhs.stabilityAdjustedGiBPerSecond {
+                return lhs.stabilityAdjustedGiBPerSecond > rhs.stabilityAdjustedGiBPerSecond
+            }
+            if lhs.medianGiBPerSecond != rhs.medianGiBPerSecond {
+                return lhs.medianGiBPerSecond > rhs.medianGiBPerSecond
+            }
+            return lhs.width < rhs.width
+        }
+}
+
+private func printBatchPipelineSweepRows(_ rows: [BatchPipelineSweepRow]) {
+    guard !rows.isEmpty else {
+        return
+    }
+    print("")
+    print("batchPipelineSweepSummary=stability-adjusted=min(full-median,first-half-median,last-half-median)")
+    print("| Size | Sweep | Width | Median GiB/s | Stability-adj GiB/s | Penalty % | First-half | Last-half | Drift % | Min |")
+    print("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+    for row in rows {
+        print(
+            String(
+                format: "| %@ | %@ | %d | %.2f | %.2f | %.2f | %.2f | %.2f | %.2f | %.2f |",
+                row.size as NSString,
+                row.family as NSString,
+                row.width,
+                row.medianGiBPerSecond,
+                row.stabilityAdjustedGiBPerSecond,
+                row.stabilityPenaltyPercent,
+                row.firstHalfMedianGiBPerSecond,
+                row.lastHalfMedianGiBPerSecond,
+                row.driftPercent,
+                row.minimumGiBPerSecond
+            )
+        )
+    }
 }
 
 private func digestPrefix(_ digest: BLAKE3.Digest) -> String {
@@ -1111,6 +2105,11 @@ private func validate(_ report: BenchmarkReport) throws {
     for row in report.rows {
         try validate(row, requestedSizes: requestedSizes)
     }
+    if let batchPipelineSweepRows = report.batchPipelineSweepRows {
+        for row in batchPipelineSweepRows {
+            try validate(row, requestedSizes: requestedSizes)
+        }
+    }
 
     if let sustainedSeconds = report.request.sustainedSeconds, sustainedSeconds > 0 {
         try require(!report.sustainedRows.isEmpty, "sustained run requested but no sustained rows found")
@@ -1165,6 +2164,45 @@ private func validate(_ row: BenchmarkRow, requestedSizes: Set<Int>) throws {
         label: "\(row.backend) \(row.mode) \(row.size)"
     )
     try validateDigest(row.digest, label: "\(row.backend) \(row.mode) \(row.size)")
+}
+
+private func validate(_ row: BatchPipelineSweepRow, requestedSizes: Set<Int>) throws {
+    try require(requestedSizes.contains(row.byteCount), "batch pipeline sweep byte_count \(row.byteCount) was not requested")
+    try require(!row.size.isEmpty, "batch pipeline sweep row has empty size label")
+    try require(!row.family.isEmpty, "batch pipeline sweep row has empty family")
+    try require(!row.mode.isEmpty, "batch pipeline sweep row has empty mode")
+    try require(row.width > 1, "batch pipeline sweep row has invalid width")
+    try require(row.correct, "\(row.mode) \(row.size) is not correct")
+    try require(row.iterations > 0, "\(row.mode) \(row.size) has no iterations")
+    try require(
+        batchPipelineSweepComponents(mode: row.mode)?.family == row.family,
+        "\(row.mode) family does not match summary row"
+    )
+    try require(
+        batchPipelineSweepComponents(mode: row.mode)?.width == row.width,
+        "\(row.mode) width does not match summary row"
+    )
+    for (value, label) in [
+        (row.medianGiBPerSecond, "median"),
+        (row.stabilityAdjustedGiBPerSecond, "stability-adjusted"),
+        (row.minimumGiBPerSecond, "minimum"),
+        (row.firstHalfMedianGiBPerSecond, "first-half median"),
+        (row.lastHalfMedianGiBPerSecond, "last-half median"),
+        (row.stabilityPenaltyPercent, "stability penalty"),
+        (row.driftPercent, "drift")
+    ] {
+        try require(value.isFinite, "\(row.mode) has invalid \(label)")
+    }
+    try require(row.medianGiBPerSecond >= 0, "\(row.mode) has negative median throughput")
+    try require(row.stabilityAdjustedGiBPerSecond >= 0, "\(row.mode) has negative stability-adjusted throughput")
+    try require(row.minimumGiBPerSecond >= 0, "\(row.mode) has negative minimum throughput")
+    try require(row.firstHalfMedianGiBPerSecond >= 0, "\(row.mode) has negative first-half median throughput")
+    try require(row.lastHalfMedianGiBPerSecond >= 0, "\(row.mode) has negative last-half median throughput")
+    try require(row.stabilityPenaltyPercent >= 0, "\(row.mode) has negative stability penalty")
+    try require(
+        row.stabilityAdjustedGiBPerSecond <= row.medianGiBPerSecond + 0.000_001,
+        "\(row.mode) stability-adjusted throughput exceeds median"
+    )
 }
 
 private func validate(_ row: SustainedRow, requestedSizes: Set<Int>) throws {
@@ -1949,6 +2987,11 @@ private let requestedSizes = benchmarkSizes()
 private let requestedIterationsOverride = iterationsOverride()
 private let requestedJSONOutputPath = jsonOutputPath()
 private let requestedFileTimingModes = fileTimingModes()
+private let requestedOperationTimingModes = operationTimingModes()
+private let requestedFileOperationTimingModes = fileOperationTimingModes()
+private let requestedXOFOutputByteCount = xofOutputByteCount()
+private let requestedBatchOneChunkItemByteCount = batchOneChunkItemByteCount()
+private let requestedBatchPipelineWidths = batchPipelineWidths()
 #if canImport(CryptoKit)
 private let requestedCryptoKitTimingModes = cryptoKitTimingModes()
 #endif
@@ -2019,6 +3062,26 @@ if let metalDevice {
 }
 #endif
 print("sizes=\(requestedSizes.map(formatBytes).joined(separator: ", "))")
+if !requestedOperationTimingModes.isEmpty {
+    print("operationModes=\(requestedOperationTimingModes.map(\.rawValue).joined(separator: ","))")
+    if requestedOperationTimingModes.contains(.xof)
+        || requestedOperationTimingModes.contains(.keyedXOF)
+        || requestedOperationTimingModes.contains(.deriveKey) {
+        print("xofOutputByteCount=\(requestedXOFOutputByteCount)")
+    }
+    if requestedOperationTimingModes.contains(.batchOneChunk) {
+        print("batchOneChunkItemByteCount=\(requestedBatchOneChunkItemByteCount)")
+        if requestedBatchPipelineWidths.count == 1, let width = requestedBatchPipelineWidths.first {
+            print("batchPipelineWidth=\(width)")
+        } else if !requestedBatchPipelineWidths.isEmpty {
+            print("batchPipelineWidths=\(requestedBatchPipelineWidths.map(String.init).joined(separator: ","))")
+            print("batchPipelineSweep=interleaved-ping-pong")
+        }
+    }
+    for mode in requestedOperationTimingModes {
+        print("operation-\(mode.rawValue) includes: \(mode.description)")
+    }
+}
 #if canImport(CryptoKit)
 let requestedCryptoKitTimingModeLabel = requestedCryptoKitTimingModes.isEmpty
     ? "none"
@@ -2036,6 +3099,13 @@ if !requestedFileTimingModes.isEmpty {
     print("fileModes=\(requestedFileTimingModes.map(\.rawValue).joined(separator: ","))")
     for mode in requestedFileTimingModes {
         print("file-\(mode.rawValue) includes: \(mode.description)")
+    }
+}
+if !requestedFileOperationTimingModes.isEmpty {
+    print("fileOperationModes=\(requestedFileOperationTimingModes.map(\.rawValue).joined(separator: ","))")
+    print("fileOperationXOFOutputByteCount=\(requestedXOFOutputByteCount)")
+    for mode in requestedFileOperationTimingModes {
+        print("file-operation-\(mode.rawValue) includes: \(mode.fileDescription)")
     }
 }
 if let cpuWorkers = cpuWorkerCount() {
@@ -2109,6 +3179,117 @@ for size in requestedSizes {
         BLAKE3.hash(rawInput)
     }
 
+    var operationResults = [BenchmarkResult]()
+    let expectedKeyedDigest: BLAKE3.Digest? = if requestedOperationTimingModes.contains(.keyed)
+        || requestedOperationTimingModes.contains(.keyedXOF)
+        || requestedFileOperationTimingModes.contains(.keyed)
+        || requestedFileOperationTimingModes.contains(.keyedXOF) {
+        input.withUnsafeBytes { rawInput in
+            keyedHashCPUForBenchmark(rawInput)
+        }
+    } else {
+        nil
+    }
+    let expectedXOFDigest: BLAKE3.Digest? = if requestedOperationTimingModes.contains(.xof)
+        || requestedFileOperationTimingModes.contains(.xof) {
+        input.withUnsafeBytes { rawInput in
+            xofCPUForBenchmark(rawInput, outputByteCount: requestedXOFOutputByteCount)
+        }
+    } else {
+        nil
+    }
+    let expectedKeyedXOFDigest: BLAKE3.Digest? = if requestedOperationTimingModes.contains(.keyedXOF)
+        || requestedFileOperationTimingModes.contains(.keyedXOF) {
+        input.withUnsafeBytes { rawInput in
+            keyedXOFCPUForBenchmark(rawInput, outputByteCount: requestedXOFOutputByteCount)
+        }
+    } else {
+        nil
+    }
+    let expectedDeriveKeyDigest: BLAKE3.Digest? = if requestedOperationTimingModes.contains(.deriveKey)
+        || requestedFileOperationTimingModes.contains(.deriveKey) {
+        input.withUnsafeBytes { rawInput in
+            deriveKeyCPUForBenchmark(rawInput, outputByteCount: requestedXOFOutputByteCount)
+        }
+    } else {
+        nil
+    }
+    let batchOneChunkRanges = requestedOperationTimingModes.contains(.batchOneChunk)
+        ? oneChunkBatchRanges(byteCount: size, itemByteCount: requestedBatchOneChunkItemByteCount)
+        : []
+    let expectedBatchOneChunkDigest: BLAKE3.Digest? = if requestedOperationTimingModes.contains(.batchOneChunk) {
+        input.withUnsafeBytes { rawInput in
+            batchOneChunkCPUForBenchmark(rawInput, ranges: batchOneChunkRanges)
+        }
+    } else {
+        nil
+    }
+
+    if let expectedKeyedDigest, requestedOperationTimingModes.contains(.keyed) {
+        operationResults.append(
+            runRawBenchmark(
+                backend: "cpu",
+                mode: "keyed",
+                input: input,
+                iterations: iterations,
+                expectedDigest: expectedKeyedDigest,
+                operation: keyedHashCPUForBenchmark
+            )
+        )
+    }
+    if let expectedXOFDigest, requestedOperationTimingModes.contains(.xof) {
+        operationResults.append(
+            runRawBenchmark(
+                backend: "cpu",
+                mode: "xof-\(requestedXOFOutputByteCount)",
+                input: input,
+                iterations: iterations,
+                expectedDigest: expectedXOFDigest
+            ) { rawInput in
+                xofCPUForBenchmark(rawInput, outputByteCount: requestedXOFOutputByteCount)
+            }
+        )
+    }
+    if let expectedKeyedXOFDigest, requestedOperationTimingModes.contains(.keyedXOF) {
+        operationResults.append(
+            runRawBenchmark(
+                backend: "cpu",
+                mode: "keyed-xof-\(requestedXOFOutputByteCount)",
+                input: input,
+                iterations: iterations,
+                expectedDigest: expectedKeyedXOFDigest
+            ) { rawInput in
+                keyedXOFCPUForBenchmark(rawInput, outputByteCount: requestedXOFOutputByteCount)
+            }
+        )
+    }
+    if let expectedDeriveKeyDigest, requestedOperationTimingModes.contains(.deriveKey) {
+        operationResults.append(
+            runRawBenchmark(
+                backend: "cpu",
+                mode: "derive-key-\(requestedXOFOutputByteCount)",
+                input: input,
+                iterations: iterations,
+                expectedDigest: expectedDeriveKeyDigest
+            ) { rawInput in
+                deriveKeyCPUForBenchmark(rawInput, outputByteCount: requestedXOFOutputByteCount)
+            }
+        )
+    }
+    if let expectedBatchOneChunkDigest, requestedOperationTimingModes.contains(.batchOneChunk) {
+        operationResults.append(
+            runRawBenchmark(
+                backend: "cpu",
+                mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)",
+                input: input,
+                iterations: iterations,
+                expectedDigest: expectedBatchOneChunkDigest
+            ) { rawInput in
+                batchOneChunkCPUForBenchmark(rawInput, ranges: batchOneChunkRanges)
+            }
+        )
+    }
+
     var fileResults = [BenchmarkResult]()
     if !requestedFileTimingModes.isEmpty {
         let fileURL: URL
@@ -2124,7 +3305,86 @@ for size in requestedSizes {
 
         let path = fileURL.path
         do {
+            func appendFileOperationRows(
+                backend: String,
+                modePrefix: String,
+                strategy: BLAKE3File.Strategy
+            ) throws {
+                guard !requestedFileOperationTimingModes.isEmpty else {
+                    return
+                }
+                if let expectedKeyedDigest, requestedFileOperationTimingModes.contains(.keyed) {
+                    fileResults.append(
+                        try runFileBenchmark(
+                            backend: backend,
+                            mode: "\(modePrefix)-keyed",
+                            path: path,
+                            byteCount: size,
+                            iterations: iterations,
+                            expectedDigest: expectedKeyedDigest
+                        ) { path in
+                            try keyedHashFileForBenchmark(path: path, strategy: strategy)
+                        }
+                    )
+                }
+                if let expectedXOFDigest, requestedFileOperationTimingModes.contains(.xof) {
+                    fileResults.append(
+                        try runFileBenchmark(
+                            backend: backend,
+                            mode: "\(modePrefix)-xof-\(requestedXOFOutputByteCount)",
+                            path: path,
+                            byteCount: size,
+                            iterations: iterations,
+                            expectedDigest: expectedXOFDigest
+                        ) { path in
+                            try xofFileForBenchmark(
+                                path: path,
+                                strategy: strategy,
+                                outputByteCount: requestedXOFOutputByteCount
+                            )
+                        }
+                    )
+                }
+                if let expectedKeyedXOFDigest, requestedFileOperationTimingModes.contains(.keyedXOF) {
+                    fileResults.append(
+                        try runFileBenchmark(
+                            backend: backend,
+                            mode: "\(modePrefix)-keyed-xof-\(requestedXOFOutputByteCount)",
+                            path: path,
+                            byteCount: size,
+                            iterations: iterations,
+                            expectedDigest: expectedKeyedXOFDigest
+                        ) { path in
+                            try keyedXOFFileForBenchmark(
+                                path: path,
+                                strategy: strategy,
+                                outputByteCount: requestedXOFOutputByteCount
+                            )
+                        }
+                    )
+                }
+                if let expectedDeriveKeyDigest, requestedFileOperationTimingModes.contains(.deriveKey) {
+                    fileResults.append(
+                        try runFileBenchmark(
+                            backend: backend,
+                            mode: "\(modePrefix)-derive-key-\(requestedXOFOutputByteCount)",
+                            path: path,
+                            byteCount: size,
+                            iterations: iterations,
+                            expectedDigest: expectedDeriveKeyDigest
+                        ) { path in
+                            try deriveKeyFileForBenchmark(
+                                path: path,
+                                strategy: strategy,
+                                outputByteCount: requestedXOFOutputByteCount
+                            )
+                        }
+                    )
+                }
+            }
+
             if requestedFileTimingModes.contains(.read) {
+                let strategy = BLAKE3File.Strategy.read()
                 fileResults.append(
                     try runFileBenchmark(
                         backend: "cpu-file",
@@ -2133,11 +3393,13 @@ for size in requestedSizes {
                         byteCount: size,
                         iterations: iterations
                     ) { path in
-                        try BLAKE3File.hash(path: path, strategy: .read())
+                        try BLAKE3File.hash(path: path, strategy: strategy)
                     }
                 )
+                try appendFileOperationRows(backend: "cpu-file", modePrefix: "read", strategy: strategy)
             }
             if requestedFileTimingModes.contains(.memoryMapped) {
+                let strategy = BLAKE3File.Strategy.memoryMapped
                 fileResults.append(
                     try runFileBenchmark(
                         backend: "cpu-file",
@@ -2146,28 +3408,34 @@ for size in requestedSizes {
                         byteCount: size,
                         iterations: iterations
                     ) { path in
-                        try BLAKE3File.hash(path: path, strategy: .memoryMapped)
+                        try BLAKE3File.hash(path: path, strategy: strategy)
                     }
                 )
+                try appendFileOperationRows(backend: "cpu-file", modePrefix: "mmap", strategy: strategy)
             }
             if requestedFileTimingModes.contains(.memoryMappedParallel) {
+                let strategy = BLAKE3File.Strategy.memoryMappedParallel(maxThreads: cpuWorkers)
+                let modePrefix = cpuWorkers.map { "mmap-parallel-\($0)" } ?? "mmap-parallel"
                 fileResults.append(
                     try runFileBenchmark(
                         backend: "cpu-file",
-                        mode: cpuWorkers.map { "mmap-parallel-\($0)" } ?? "mmap-parallel",
+                        mode: modePrefix,
                         path: path,
                         byteCount: size,
                         iterations: iterations
                     ) { path in
-                        try BLAKE3File.hash(
-                            path: path,
-                            strategy: .memoryMappedParallel(maxThreads: cpuWorkers)
-                        )
+                        try BLAKE3File.hash(path: path, strategy: strategy)
                     }
                 )
+                try appendFileOperationRows(backend: "cpu-file", modePrefix: modePrefix, strategy: strategy)
             }
             #if canImport(Metal)
             if requestedFileTimingModes.contains(.metalMemoryMapped), metalDevice != nil {
+                let strategy = BLAKE3File.Strategy.metalMemoryMapped(
+                    policy: .gpu,
+                    fallbackToCPU: false,
+                    librarySource: requestedMetalLibrarySource
+                )
                 fileResults.append(
                     try runFileBenchmark(
                         backend: "metal-file",
@@ -2176,18 +3444,17 @@ for size in requestedSizes {
                         byteCount: size,
                         iterations: iterations
                     ) { path in
-                        try BLAKE3File.hash(
-                            path: path,
-                            strategy: .metalMemoryMapped(
-                                policy: .gpu,
-                                fallbackToCPU: false,
-                                librarySource: requestedMetalLibrarySource
-                            )
-                        )
+                        try BLAKE3File.hash(path: path, strategy: strategy)
                     }
                 )
+                try appendFileOperationRows(backend: "metal-file", modePrefix: "metal-mmap-gpu", strategy: strategy)
             }
             if requestedFileTimingModes.contains(.metalTiledMemoryMapped), metalDevice != nil {
+                let strategy = BLAKE3File.Strategy.metalTiledMemoryMapped(
+                    tileByteCount: requestedMetalMappedTileByteCount,
+                    fallbackToCPU: false,
+                    librarySource: requestedMetalLibrarySource
+                )
                 fileResults.append(
                     try runFileBenchmark(
                         backend: "metal-file",
@@ -2196,18 +3463,17 @@ for size in requestedSizes {
                         byteCount: size,
                         iterations: iterations
                     ) { path in
-                        try BLAKE3File.hash(
-                            path: path,
-                            strategy: .metalTiledMemoryMapped(
-                                tileByteCount: requestedMetalMappedTileByteCount,
-                                fallbackToCPU: false,
-                                librarySource: requestedMetalLibrarySource
-                            )
-                        )
+                        try BLAKE3File.hash(path: path, strategy: strategy)
                     }
                 )
+                try appendFileOperationRows(backend: "metal-file", modePrefix: "metal-tiled-mmap-gpu", strategy: strategy)
             }
             if requestedFileTimingModes.contains(.metalStagedRead), metalDevice != nil {
+                let strategy = BLAKE3File.Strategy.metalStagedRead(
+                    tileByteCount: requestedMetalStagedReadTileByteCount,
+                    fallbackToCPU: false,
+                    librarySource: requestedMetalLibrarySource
+                )
                 fileResults.append(
                     try runFileBenchmark(
                         backend: "metal-file",
@@ -2216,16 +3482,10 @@ for size in requestedSizes {
                         byteCount: size,
                         iterations: iterations
                     ) { path in
-                        try BLAKE3File.hash(
-                            path: path,
-                            strategy: .metalStagedRead(
-                                tileByteCount: requestedMetalStagedReadTileByteCount,
-                                fallbackToCPU: false,
-                                librarySource: requestedMetalLibrarySource
-                            )
-                        )
+                        try BLAKE3File.hash(path: path, strategy: strategy)
                     }
                 )
+                try appendFileOperationRows(backend: "metal-file", modePrefix: "metal-staged-read-gpu", strategy: strategy)
             }
             #endif
         } catch {
@@ -2247,6 +3507,65 @@ for size in requestedSizes {
     if let metalDevice,
        let metalContext,
        let metalBuffer = makeMetalBuffer(device: metalDevice, input: input) {
+        let batchOneChunkOutputBuffer = requestedMetalTimingModes.contains(.resident)
+            && requestedOperationTimingModes.contains(.batchOneChunk)
+            ? metalDevice.makeBuffer(
+                length: max(1, batchOneChunkRanges.count * BLAKE3.digestByteCount),
+                options: .storageModeShared
+            )
+            : nil
+        let batchOneChunkPrivateOutputBuffer = requestedMetalTimingModes.contains(.resident)
+            && requestedOperationTimingModes.contains(.batchOneChunk)
+            ? metalDevice.makeBuffer(
+                length: max(1, batchOneChunkRanges.count * BLAKE3.digestByteCount),
+                options: .storageModePrivate
+            )
+            : nil
+        let batchOneChunkPlan: BLAKE3Metal.OneChunkBatchPlan? = if requestedMetalTimingModes.contains(.resident)
+            && requestedOperationTimingModes.contains(.batchOneChunk) {
+            try? metalContext.makeOneChunkBatchPlan(buffer: metalBuffer, ranges: batchOneChunkRanges)
+        } else {
+            nil
+        }
+        func makeBatchOneChunkOutputBuffers(width: Int, options: MTLResourceOptions) -> [MTLBuffer]? {
+            guard width > 1 else {
+                return nil
+            }
+            var buffers = [MTLBuffer]()
+            buffers.reserveCapacity(width)
+            for _ in 0..<width {
+                guard let buffer = metalDevice.makeBuffer(
+                    length: max(1, batchOneChunkRanges.count * BLAKE3.digestByteCount),
+                    options: options
+                ) else {
+                    return nil
+                }
+                buffers.append(buffer)
+            }
+            return buffers
+        }
+        let xofOutputBuffer = requestedMetalTimingModes.contains(.resident)
+            && (
+                requestedOperationTimingModes.contains(.xof)
+                    || requestedOperationTimingModes.contains(.keyedXOF)
+                    || requestedOperationTimingModes.contains(.deriveKey)
+            )
+            ? metalDevice.makeBuffer(
+                length: max(1, requestedXOFOutputByteCount),
+                options: .storageModeShared
+            )
+            : nil
+        let xofPrivateOutputBuffer = requestedMetalTimingModes.contains(.resident)
+            && (
+                requestedOperationTimingModes.contains(.xof)
+                    || requestedOperationTimingModes.contains(.keyedXOF)
+                    || requestedOperationTimingModes.contains(.deriveKey)
+            )
+            ? metalDevice.makeBuffer(
+                length: max(1, requestedXOFOutputByteCount),
+                options: .storageModePrivate
+            )
+            : nil
         if requestedMetalTimingModes.contains(.resident) {
             metalAuto = runBenchmark(
                 backend: "metal",
@@ -2352,10 +3671,679 @@ for size in requestedSizes {
                 return hashMetalGPUForBenchmark(context: metalContext, buffer: buffer, length: size)
             }
         }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedKeyedDigest,
+           requestedOperationTimingModes.contains(.keyed) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "keyed-resident-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedKeyedDigest
+                ) { _ in
+                    keyedHashMetalGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        length: size
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.wrapped),
+           let expectedKeyedDigest,
+           requestedOperationTimingModes.contains(.keyed) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "keyed-wrapped-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedKeyedDigest
+                ) { bytes in
+                    keyedHashMetalWrappedGPUForBenchmark(context: metalContext, input: bytes)
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedXOFDigest,
+           requestedOperationTimingModes.contains(.xof) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "xof-\(requestedXOFOutputByteCount)-resident-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedXOFDigest
+                ) { _ in
+                    xofMetalGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        length: size,
+                        outputByteCount: requestedXOFOutputByteCount
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedXOFDigest,
+           let xofOutputBuffer,
+           requestedOperationTimingModes.contains(.xof) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "xof-\(requestedXOFOutputByteCount)-resident-write-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedXOFDigest
+                ) { _ in
+                    xofMetalWriteGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        length: size,
+                        outputByteCount: requestedXOFOutputByteCount,
+                        outputBuffer: xofOutputBuffer
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedXOFDigest,
+           let xofPrivateOutputBuffer,
+           requestedOperationTimingModes.contains(.xof) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "xof-\(requestedXOFOutputByteCount)-resident-write-private-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedXOFDigest
+                ) { _ in
+                    xofMetalWritePrivateGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        length: size,
+                        outputByteCount: requestedXOFOutputByteCount,
+                        outputBuffer: xofPrivateOutputBuffer
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedXOFDigest,
+           let xofPrivateOutputBuffer,
+           requestedOperationTimingModes.contains(.xof) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "xof-\(requestedXOFOutputByteCount)-resident-write-private-chained-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedXOFDigest
+                ) { _ in
+                    xofMetalWritePrivateChainedGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        length: size,
+                        outputByteCount: requestedXOFOutputByteCount,
+                        outputBuffer: xofPrivateOutputBuffer
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.wrapped),
+           let expectedXOFDigest,
+           requestedOperationTimingModes.contains(.xof) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "xof-\(requestedXOFOutputByteCount)-wrapped-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedXOFDigest
+                ) { bytes in
+                    xofMetalWrappedGPUForBenchmark(
+                        context: metalContext,
+                        input: bytes,
+                        outputByteCount: requestedXOFOutputByteCount
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedKeyedXOFDigest,
+           requestedOperationTimingModes.contains(.keyedXOF) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "keyed-xof-\(requestedXOFOutputByteCount)-resident-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedKeyedXOFDigest
+                ) { _ in
+                    keyedXOFMetalGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        length: size,
+                        outputByteCount: requestedXOFOutputByteCount
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedKeyedXOFDigest,
+           let xofOutputBuffer,
+           requestedOperationTimingModes.contains(.keyedXOF) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "keyed-xof-\(requestedXOFOutputByteCount)-resident-write-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedKeyedXOFDigest
+                ) { _ in
+                    keyedXOFMetalWriteGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        length: size,
+                        outputByteCount: requestedXOFOutputByteCount,
+                        outputBuffer: xofOutputBuffer
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedKeyedXOFDigest,
+           let xofPrivateOutputBuffer,
+           requestedOperationTimingModes.contains(.keyedXOF) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "keyed-xof-\(requestedXOFOutputByteCount)-resident-write-private-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedKeyedXOFDigest
+                ) { _ in
+                    keyedXOFMetalWritePrivateGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        length: size,
+                        outputByteCount: requestedXOFOutputByteCount,
+                        outputBuffer: xofPrivateOutputBuffer
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedKeyedXOFDigest,
+           let xofPrivateOutputBuffer,
+           requestedOperationTimingModes.contains(.keyedXOF) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "keyed-xof-\(requestedXOFOutputByteCount)-resident-write-private-chained-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedKeyedXOFDigest
+                ) { _ in
+                    keyedXOFMetalWritePrivateChainedGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        length: size,
+                        outputByteCount: requestedXOFOutputByteCount,
+                        outputBuffer: xofPrivateOutputBuffer
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.wrapped),
+           let expectedKeyedXOFDigest,
+           requestedOperationTimingModes.contains(.keyedXOF) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "keyed-xof-\(requestedXOFOutputByteCount)-wrapped-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedKeyedXOFDigest
+                ) { bytes in
+                    keyedXOFMetalWrappedGPUForBenchmark(
+                        context: metalContext,
+                        input: bytes,
+                        outputByteCount: requestedXOFOutputByteCount
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedDeriveKeyDigest,
+           requestedOperationTimingModes.contains(.deriveKey) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "derive-key-\(requestedXOFOutputByteCount)-resident-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedDeriveKeyDigest
+                ) { _ in
+                    deriveKeyMetalGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        length: size,
+                        outputByteCount: requestedXOFOutputByteCount
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedDeriveKeyDigest,
+           let xofOutputBuffer,
+           requestedOperationTimingModes.contains(.deriveKey) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "derive-key-\(requestedXOFOutputByteCount)-resident-write-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedDeriveKeyDigest
+                ) { _ in
+                    deriveKeyMetalWriteGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        length: size,
+                        outputByteCount: requestedXOFOutputByteCount,
+                        outputBuffer: xofOutputBuffer
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedDeriveKeyDigest,
+           let xofPrivateOutputBuffer,
+           requestedOperationTimingModes.contains(.deriveKey) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "derive-key-\(requestedXOFOutputByteCount)-resident-write-private-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedDeriveKeyDigest
+                ) { _ in
+                    deriveKeyMetalWritePrivateGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        length: size,
+                        outputByteCount: requestedXOFOutputByteCount,
+                        outputBuffer: xofPrivateOutputBuffer
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedDeriveKeyDigest,
+           let xofPrivateOutputBuffer,
+           requestedOperationTimingModes.contains(.deriveKey) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "derive-key-\(requestedXOFOutputByteCount)-resident-write-private-chained-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedDeriveKeyDigest
+                ) { _ in
+                    deriveKeyMetalWritePrivateChainedGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        length: size,
+                        outputByteCount: requestedXOFOutputByteCount,
+                        outputBuffer: xofPrivateOutputBuffer
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedBatchOneChunkDigest,
+           requestedOperationTimingModes.contains(.batchOneChunk) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedBatchOneChunkDigest
+                ) { _ in
+                    batchOneChunkMetalGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        ranges: batchOneChunkRanges
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedBatchOneChunkDigest,
+           let batchOneChunkPlan,
+           requestedOperationTimingModes.contains(.batchOneChunk) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-plan-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedBatchOneChunkDigest
+                ) { _ in
+                    batchOneChunkMetalPlanGPUForBenchmark(
+                        context: metalContext,
+                        plan: batchOneChunkPlan
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedBatchOneChunkDigest,
+           let batchOneChunkOutputBuffer,
+           requestedOperationTimingModes.contains(.batchOneChunk) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-write-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedBatchOneChunkDigest
+                ) { _ in
+                    batchOneChunkMetalWriteGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        ranges: batchOneChunkRanges,
+                        outputBuffer: batchOneChunkOutputBuffer
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedBatchOneChunkDigest,
+           let batchOneChunkOutputBuffer,
+           let batchOneChunkPlan,
+           requestedOperationTimingModes.contains(.batchOneChunk) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-plan-write-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedBatchOneChunkDigest
+                ) { _ in
+                    batchOneChunkMetalPlanWriteGPUForBenchmark(
+                        context: metalContext,
+                        plan: batchOneChunkPlan,
+                        outputBuffer: batchOneChunkOutputBuffer
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedBatchOneChunkDigest,
+           let batchOneChunkPlan,
+           requestedOperationTimingModes.contains(.batchOneChunk) {
+            var candidates = [PipelinedBenchmarkCandidate]()
+            candidates.reserveCapacity(requestedBatchPipelineWidths.count)
+            for width in requestedBatchPipelineWidths {
+                guard let outputBuffers = makeBatchOneChunkOutputBuffers(width: width, options: .storageModeShared),
+                      let pipeline = try? metalContext.makeOneChunkBatchWritePipeline(
+                        plan: batchOneChunkPlan,
+                        outputBuffers: outputBuffers
+                      )
+                else {
+                    continue
+                }
+                candidates.append(
+                    PipelinedBenchmarkCandidate(
+                        backend: "metal",
+                        mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-plan-write-pipeline-\(width)-gpu",
+                        byteCount: input.count,
+                        operationsPerSample: width,
+                        expectedDigest: expectedBatchOneChunkDigest,
+                        operation: { _ in
+                            batchOneChunkMetalPlanWritePipelinedGPUForBenchmark(
+                                context: metalContext,
+                                pipeline: pipeline
+                            )
+                        }
+                    )
+                )
+            }
+            operationResults.append(
+                contentsOf: runInterleavedPipelinedBenchmarks(
+                    input: input,
+                    iterations: iterations,
+                    candidates: candidates
+                )
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedBatchOneChunkDigest,
+           let batchOneChunkPrivateOutputBuffer,
+           requestedOperationTimingModes.contains(.batchOneChunk) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-write-private-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedBatchOneChunkDigest
+                ) { _ in
+                    batchOneChunkMetalWritePrivateGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        ranges: batchOneChunkRanges,
+                        outputBuffer: batchOneChunkPrivateOutputBuffer
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedBatchOneChunkDigest,
+           let batchOneChunkPrivateOutputBuffer,
+           let batchOneChunkPlan,
+           requestedOperationTimingModes.contains(.batchOneChunk) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-plan-write-private-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedBatchOneChunkDigest
+                ) { _ in
+                    batchOneChunkMetalPlanWritePrivateGPUForBenchmark(
+                        context: metalContext,
+                        plan: batchOneChunkPlan,
+                        outputBuffer: batchOneChunkPrivateOutputBuffer
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedBatchOneChunkDigest,
+           let batchOneChunkPlan,
+           requestedOperationTimingModes.contains(.batchOneChunk) {
+            var candidates = [PipelinedBenchmarkCandidate]()
+            candidates.reserveCapacity(requestedBatchPipelineWidths.count)
+            for width in requestedBatchPipelineWidths {
+                guard let outputBuffers = makeBatchOneChunkOutputBuffers(width: width, options: .storageModePrivate),
+                      let pipeline = try? metalContext.makeOneChunkBatchWritePipeline(
+                        plan: batchOneChunkPlan,
+                        outputBuffers: outputBuffers
+                      )
+                else {
+                    continue
+                }
+                candidates.append(
+                    PipelinedBenchmarkCandidate(
+                        backend: "metal",
+                        mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-plan-write-private-pipeline-\(width)-gpu",
+                        byteCount: input.count,
+                        operationsPerSample: width,
+                        expectedDigest: expectedBatchOneChunkDigest,
+                        operation: { _ in
+                            batchOneChunkMetalPlanWritePrivatePipelinedGPUForBenchmark(
+                                context: metalContext,
+                                pipeline: pipeline
+                            )
+                        }
+                    )
+                )
+            }
+            operationResults.append(
+                contentsOf: runInterleavedPipelinedBenchmarks(
+                    input: input,
+                    iterations: iterations,
+                    candidates: candidates
+                )
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedBatchOneChunkDigest,
+           let batchOneChunkPrivateOutputBuffer,
+           requestedOperationTimingModes.contains(.batchOneChunk) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-write-private-chained-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedBatchOneChunkDigest
+                ) { _ in
+                    batchOneChunkMetalWritePrivateChainedGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        ranges: batchOneChunkRanges,
+                        outputBuffer: batchOneChunkPrivateOutputBuffer
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedBatchOneChunkDigest,
+           let batchOneChunkPrivateOutputBuffer,
+           let batchOneChunkPlan,
+           requestedOperationTimingModes.contains(.batchOneChunk) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-plan-write-private-chained-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedBatchOneChunkDigest
+                ) { _ in
+                    batchOneChunkMetalPlanWritePrivateChainedGPUForBenchmark(
+                        context: metalContext,
+                        plan: batchOneChunkPlan,
+                        outputBuffer: batchOneChunkPrivateOutputBuffer
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedBatchOneChunkDigest,
+           let batchOneChunkPlan,
+           requestedOperationTimingModes.contains(.batchOneChunk) {
+            var candidates = [PipelinedBenchmarkCandidate]()
+            candidates.reserveCapacity(requestedBatchPipelineWidths.count)
+            for width in requestedBatchPipelineWidths {
+                guard let outputBuffers = makeBatchOneChunkOutputBuffers(width: width, options: .storageModePrivate),
+                      let pipeline = try? metalContext.makeOneChunkBatchChainedPipeline(
+                        plan: batchOneChunkPlan,
+                        outputBuffers: outputBuffers
+                      )
+                else {
+                    continue
+                }
+                candidates.append(
+                    PipelinedBenchmarkCandidate(
+                        backend: "metal",
+                        mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-plan-write-private-chained-pipeline-\(width)-gpu",
+                        byteCount: input.count,
+                        operationsPerSample: width,
+                        expectedDigest: expectedBatchOneChunkDigest,
+                        operation: { _ in
+                            batchOneChunkMetalPlanWritePrivateChainedPipelinedGPUForBenchmark(
+                                context: metalContext,
+                                pipeline: pipeline
+                            )
+                        }
+                    )
+                )
+            }
+            operationResults.append(
+                contentsOf: runInterleavedPipelinedBenchmarks(
+                    input: input,
+                    iterations: iterations,
+                    candidates: candidates
+                )
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedBatchOneChunkDigest,
+           requestedOperationTimingModes.contains(.batchOneChunk) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-fused-aggregate-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedBatchOneChunkDigest
+                ) { _ in
+                    batchOneChunkMetalFusedAggregateGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        ranges: batchOneChunkRanges
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           let expectedBatchOneChunkDigest,
+           let batchOneChunkPlan,
+           requestedOperationTimingModes.contains(.batchOneChunk) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-plan-fused-aggregate-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedBatchOneChunkDigest
+                ) { _ in
+                    batchOneChunkMetalPlanFusedAggregateGPUForBenchmark(
+                        context: metalContext,
+                        plan: batchOneChunkPlan
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.wrapped),
+           let expectedDeriveKeyDigest,
+           requestedOperationTimingModes.contains(.deriveKey) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "derive-key-\(requestedXOFOutputByteCount)-wrapped-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedDeriveKeyDigest
+                ) { bytes in
+                    deriveKeyMetalWrappedGPUForBenchmark(
+                        context: metalContext,
+                        input: bytes,
+                        outputByteCount: requestedXOFOutputByteCount
+                    )
+                }
+            )
+        }
     }
     #endif
 
     var results = [scalar, single, parallel, officialC, cpuContextAuto, defaultAuto]
+    results.append(contentsOf: operationResults)
     results.append(contentsOf: fileResults)
     #if canImport(Metal)
     if let metalAuto {
@@ -2541,6 +4529,10 @@ for size in requestedSizes {
     recordMemoryStats(size: label, phase: "after-size", into: &memorySamples)
 }
 
+private let batchPipelineSweepRows = requestedBatchPipelineWidths.count > 1
+    ? makeBatchPipelineSweepRows(from: benchmarkRows)
+    : []
+printBatchPipelineSweepRows(batchPipelineSweepRows)
 printMemoryStats(memorySamples)
 
 if let requestedJSONOutputPath {
@@ -2600,6 +4592,7 @@ if let requestedJSONOutputPath {
             sustainedSeconds: reportSustainedSeconds
         ),
         rows: benchmarkRows,
+        batchPipelineSweepRows: batchPipelineSweepRows.isEmpty ? nil : batchPipelineSweepRows,
         sustainedRows: sustainedRows,
         memorySamples: memorySamples
     )

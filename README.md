@@ -6,42 +6,128 @@ The project is performance-focused, but correctness comes first: the Swift imple
 
 ## Latest Results
 
-Local release benchmarks on Apple M4 are used to tune the Swift CPU and Metal backends and to keep correctness checks attached to every timing row. The buffer-throughput numbers are from `benchmarks/results/20260419T140713Z-readme-refresh`; the file-path reality rows below are from the isolated file harness under `/tmp/blake3swift-file-reality-final-code`. The prior publication artifacts were JSON validated, and the follow-up JSON was validated during tuning.
+Local release benchmarks on Apple M4 are used to tune the Swift CPU and Metal backends and to keep correctness checks attached to every timing row. All numbers below are current `flatkernels` results from `benchmarks/results/20260419T-readme-flatkernels-current`, generated April 19, 2026 on macOS 26.5 with Swift 6.3, runtime Metal source, the 16 MiB Metal crossover, 64 MiB mmap Metal tiles, 32 MiB staged-read Metal tiles, and 4 benchmark iterations. The generated CPU/Metal, file, and CryptoKit JSON reports were validated.
 
-The official C row is a vendored in-process one-shot comparison point, not a claim about every upstream BLAKE3 configuration. CryptoKit SHA-256 is a cross-algorithm Apple platform baseline from the separate `cryptokit-comparison` artifact, not BLAKE3 parity. Metal timing classes are reported separately: staged rows include copying Swift bytes into a reused shared Metal buffer plus hashing, wrapped rows include no-copy Metal buffer wrapping plus hashing, and resident rows start after input is already in Metal-accessible storage.
+All tables report median GiB/s. The official C row is the vendored in-process BLAKE3 one-shot comparison point, not a claim about every upstream BLAKE3 configuration. CryptoKit SHA-256 is a cross-algorithm Apple platform baseline from the companion `cryptokit-comparison` run, not BLAKE3 parity.
 
-This run used the current 128-chunk ping-pong fused tile default and runtime Metal source on Apple M4, macOS 26.5, Swift 6.3. The working tree was dirty with benchmark harness and documentation changes.
+CPU buffer hashing:
 
-| Input | Official C BLAKE3 one-shot | CryptoKit SHA-256 | Swift CPU parallel | Default `BLAKE3.hash` | Metal staged GPU | Metal wrapped GPU | Metal resident GPU |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 256 MiB | 2.31 GiB/s | 2.93 GiB/s | 10.80 GiB/s | 41.79 GiB/s | 21.86 GiB/s | 42.93 GiB/s | 75.28 GiB/s |
-| 512 MiB | 2.25 GiB/s | 2.90 GiB/s | 11.08 GiB/s | 37.00 GiB/s | 23.69 GiB/s | 48.94 GiB/s | 67.91 GiB/s |
-| 1 GiB | 2.21 GiB/s | 2.86 GiB/s | 11.54 GiB/s | 46.94 GiB/s | 22.61 GiB/s | 40.65 GiB/s | 73.18 GiB/s |
+| Input | Official C one-shot | Swift scalar | Swift SIMD4 | Swift CPU parallel | CPU context-auto |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 16 MiB | 2.23 | 1.15 | 1.79 | 8.72 | 9.15 |
+| 64 MiB | 2.19 | 1.15 | 1.77 | 9.91 | 9.92 |
+| 256 MiB | 2.20 | 1.16 | 1.80 | 10.78 | 10.61 |
+| 512 MiB | 2.19 | 1.16 | 1.79 | 11.12 | 11.00 |
+| 1 GiB | 2.19 | 1.16 | 1.80 | 11.52 | 11.58 |
 
-The automatic path uses Swift CPU hashing below the Metal crossover and Metal for larger unkeyed inputs. The current default crossover is 16 MiB, which keeps small buffers on the CPU path while letting larger buffers use the GPU when that is beneficial for the selected timing class.
+Default API and platform baseline:
 
-File rows are the reality check for allocation, copy, file-cache, mmap/page-in, and thermal behavior. The staged-read Metal file path reads bounded tiles directly into shared Metal buffers, pipelines async GPU tile reductions across four leased slots, and avoids large final-tile CPU CV merges. The CPU read row uses two bounded read buffers so file copy can overlap the previous tile's subtree reduction.
+| Input | Default `BLAKE3.hash` | CryptoKit SHA-256 |
+| --- | ---: | ---: |
+| 16 MiB | 9.65 | 2.78 |
+| 64 MiB | 17.86 | 2.90 |
+| 256 MiB | 33.21 | 2.94 |
+| 512 MiB | 35.22 | 2.92 |
+| 1 GiB | 41.87 | 2.87 |
 
-| File Input | CPU bounded read | CPU mmap parallel | Metal tiled mmap GPU | Metal staged read GPU |
-| --- | ---: | ---: | ---: | ---: |
-| 512 MiB | 7.53 GiB/s | 9.41 GiB/s | 7.37 GiB/s | 11.80 GiB/s |
-| 1 GiB | 7.71 GiB/s | 9.42 GiB/s | 9.60 GiB/s | 11.99 GiB/s |
+Metal timing classes are separated by ownership and transfer cost. Resident mode starts after input is already in a shared Metal buffer. Private mode hashes a pre-created private buffer and excludes setup copy. Staged mode includes copying Swift bytes into a reused shared Metal buffer. Wrapped mode includes no-copy Metal buffer wrapping over existing Swift bytes. End-to-end mode includes shared buffer allocation/copy from Swift bytes plus hashing.
 
-These rows run each file strategy in a separate benchmark process, with JSON validation and thermal snapshots around each mode. The staged-read row uses the 32 MiB staged tile default, four async read/GPU slots, a matching preallocated Metal async workspace, and the final-prefix CV merge threshold. A staged-only final-code repeat check at `/tmp/blake3swift-file-reality-async-workspace-default4` measured 10.44/11.58 and 10.15/11.27 GiB/s for 512 MiB/1 GiB. Full publication and file-path fixtures are kept under `benchmarks/results/`. File mmap timings are more page-in sensitive than resident-memory timings and are not used for staged/wrapped/resident overhead claims.
+| Input | Resident GPU | Private GPU | Staged GPU | Wrapped GPU | End-to-end GPU |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 16 MiB | 8.97 | 10.13 | 10.20 | 11.22 | 5.48 |
+| 64 MiB | 33.38 | 40.52 | 13.95 | 30.31 | 9.31 |
+| 256 MiB | 51.90 | 57.43 | 19.91 | 45.50 | 11.03 |
+| 512 MiB | 60.80 | 64.90 | 23.05 | 51.01 | 6.31 |
+| 1 GiB | 63.15 | 59.21 | 23.95 | 34.00 | 2.22 |
+
+Focused one-chunk batch records from April 20-21, 2026 use resident Metal buffers on Apple M4 with runtime
+Metal source, 64 MiB input, 5 iterations, and JSON validation. These targeted rows are tuning records for
+the batch APIs; they do not replace the full publication sweep above. The 64 B rows use the contiguous
+single-block Metal batch kernel with row-specific pipeline widths; the 1024 B rows use the full-chunk
+plan/write pipelines. The fused aggregate path is correct, but it was not the record holder in this run.
+
+| Batch item | Pipeline width | Metal row | Median GiB/s | Min GiB/s | P95 GiB/s |
+| ---: | ---: | --- | ---: | ---: | ---: |
+| 64 B | 23 | `resident-plan-write-pipeline-23-gpu` | 42.67 | 32.24 | 43.79 |
+| 64 B | 28 | `resident-plan-write-private-pipeline-28-gpu` | 46.97 | 45.98 | 47.60 |
+| 64 B | 27 | `resident-plan-write-private-chained-pipeline-27-gpu` | 33.84 | 33.54 | 34.34 |
+| 1024 B | 8 | `resident-plan-write-pipeline-8-gpu` | 62.91 | 53.47 | 64.98 |
+| 1024 B | 8 | `resident-plan-write-private-chained-pipeline-8-gpu` | 59.76 | 50.84 | 66.17 |
+
+Record commands:
+
+```bash
+swift run -c release blake3-bench \
+  --sizes 64m \
+  --iterations 5 \
+  --metal-modes resident \
+  --operation-modes batch-one-chunk \
+  --batch-item-bytes 64 \
+  --batch-pipeline-width 23 \
+  --file-modes none \
+  --cryptokit-modes none \
+  --json-output /tmp/blake3-batch-contiguous-block-64-w23-next.json
+
+swift run -c release blake3-bench \
+  --sizes 64m \
+  --iterations 5 \
+  --metal-modes resident \
+  --operation-modes batch-one-chunk \
+  --batch-item-bytes 64 \
+  --batch-pipeline-width 28 \
+  --file-modes none \
+  --cryptokit-modes none \
+  --json-output /tmp/blake3-batch-width28-chained-confirm.json
+
+swift run -c release blake3-bench \
+  --sizes 64m \
+  --iterations 5 \
+  --metal-modes resident \
+  --operation-modes batch-one-chunk \
+  --batch-item-bytes 64 \
+  --batch-pipeline-width 27 \
+  --file-modes none \
+  --cryptokit-modes none \
+  --json-output /tmp/blake3-batch-width27-stability-confirm-seq.json
+
+swift run -c release blake3-bench \
+  --sizes 64m \
+  --iterations 5 \
+  --metal-modes resident \
+  --operation-modes batch-one-chunk \
+  --batch-item-bytes 1024 \
+  --batch-pipeline-width 8 \
+  --file-modes none \
+  --cryptokit-modes none \
+  --json-output /tmp/blake3-batch-final-1024-w8.json
+```
+
+File rows include timed file open/stat, the selected access strategy, hashing, finalization, and close; benchmark file creation is excluded. File mmap, tiled mmap, and staged-read rows are page-in and thermal sensitive, so the table reports this current run directly.
+
+| File input | CPU read | CPU mmap | CPU mmap parallel | Metal mmap GPU | Metal tiled mmap GPU | Metal staged read GPU |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 MiB | 4.31 | 1.10 | 7.79 | 6.07 | 1.68 | 2.76 |
+| 64 MiB | 5.00 | 1.11 | 8.34 | 5.91 | 2.67 | 3.76 |
+| 256 MiB | 7.00 | 1.11 | 9.26 | 9.08 | 6.42 | 9.63 |
+| 512 MiB | 7.53 | 1.10 | 9.63 | 9.25 | 5.77 | 10.09 |
+| 1 GiB | 7.69 | 1.11 | 10.05 | 3.03 | 4.12 | 2.25 |
+
+The current `flatkernels` branch includes the block-state streaming hasher, local SIMD4 four-chunk subtree collapse, uninitialized CV workspace arrays in hot leaf/parent staging, scalar full-chunk unrolling, and size-aware CPU read inflight buffering. The fresh publication build completed in 125.60 seconds; the scalar unroll remains a compile-time versus runtime tradeoff.
 
 ## Features
 
 - Native Swift BLAKE3 library target; vendored official C code remains under its upstream license and is isolated to benchmark support.
 - One-shot, keyed, derived-key, streaming, XOF, and reusable context APIs.
-- Keyed and derive-key one-shot APIs use CPU tree parallelism for large inputs.
+- Keyed one-shot APIs use CPU tree parallelism for large inputs; derive-key one-shot APIs can use Metal for large material hashes, and `BLAKE3Metal` exposes forced-GPU keyed, derive-key, and XOF hashing for resident and no-copy inputs.
 - Reusable CPU contexts with persistent parallel worker pools for repeated hashes.
 - SIMD4 chunk and parent reduction paths for CPU throughput.
 - CPU parallel hashing defaults to the active processor count, with explicit worker overrides for reproducible benchmarks.
-- Default one-shot hashing uses CPU parallelism for CPU-visible work and no-copy Metal for large unkeyed inputs when available.
+- Default one-shot hashing uses CPU parallelism for CPU-visible work and no-copy Metal for large unkeyed digest, XOF, and derive-key material inputs when available.
 - Explicit `hashSerial`, `hashCPU`, and `hashParallel` APIs keep CPU-only benchmarking and backend selection reproducible.
-- Bounded-memory CV stack for streaming and multi-GB file hashing.
+- Bounded-memory CV stack for streaming and multi-GB file hashing; the `flatkernels` streaming state keeps only the current undecided 64-byte block.
 - CPU file strategies for buffered reads and memory-mapped hashing.
-- Metal resident-buffer, no-copy Swift input, staged-buffer, tuned private-staged, async pipeline, tiled mmap file, and staged-read file hashing APIs.
+- File APIs cover unkeyed digest/XOF, keyed digest/XOF, and derive-key material output across CPU and Metal strategies.
+- Metal resident-buffer, no-copy Swift input, one-chunk batch hashing, keyed hashing, derive-key material hashing, XOF, staged-buffer, tuned private-staged, async pipeline, tiled mmap file, and staged-read file hashing APIs.
 - Fused Metal tile reduction for aligned full-chunk shared-memory inputs.
 - Metal file hashing can use no-copy mmap pages or staged reads into bounded shared buffers; large complete prefixes reduce to GPU subtree chaining values before CPU stack merge.
 - Runtime Metal compilation fallback plus precompiled `.metallib` loading for production startup control.
@@ -87,7 +173,7 @@ let digest = BLAKE3.hash(input)
 print(digest)
 ```
 
-`BLAKE3.hash` is the default automatic path. It uses CPU parallel hashing below the Metal threshold and, on Metal-capable Apple Silicon, wraps large unkeyed inputs without copying. Use `BLAKE3.hashCPU(input)` or `BLAKE3.hashSerial(input)` when a CPU-only path is required.
+`BLAKE3.hash` is the default automatic path. It uses CPU parallel hashing below the Metal threshold and, on Metal-capable Apple Silicon, wraps large unkeyed digest and XOF inputs without copying. Use `BLAKE3.hashCPU(input)` or `BLAKE3.hashSerial(input)` when a CPU-only path is required.
 
 Streaming:
 
@@ -144,6 +230,34 @@ let digest = try BLAKE3File.hash(
 print(digest)
 ```
 
+File XOF, keyed hashing, and derive-key material use the same strategy selection:
+
+```swift
+import Foundation
+import Blake3
+
+let key = Data(repeating: 7, count: BLAKE3.keyByteCount)
+
+let xof = try BLAKE3File.hash(
+    path: "/path/to/file",
+    strategy: .metalStagedRead(),
+    outputByteCount: 1024
+)
+
+let keyedDigest = try BLAKE3File.keyedHash(
+    key: key,
+    path: "/path/to/file",
+    strategy: .metalMemoryMapped()
+)
+
+let derived = try BLAKE3File.deriveKey(
+    context: "com.example.file-key.v1",
+    path: "/path/to/file",
+    strategy: .memoryMappedParallel(),
+    outputByteCount: 64
+)
+```
+
 Async file hashing supports cancellation through Swift tasks:
 
 ```swift
@@ -168,7 +282,7 @@ let digest = try await BLAKE3File.hashAsync(
 print(digest)
 ```
 
-The default tiled mmap Metal file tile is 64 MiB on this branch, while staged-read Metal now defaults to 32 MiB. `.metalTiledMemoryMapped()` remains available as the no-copy mmap path, but `.metalStagedRead()` is the preferred reality-check path when mmap page-in noise dominates. Staged-read Metal uses four bounded shared buffers and a matching async workspace by default so file reads can overlap multiple in-flight GPU reductions without sharing scratch or CV output buffers. CPU mapped parallel hashing uses the direct one-shot parallel tree for files up to 2 GiB, then falls back to the smaller 16 MiB subtree-tiled path to avoid unbounded CV workspace growth. CPU regular-file reads use bounded 64 MiB read tiles, two read buffers by default, and CPU subtree reductions overlapped with the next file read.
+The default tiled mmap Metal file tile is 64 MiB on this branch, while staged-read Metal now defaults to 32 MiB. `.metalTiledMemoryMapped()` remains available as the no-copy mmap path, but `.metalStagedRead()` is the preferred reality-check path when mmap page-in noise dominates. Metal file strategies accelerate complete chunk/subtree chaining-value work on the GPU; the final canonical CV-stack merge and any final partial chunk remain on the CPU. Staged-read Metal uses four bounded shared buffers and separate per-slot CV buffers by default so file reads can overlap pending GPU tile work without sharing scratch or CV output buffers. CPU mapped parallel hashing uses the direct one-shot parallel tree for files up to 2 GiB, then falls back to the smaller 16 MiB subtree-tiled path to avoid unbounded CV workspace growth. CPU regular-file reads use bounded 64 MiB read tiles, two read buffers below 128 MiB, four read buffers at and above 128 MiB, and CPU subtree reductions overlapped with the next file read. Set `BLAKE3_SWIFT_READ_INFLIGHT` to `1`, `2`, `3`, or `4` to override that default for local sweeps.
 
 ## Metal Resident Hashing
 
@@ -203,6 +317,66 @@ For synchronous Swift-owned input on Apple Silicon unified memory, use the no-co
 ```swift
 let digest = try context.hash(input: input, policy: .gpu)
 ```
+
+For XOF output that another GPU pass will consume, write directly into a caller-owned output buffer:
+
+```swift
+let xofOutputBuffer = device.makeBuffer(
+    length: 4096,
+    options: .storageModePrivate
+)!
+
+try context.writeXOF(
+    buffer: buffer,
+    length: input.count,
+    outputByteCount: 4096,
+    policy: .gpu,
+    into: xofOutputBuffer
+)
+```
+
+The same pattern is available for keyed XOF and derive-key material with `writeKeyedXOF` and
+`writeDerivedKey`.
+
+Private output buffers can be consumed by later Metal passes without CPU readback. When a compact CPU-visible
+check is needed, hash the private output buffer with Metal and read only the final 32-byte digest.
+
+When the output digest is needed immediately, `writeXOFAndHashOutput`, `writeKeyedXOFAndHashOutput`, and
+`writeDerivedKeyAndHashOutput` chain the writer and output digest in one Metal submission.
+
+For many independent small objects already packed into one resident buffer, use the one-chunk batch path. Each range must be at most `BLAKE3.chunkByteCount` bytes and produces one digest:
+
+```swift
+let ranges = [
+    0..<1024,
+    1024..<1536,
+    1536..<2048
+]
+
+let digests = try context.hashOneChunkBatch(
+    buffer: buffer,
+    ranges: ranges
+)
+print(digests)
+```
+
+When another GPU pass consumes the digests, write directly into a caller-owned Metal buffer and skip the
+Swift `[Digest]` materialization:
+
+```swift
+let outputBuffer = device.makeBuffer(
+    length: ranges.count * BLAKE3.digestByteCount,
+    options: .storageModePrivate
+)!
+
+try context.writeOneChunkBatchDigests(
+    buffer: buffer,
+    ranges: ranges,
+    into: outputBuffer
+)
+```
+
+Use `.storageModeShared` instead when the CPU needs to inspect the digest bytes.
 
 For repeated Swift-owned uploads into reusable private GPU storage:
 
@@ -273,6 +447,64 @@ swift run -c release blake3-bench \
   --metal-modes resident,staged,private
 ```
 
+Add keyed hash, derive-key, and XOF rows to the same table:
+
+```bash
+swift run -c release blake3-bench \
+  --sizes 64m,256m \
+  --iterations 4 \
+  --metal-modes resident,wrapped \
+  --operation-modes keyed,xof,keyed-xof,derive-key \
+  --xof-output-bytes 1024 \
+  --file-modes none \
+  --cryptokit-modes none
+```
+
+Resident Metal XOF rows also include `resident-write-gpu` variants for caller-owned shared output buffers and
+`resident-write-private-gpu` variants that write to private output buffers and reduce them with Metal. The
+`resident-write-private-chained-gpu` rows encode the private write and output digest in one command buffer.
+
+Measure independent one-chunk batch hashing:
+
+```bash
+swift run -c release blake3-bench \
+  --sizes 16m,64m \
+  --iterations 5 \
+  --metal-modes resident \
+  --operation-modes batch-one-chunk \
+  --batch-item-bytes 1024 \
+  --file-modes none \
+  --cryptokit-modes none
+```
+
+The benchmark emits the array-returning row, a `resident-write-gpu` row that writes digests into a reused
+shared `MTLBuffer`, and a `resident-write-private-gpu` row that writes digest bytes into private GPU storage
+and reduces them with Metal. The `resident-write-private-chained-gpu` row writes digest bytes into private GPU
+storage and reduces them in the same command buffer. The `resident-fused-aggregate-gpu` row hashes the
+concatenated digest bytes without materializing that intermediate output.
+
+Use `--batch-pipeline-widths` to emit several pipelined rows into one JSON artifact while keeping the existing
+single-width `--batch-pipeline-width` flag available:
+
+```bash
+swift run -c release blake3-bench \
+  --sizes 64m \
+  --iterations 5 \
+  --metal-modes resident \
+  --operation-modes batch-one-chunk \
+  --batch-item-bytes 64 \
+  --batch-pipeline-widths 18,22,26,28 \
+  --file-modes none \
+  --cryptokit-modes none \
+  --json-output /tmp/blake3-batch-width-matrix.json
+```
+
+Multi-width sweeps run in an interleaved ping-pong order so each width is measured across roughly the same
+thermal position instead of finishing one candidate family before starting the next. These sweeps also emit a
+stability summary in the CLI output and a `batch_pipeline_sweep_rows` JSON section. The stability-adjusted
+throughput is `min(full median, first-half median, last-half median)`, which is a better filter for widths
+that actually survive focused confirmation.
+
 By default, `blake3-bench` also includes a `cryptokit sha256` row as a familiar Apple platform baseline. CryptoKit does not provide BLAKE3, so this is a cross-algorithm comparison against Apple's built-in SHA-256 implementation, not a BLAKE3 parity row. CryptoKit rows are emitted after BLAKE3 CPU/Metal rows to avoid perturbing Metal timings. Use `--cryptokit-modes none` when tuning only BLAKE3 backends.
 
 Focused CryptoKit comparison command:
@@ -298,13 +530,26 @@ swift run -c release blake3-bench \
   --file-modes mmap-parallel,metal-mmap,metal-tiled-mmap,metal-staged-read
 ```
 
+Add file keyed, derive-key, and XOF rows to the file strategy table:
+
+```bash
+swift run -c release blake3-bench \
+  --sizes 64m,256m \
+  --iterations 3 \
+  --metal-modes none \
+  --cryptokit-modes none \
+  --file-modes read,mmap-parallel,metal-mmap,metal-tiled-mmap,metal-staged-read \
+  --file-operation-modes keyed,derive-key,xof,keyed-xof \
+  --xof-output-bytes 1024
+```
+
 ### Timing Classes
 
 Resident mode starts after the input is already in a Metal-accessible buffer and after reusable context setup. It measures the hashing engine and tree reduction path.
 
 End-to-end mode starts from Swift-owned input and includes buffer creation, input transfer/setup, command submission, hashing, reduction, and digest extraction. It measures the application path.
 
-File modes include the selected file access strategy. Memory-mapped modes include mapping and digest extraction. CPU `read` uses bounded read tiles with CPU subtree reductions for regular files. CPU `mmap-parallel` uses a direct parallel tree up to the mapped one-shot cap and a bounded subtree-tiled fallback above it. Tiled Metal mmap mode includes tile mapping, Metal dispatches, per-tile CV extraction, and final canonical tree reduction. Staged-read Metal mode includes file reads into bounded shared Metal buffers, async tile dispatches, digest readback, and final canonical tree reduction. Set `BLAKE3_SWIFT_METAL_STAGED_READ_INFLIGHT=1` to force the older one-buffer staged-read timing shape; the default is four bounded read/GPU slots.
+File modes include the selected file access strategy. Memory-mapped modes include mapping and digest extraction. CPU `read` uses bounded read tiles with CPU subtree reductions for regular files and a size-aware read-inflight default. CPU `mmap-parallel` uses a direct parallel tree up to the mapped one-shot cap and a bounded subtree-tiled fallback above it. Tiled Metal mmap mode includes tile mapping, Metal dispatches, per-tile CV extraction, and final canonical tree reduction. Staged-read Metal mode includes file reads into bounded shared Metal buffers, async tile dispatches, digest readback, and final canonical tree reduction. Set `BLAKE3_SWIFT_READ_INFLIGHT=1`, `2`, `3`, or `4` to sweep CPU read buffering. Set `BLAKE3_SWIFT_METAL_STAGED_READ_INFLIGHT=1` to force the older one-buffer staged-read timing shape; the Metal staged-read default is four bounded read/GPU slots.
 
 Warmup runs should be kept separate from reported measurements. Pipeline compilation, first allocation, and first dispatch are excluded from resident headline numbers unless a benchmark mode explicitly states otherwise.
 
