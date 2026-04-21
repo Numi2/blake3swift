@@ -403,13 +403,19 @@ print(digest)
 
 ## Benchmarking
 
+The repository exposes three main command surfaces:
+
+- `swift test` runs the `Blake3Tests` suite for correctness, vector coverage, file hashing, streaming, and CPU/Metal parity checks.
+- `swift run -c release blake3-bench ...` runs the benchmark CLI for ad hoc measurements and JSON artifact generation.
+- `benchmarks/*.sh` are reproducible wrapper scripts around `blake3-bench` for smoke checks, publication sweeps, sustained runs, autotuning, and isolated-overhead collection.
+
 For publication-quality numbers, keep three questions separate:
 
 - How does the core Swift implementation compare with the vendored official C one-shot baseline?
 - How fast is the user-visible application path, such as `BLAKE3.hash` or Metal end-to-end hashing?
 - How fast is a steady-state accelerator path when setup and ownership costs are intentionally held fixed?
 
-Build and test first:
+Build the package and run the correctness suite first:
 
 ```bash
 swift build -c release
@@ -563,6 +569,14 @@ benchmarks/run-sustained.sh
 benchmarks/run-autotune.sh
 ```
 
+What each wrapper is for:
+
+- `benchmarks/run-smoke.sh` is the fast sanity check for local changes before deeper measurement work.
+- `benchmarks/run-publication.sh` runs the curated publication sweep and writes the benchmark artifacts used for README/docs promotion.
+- `benchmarks/run-sustained.sh` measures longer-running stability and thermal behavior instead of short peak numbers.
+- `benchmarks/run-autotune.sh` searches Metal gate and mode candidates and emits validated recommendation JSON.
+- `benchmarks/run-isolated-overhead.sh` is the separate small/mid-size Metal overhead harness mentioned above; use it when you want per-mode process isolation rather than the mixed publication sweep.
+
 Publication runs should keep the generated `environment.txt`, raw markdown output, exact commit, power mode, and thermal notes with the release artifacts.
 
 Set `MEMORY_STATS=1` on the fixture scripts, or pass `--memory-stats` to `blake3-bench`, to include process RSS plus allocator bytes/block snapshots beside timing rows.
@@ -597,9 +611,21 @@ swift run --package-path Examples Blake3Examples metal-resident
 swift run --package-path Examples Blake3Examples tiled-file
 ```
 
+What each example command does:
+
+- `swift run --package-path Examples Blake3Examples all` runs the full example set.
+- `swift run --package-path Examples Blake3Examples metal-resident` runs the focused Metal resident hashing example.
+- `swift run --package-path Examples Blake3Examples tiled-file` runs the tiled file hashing example.
+
 The examples cover one-shot hashing, streaming, keyed hash, XOF, CPU file hashing, Metal resident hashing, async pipeline hashing, and tiled file hashing.
 
 ## Development
+
+Common local commands:
+
+- `swift build -c release` builds the library and benchmark executable in release mode.
+- `swift test` runs the full automated test suite.
+- `swift run -c release blake3-bench --help` prints the benchmark CLI options and mode list.
 
 ```bash
 swift build -c release
