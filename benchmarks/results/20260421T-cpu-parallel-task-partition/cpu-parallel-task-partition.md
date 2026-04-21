@@ -18,11 +18,11 @@ Command:
 Summary:
 
 - This artifact promotes finer-grained CPU task partitioning for chunk-CV generation and parent reduction instead of assigning one fixed range per worker.
-- The change improves the promoted Swift CPU-parallel path and the public default `BLAKE3.hash(input)` path without changing the apples-to-apples serial SIMD baseline materially.
+- The change improves the promoted Swift CPU-parallel path and the default Swift `BLAKE3.hash(input)` path without changing the apples-to-apples serial SIMD baseline materially.
 
 Validated median GiB/s:
 
-| Input | Official C one-shot | Swift scalar | Swift SIMD4 | Swift CPU parallel | CPU context-auto | Public `BLAKE3.hash(input)` |
+| Input | Official C one-shot | Swift scalar | Swift SIMD4 | Swift CPU parallel | CPU context-auto | Swift `BLAKE3.hash(input)` |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | 16 MiB | 2.16 | 1.14 | 1.71 | 9.72 | 9.74 | 9.23 |
 | 64 MiB | 2.16 | 1.15 | 1.75 | 10.83 | 10.86 | 22.01 |

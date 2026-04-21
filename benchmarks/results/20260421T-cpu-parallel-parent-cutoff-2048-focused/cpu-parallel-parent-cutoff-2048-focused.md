@@ -23,7 +23,7 @@ Summary:
 
 Validated median GiB/s:
 
-| Input | Official C one-shot | Swift scalar | Swift SIMD4 | Swift CPU parallel-10 | CPU context-auto | Public `BLAKE3.hash(input)` |
+| Input | Official C one-shot | Swift scalar | Swift SIMD4 | Swift CPU parallel-10 | CPU context-auto | Swift `BLAKE3.hash(input)` |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | 64 MiB | 2.23 | 1.17 | 1.86 | 11.77 | 11.71 | 14.68 |
 | 256 MiB | 2.22 | 1.17 | 1.81 | 12.10 | 12.27 | 40.01 |

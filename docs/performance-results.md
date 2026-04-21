@@ -78,7 +78,7 @@ This follow-up keeps the lock-free thread-local CPU fast path and changes the in
 
 Validated median GiB/s from `report.json`:
 
-| Input | Official C one-shot | Swift scalar | Swift SIMD4 | Swift CPU parallel | CPU context-auto | Public `BLAKE3.hash(input)` |
+| Input | Official C one-shot | Swift scalar | Swift SIMD4 | Swift CPU parallel | CPU context-auto | Swift `BLAKE3.hash(input)` |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | 16 MiB | 2.16 | 1.14 | 1.71 | 9.72 | 9.74 | 9.23 |
 | 64 MiB | 2.16 | 1.15 | 1.75 | 10.83 | 10.86 | 22.01 |
@@ -89,7 +89,7 @@ Validated median GiB/s from `report.json`:
 Interpretation:
 
 - `Swift CPU parallel` now clears the prior published CPU-parallel medians across the whole promoted size set.
-- `Public BLAKE3.hash(input)` improved materially at and above the 64 MiB threshold because the stronger CPU-parallel path feeds the automatic dispatcher before Metal takes over the larger sizes.
+- `Swift BLAKE3.hash(input)` improved materially at and above the 64 MiB threshold because the stronger CPU-parallel path feeds the automatic dispatcher before Metal takes over the larger sizes.
 - The serial apples-to-apples baseline stayed in the same `~1.7` to `1.8 GiB/s` band, so this promotion is about the real Swift fast path, not a change in the fairness baseline.
 - An early version of this experiment accidentally allowed the `maxWorkers == 1` path to split into parallel tasks; that bug was fixed before the promoted artifact was recorded.
 
@@ -105,7 +105,7 @@ This retune keeps the same task-partition architecture but changes the constants
 
 Validated median GiB/s from `report.json`:
 
-| Input | Official C one-shot | Swift scalar | Swift SIMD4 | Swift CPU parallel | CPU context-auto | Public `BLAKE3.hash(input)` |
+| Input | Official C one-shot | Swift scalar | Swift SIMD4 | Swift CPU parallel | CPU context-auto | Swift `BLAKE3.hash(input)` |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | 16 MiB | 2.18 | 1.14 | 1.73 | 10.06 | 10.03 | 9.70 |
 | 64 MiB | 2.18 | 1.15 | 1.77 | 11.30 | 11.30 | 17.62 |
@@ -137,7 +137,7 @@ This follow-up keeps the promoted task-partition retune but lowers `parallelPare
 
 Validated median GiB/s from the broad `report.json`:
 
-| Input | Official C one-shot | Swift scalar | Swift SIMD4 | Swift CPU parallel | CPU context-auto | Public `BLAKE3.hash(input)` |
+| Input | Official C one-shot | Swift scalar | Swift SIMD4 | Swift CPU parallel | CPU context-auto | Swift `BLAKE3.hash(input)` |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | 16 MiB | 2.27 | 1.17 | 1.84 | 10.39 | 10.04 | 9.30 |
 | 64 MiB | 2.24 | 1.17 | 1.80 | 10.83 | 11.79 | 14.62 |
@@ -147,7 +147,7 @@ Validated median GiB/s from the broad `report.json`:
 
 Focused confirmation median GiB/s from the large-size `report.json`:
 
-| Input | Official C one-shot | Swift scalar | Swift SIMD4 | Swift CPU parallel-10 | CPU context-auto | Public `BLAKE3.hash(input)` |
+| Input | Official C one-shot | Swift scalar | Swift SIMD4 | Swift CPU parallel-10 | CPU context-auto | Swift `BLAKE3.hash(input)` |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | 64 MiB | 2.23 | 1.17 | 1.86 | 11.77 | 11.71 | 14.68 |
 | 256 MiB | 2.22 | 1.17 | 1.81 | 12.10 | 12.27 | 40.01 |
