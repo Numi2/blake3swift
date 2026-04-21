@@ -39,10 +39,27 @@ struct BLAKE3MetalChunkParams {
     var padding2: UInt32 = 0
 }
 
+struct BLAKE3MetalDigestChunkParams {
+    var inputOffset: UInt64
+    var inputLength: UInt64
+    var baseChunkCounter: UInt64
+    var chunkCount: UInt32
+    var canLoadWords: UInt32
+    var padding0: UInt32 = 0
+    var padding1: UInt32 = 0
+}
+
 struct BLAKE3MetalParentParams {
     var inputCount: UInt32
     var key: BLAKE3MetalKeyWords = BLAKE3MetalKeyWords()
     var flags: UInt32 = 0
+    var padding0: UInt32 = 0
+    var padding1: UInt32 = 0
+    var padding2: UInt32 = 0
+}
+
+struct BLAKE3MetalDigestParentParams {
+    var inputCount: UInt32
     var padding0: UInt32 = 0
     var padding1: UInt32 = 0
     var padding2: UInt32 = 0
@@ -73,7 +90,31 @@ struct BLAKE3MetalBatchParams {
     var padding1: UInt32 = 0
 }
 
+struct BLAKE3MetalDigestPipelines {
+    let chunkCVs: MTLComputePipelineState
+    let chunkFullCVs: MTLComputePipelineState
+    let chunkFullAlignedCVs: MTLComputePipelineState
+    let chunkTile128CVs: MTLComputePipelineState
+    let chunkTile256CVs: MTLComputePipelineState
+    let chunkTile512CVs: MTLComputePipelineState
+    let chunkTile1024CVs: MTLComputePipelineState
+    let chunkTile128SIMDGroupCVs: MTLComputePipelineState
+    let chunkTile128PingPongCVs: MTLComputePipelineState
+    let chunkTile256PingPongCVs: MTLComputePipelineState
+    let chunkTile512PingPongCVs: MTLComputePipelineState
+    let chunkTile1024PingPongCVs: MTLComputePipelineState
+    let parentCVs: MTLComputePipelineState
+    let parent4ExactCVs: MTLComputePipelineState
+    let parent4CVs: MTLComputePipelineState
+    let parent16CVs: MTLComputePipelineState
+    let parent16TailCVs: MTLComputePipelineState
+    let rootDigest: MTLComputePipelineState
+    let root3Digest: MTLComputePipelineState
+    let root4Digest: MTLComputePipelineState
+}
+
 struct BLAKE3MetalPipelines {
+    let digest: BLAKE3MetalDigestPipelines
     let chunkCVs: MTLComputePipelineState
     let chunkFullCVs: MTLComputePipelineState
     let chunkFullAlignedCVs: MTLComputePipelineState
@@ -134,6 +175,7 @@ final class BLAKE3MetalPipelineCache: @unchecked Sendable {
         lock.unlock()
 
         let library = try librarySource.makeLibrary(device: device)
+        let digestLibrary = try librarySource.makeDigestLibrary(device: device)
         guard let chunkFunction = library.makeFunction(name: "blake3_chunk_cvs"),
               let chunkFullFunction = library.makeFunction(name: "blake3_chunk_full_cvs"),
               let chunkFullAlignedFunction = library.makeFunction(name: "blake3_chunk_full_aligned_cvs"),
@@ -176,7 +218,67 @@ final class BLAKE3MetalPipelineCache: @unchecked Sendable {
         else {
             throw BLAKE3Error.metalCommandFailed("Unable to load BLAKE3 Metal kernels.")
         }
+        guard let digestChunkFunction = digestLibrary.makeFunction(name: "blake3_chunk_cvs"),
+              let digestChunkFullFunction = digestLibrary.makeFunction(name: "blake3_chunk_full_cvs"),
+              let digestChunkFullAlignedFunction = digestLibrary.makeFunction(name: "blake3_chunk_full_aligned_cvs"),
+              let digestChunkTile128Function = digestLibrary.makeFunction(name: "blake3_chunk_tile128_cvs"),
+              let digestChunkTile256Function = digestLibrary.makeFunction(name: "blake3_chunk_tile256_cvs"),
+              let digestChunkTile512Function = digestLibrary.makeFunction(name: "blake3_chunk_tile512_cvs"),
+              let digestChunkTile1024Function = digestLibrary.makeFunction(name: "blake3_chunk_tile1024_cvs"),
+              let digestChunkTile128SIMDGroupFunction = digestLibrary.makeFunction(
+                name: "blake3_chunk_tile128_simdgroup_cvs"
+              ),
+              let digestChunkTile128PingPongFunction = digestLibrary.makeFunction(
+                name: "blake3_chunk_tile128_pingpong_cvs"
+              ),
+              let digestChunkTile256PingPongFunction = digestLibrary.makeFunction(
+                name: "blake3_chunk_tile256_pingpong_cvs"
+              ),
+              let digestChunkTile512PingPongFunction = digestLibrary.makeFunction(
+                name: "blake3_chunk_tile512_pingpong_cvs"
+              ),
+              let digestChunkTile1024PingPongFunction = digestLibrary.makeFunction(
+                name: "blake3_chunk_tile1024_pingpong_cvs"
+              ),
+              let digestParentFunction = digestLibrary.makeFunction(name: "blake3_parent_cvs"),
+              let digestParent4ExactFunction = digestLibrary.makeFunction(name: "blake3_parent4_exact_cvs"),
+              let digestParent4Function = digestLibrary.makeFunction(name: "blake3_parent4_cvs"),
+              let digestParent16Function = digestLibrary.makeFunction(name: "blake3_parent16_cvs"),
+              let digestParent16TailFunction = digestLibrary.makeFunction(name: "blake3_parent16_tail_cvs"),
+              let digestRootFunction = digestLibrary.makeFunction(name: "blake3_root_digest"),
+              let digestRoot3Function = digestLibrary.makeFunction(name: "blake3_root3_digest"),
+              let digestRoot4Function = digestLibrary.makeFunction(name: "blake3_root4_digest")
+        else {
+            throw BLAKE3Error.metalCommandFailed("Unable to load BLAKE3 digest-only Metal kernels.")
+        }
+        let digestPipelines = BLAKE3MetalDigestPipelines(
+            chunkCVs: try device.makeComputePipelineState(function: digestChunkFunction),
+            chunkFullCVs: try device.makeComputePipelineState(function: digestChunkFullFunction),
+            chunkFullAlignedCVs: try device.makeComputePipelineState(function: digestChunkFullAlignedFunction),
+            chunkTile128CVs: try device.makeComputePipelineState(function: digestChunkTile128Function),
+            chunkTile256CVs: try device.makeComputePipelineState(function: digestChunkTile256Function),
+            chunkTile512CVs: try device.makeComputePipelineState(function: digestChunkTile512Function),
+            chunkTile1024CVs: try device.makeComputePipelineState(function: digestChunkTile1024Function),
+            chunkTile128SIMDGroupCVs: try device.makeComputePipelineState(
+                function: digestChunkTile128SIMDGroupFunction
+            ),
+            chunkTile128PingPongCVs: try device.makeComputePipelineState(function: digestChunkTile128PingPongFunction),
+            chunkTile256PingPongCVs: try device.makeComputePipelineState(function: digestChunkTile256PingPongFunction),
+            chunkTile512PingPongCVs: try device.makeComputePipelineState(function: digestChunkTile512PingPongFunction),
+            chunkTile1024PingPongCVs: try device.makeComputePipelineState(
+                function: digestChunkTile1024PingPongFunction
+            ),
+            parentCVs: try device.makeComputePipelineState(function: digestParentFunction),
+            parent4ExactCVs: try device.makeComputePipelineState(function: digestParent4ExactFunction),
+            parent4CVs: try device.makeComputePipelineState(function: digestParent4Function),
+            parent16CVs: try device.makeComputePipelineState(function: digestParent16Function),
+            parent16TailCVs: try device.makeComputePipelineState(function: digestParent16TailFunction),
+            rootDigest: try device.makeComputePipelineState(function: digestRootFunction),
+            root3Digest: try device.makeComputePipelineState(function: digestRoot3Function),
+            root4Digest: try device.makeComputePipelineState(function: digestRoot4Function)
+        )
         let pipelines = BLAKE3MetalPipelines(
+            digest: digestPipelines,
             chunkCVs: try device.makeComputePipelineState(function: chunkFunction),
             chunkFullCVs: try device.makeComputePipelineState(function: chunkFullFunction),
             chunkFullAlignedCVs: try device.makeComputePipelineState(function: chunkFullAlignedFunction),
@@ -243,6 +345,10 @@ private extension BLAKE3Metal.LibrarySource {
         case let .metallib(url):
             return try device.makeLibrary(URL: url)
         }
+    }
+
+    func makeDigestLibrary(device: MTLDevice) throws -> MTLLibrary {
+        try device.makeLibrary(source: BLAKE3MetalKernelSource.digestOnlyHash, options: nil)
     }
 }
 
@@ -1958,6 +2064,1031 @@ enum BLAKE3MetalKernelSource {
         uint copyCount = uint(copyEnd - copyStart);
         for (uint byteIndex = 0u; byteIndex < copyCount; byteIndex++) {
             output[destinationOffset + ulong(byteIndex)] = xof_byte(words, sourceOffset + byteIndex);
+        }
+    }
+
+    """
+
+    static let digestOnlyHash = """
+    #include <metal_stdlib>
+    using namespace metal;
+
+    struct BLAKE3ChunkParams {
+        ulong inputOffset;
+        ulong inputLength;
+        ulong baseChunkCounter;
+        uint chunkCount;
+        uint canLoadWords;
+        uint padding0;
+        uint padding1;
+    };
+
+    struct BLAKE3ParentParams {
+        uint inputCount;
+        uint padding0;
+        uint padding1;
+        uint padding2;
+    };
+
+    constant uint IV[8] = {
+        0x6A09E667u, 0xBB67AE85u, 0x3C6EF372u, 0xA54FF53Au,
+        0x510E527Fu, 0x9B05688Cu, 0x1F83D9ABu, 0x5BE0CD19u
+    };
+
+    constant uchar MSG_SCHEDULE[112] = {
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+        2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8,
+        3, 4, 10, 12, 13, 2, 7, 14, 6, 5, 9, 0, 11, 15, 8, 1,
+        10, 7, 12, 9, 14, 3, 13, 15, 4, 0, 11, 2, 5, 8, 1, 6,
+        12, 13, 9, 11, 15, 10, 14, 8, 7, 2, 5, 3, 0, 1, 6, 4,
+        9, 14, 11, 5, 8, 12, 15, 1, 13, 3, 0, 10, 2, 6, 4, 7,
+        11, 15, 5, 0, 1, 9, 8, 6, 14, 10, 2, 12, 3, 4, 7, 13
+    };
+
+    static inline uint rotr32(uint word, uint count) {
+        return (word >> count) | (word << (32u - count));
+    }
+
+    static inline void g(thread uint state[16], uint a, uint b, uint c, uint d, uint x, uint y) {
+        state[a] = state[a] + state[b] + x;
+        state[d] = rotr32(state[d] ^ state[a], 16u);
+        state[c] = state[c] + state[d];
+        state[b] = rotr32(state[b] ^ state[c], 12u);
+        state[a] = state[a] + state[b] + y;
+        state[d] = rotr32(state[d] ^ state[a], 8u);
+        state[c] = state[c] + state[d];
+        state[b] = rotr32(state[b] ^ state[c], 7u);
+    }
+
+    static inline void round_fn(thread uint state[16], thread const uint msg[16], uint round) {
+        uint base = round * 16u;
+        g(state, 0u, 4u, 8u, 12u, msg[MSG_SCHEDULE[base + 0u]], msg[MSG_SCHEDULE[base + 1u]]);
+        g(state, 1u, 5u, 9u, 13u, msg[MSG_SCHEDULE[base + 2u]], msg[MSG_SCHEDULE[base + 3u]]);
+        g(state, 2u, 6u, 10u, 14u, msg[MSG_SCHEDULE[base + 4u]], msg[MSG_SCHEDULE[base + 5u]]);
+        g(state, 3u, 7u, 11u, 15u, msg[MSG_SCHEDULE[base + 6u]], msg[MSG_SCHEDULE[base + 7u]]);
+        g(state, 0u, 5u, 10u, 15u, msg[MSG_SCHEDULE[base + 8u]], msg[MSG_SCHEDULE[base + 9u]]);
+        g(state, 1u, 6u, 11u, 12u, msg[MSG_SCHEDULE[base + 10u]], msg[MSG_SCHEDULE[base + 11u]]);
+        g(state, 2u, 7u, 8u, 13u, msg[MSG_SCHEDULE[base + 12u]], msg[MSG_SCHEDULE[base + 13u]]);
+        g(state, 3u, 4u, 9u, 14u, msg[MSG_SCHEDULE[base + 14u]], msg[MSG_SCHEDULE[base + 15u]]);
+    }
+
+    static inline uint load32_chunk(device const uchar *chunk, uint offset, uint chunkLength) {
+        uint word = 0u;
+        if (offset < chunkLength) {
+            word |= uint(chunk[offset]);
+        }
+        if (offset + 1u < chunkLength) {
+            word |= uint(chunk[offset + 1u]) << 8u;
+        }
+        if (offset + 2u < chunkLength) {
+            word |= uint(chunk[offset + 2u]) << 16u;
+        }
+        if (offset + 3u < chunkLength) {
+            word |= uint(chunk[offset + 3u]) << 24u;
+        }
+        return word;
+    }
+
+    static inline uint load32_exact(device const uchar *bytes, uint offset) {
+        return uint(bytes[offset]) |
+            (uint(bytes[offset + 1u]) << 8u) |
+            (uint(bytes[offset + 2u]) << 16u) |
+            (uint(bytes[offset + 3u]) << 24u);
+    }
+
+    static inline uint load32_aligned(device const uint *words, uint wordOffset) {
+        return words[wordOffset];
+    }
+
+    static inline void store32_aligned(device uint *words, uint wordOffset, uint word) {
+        words[wordOffset] = word;
+    }
+
+    static inline void compress_in_place(thread uint cv[8],
+                                         thread const uint blockWords[16],
+                                         uint blockLength,
+                                         ulong counter,
+                                         uint flags) {
+        uint state[16];
+        state[0] = cv[0];
+        state[1] = cv[1];
+        state[2] = cv[2];
+        state[3] = cv[3];
+        state[4] = cv[4];
+        state[5] = cv[5];
+        state[6] = cv[6];
+        state[7] = cv[7];
+        state[8] = IV[0];
+        state[9] = IV[1];
+        state[10] = IV[2];
+        state[11] = IV[3];
+        state[12] = uint(counter & 0xffffffffUL);
+        state[13] = uint(counter >> 32);
+        state[14] = blockLength;
+        state[15] = flags;
+
+        round_fn(state, blockWords, 0u);
+        round_fn(state, blockWords, 1u);
+        round_fn(state, blockWords, 2u);
+        round_fn(state, blockWords, 3u);
+        round_fn(state, blockWords, 4u);
+        round_fn(state, blockWords, 5u);
+        round_fn(state, blockWords, 6u);
+
+        cv[0] = state[0] ^ state[8];
+        cv[1] = state[1] ^ state[9];
+        cv[2] = state[2] ^ state[10];
+        cv[3] = state[3] ^ state[11];
+        cv[4] = state[4] ^ state[12];
+        cv[5] = state[5] ^ state[13];
+        cv[6] = state[6] ^ state[14];
+        cv[7] = state[7] ^ state[15];
+    }
+
+    static inline void parent_cv(thread uint outCV[8], thread const uint blockWords[16]) {
+        uint cv[8] = {
+            IV[0], IV[1], IV[2], IV[3],
+            IV[4], IV[5], IV[6], IV[7]
+        };
+        compress_in_place(cv, blockWords, 64u, 0UL, 4u);
+        for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+            outCV[wordIndex] = cv[wordIndex];
+        }
+    }
+
+    static inline void reduce_tail_cvs(thread uint cvs[15][8], uint count) {
+        while (count > 1u) {
+            uint parentCount = count / 2u;
+            for (uint parentIndex = 0u; parentIndex < parentCount; parentIndex++) {
+                uint blockWords[16];
+                for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                    blockWords[wordIndex] = cvs[parentIndex * 2u][wordIndex];
+                    blockWords[wordIndex + 8u] = cvs[parentIndex * 2u + 1u][wordIndex];
+                }
+                parent_cv(cvs[parentIndex], blockWords);
+            }
+
+            if ((count & 1u) != 0u) {
+                for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                    cvs[parentCount][wordIndex] = cvs[count - 1u][wordIndex];
+                }
+                count = parentCount + 1u;
+            } else {
+                count = parentCount;
+            }
+        }
+    }
+
+    static inline void chunk_full_aligned_cv(device const uchar *chunk,
+                                             ulong chunkCounter,
+                                             thread uint cv[8]) {
+        device const uint *chunkWords32 = reinterpret_cast<device const uint *>(chunk);
+
+        cv[0] = IV[0];
+        cv[1] = IV[1];
+        cv[2] = IV[2];
+        cv[3] = IV[3];
+        cv[4] = IV[4];
+        cv[5] = IV[5];
+        cv[6] = IV[6];
+        cv[7] = IV[7];
+
+        uint blockWords[16];
+        for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+            blockWords[wordIndex] = load32_aligned(chunkWords32, wordIndex);
+        }
+        compress_in_place(cv, blockWords, 64u, chunkCounter, 1u);
+
+        for (uint blockIndex = 1u; blockIndex < 15u; blockIndex++) {
+            uint wordBase = blockIndex * 16u;
+            for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+                blockWords[wordIndex] = load32_aligned(chunkWords32, wordBase + wordIndex);
+            }
+            compress_in_place(cv, blockWords, 64u, chunkCounter, 0u);
+        }
+
+        for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+            blockWords[wordIndex] = load32_aligned(chunkWords32, 240u + wordIndex);
+        }
+        compress_in_place(cv, blockWords, 64u, chunkCounter, 2u);
+    }
+
+    static inline void chunk_cv(device const uchar *input,
+                                constant BLAKE3ChunkParams &params,
+                                uint chunkIndex,
+                                thread uint cv[8]) {
+        ulong chunkOffset = ulong(chunkIndex) * 1024UL;
+        ulong remaining = params.inputLength - chunkOffset;
+        uint chunkLength = remaining > 1024UL ? 1024u : uint(remaining);
+        device const uchar *chunk = input + params.inputOffset + chunkOffset;
+        ulong chunkCounter = params.baseChunkCounter + ulong(chunkIndex);
+        bool canLoadWords = params.canLoadWords != 0u;
+
+        cv[0] = IV[0];
+        cv[1] = IV[1];
+        cv[2] = IV[2];
+        cv[3] = IV[3];
+        cv[4] = IV[4];
+        cv[5] = IV[5];
+        cv[6] = IV[6];
+        cv[7] = IV[7];
+
+        if (chunkLength == 1024u && canLoadWords) {
+            device const uint *chunkWords32 = reinterpret_cast<device const uint *>(chunk);
+            for (uint blockIndex = 0u; blockIndex < 16u; blockIndex++) {
+                uint flags = 0u;
+                if (blockIndex == 0u) {
+                    flags |= 1u;
+                }
+                if (blockIndex == 15u) {
+                    flags |= 2u;
+                }
+
+                uint wordBase = blockIndex * 16u;
+                uint blockWords[16];
+                for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+                    blockWords[wordIndex] = load32_aligned(chunkWords32, wordBase + wordIndex);
+                }
+
+                compress_in_place(cv, blockWords, 64u, chunkCounter, flags);
+            }
+        } else if (chunkLength == 1024u) {
+            for (uint blockIndex = 0u; blockIndex < 16u; blockIndex++) {
+                uint blockOffset = blockIndex * 64u;
+                uint flags = 0u;
+                if (blockIndex == 0u) {
+                    flags |= 1u;
+                }
+                if (blockIndex == 15u) {
+                    flags |= 2u;
+                }
+
+                uint blockWords[16];
+                for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+                    blockWords[wordIndex] = load32_exact(chunk, blockOffset + wordIndex * 4u);
+                }
+
+                compress_in_place(cv, blockWords, 64u, chunkCounter, flags);
+            }
+        } else {
+            for (uint blockOffset = 0u; blockOffset < chunkLength; blockOffset += 64u) {
+                uint remainingInChunk = chunkLength - blockOffset;
+                uint blockLength = remainingInChunk > 64u ? 64u : remainingInChunk;
+                uint flags = 0u;
+                if (blockOffset == 0u) {
+                    flags |= 1u;
+                }
+                if (blockOffset + blockLength == chunkLength) {
+                    flags |= 2u;
+                }
+
+                uint blockWords[16];
+                if (canLoadWords && blockLength == 64u) {
+                    device const uint *chunkWords32 = reinterpret_cast<device const uint *>(chunk);
+                    uint wordBase = blockOffset >> 2u;
+                    for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+                        blockWords[wordIndex] = load32_aligned(chunkWords32, wordBase + wordIndex);
+                    }
+                } else {
+                    for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+                        blockWords[wordIndex] = load32_chunk(chunk, blockOffset + wordIndex * 4u, chunkLength);
+                    }
+                }
+
+                compress_in_place(cv, blockWords, blockLength, chunkCounter, flags);
+            }
+        }
+    }
+
+    kernel void blake3_chunk_cvs(device const uchar *input [[buffer(0)]],
+                                 device uchar *chunkCVs [[buffer(1)]],
+                                 constant BLAKE3ChunkParams &params [[buffer(2)]],
+                                 uint gid [[thread_position_in_grid]]) {
+        if (gid >= params.chunkCount) {
+            return;
+        }
+
+        uint cv[8];
+        chunk_cv(input, params, gid, cv);
+        device uint *out = reinterpret_cast<device uint *>(chunkCVs + ulong(gid) * 32UL);
+        for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+            store32_aligned(out, wordIndex, cv[wordIndex]);
+        }
+    }
+
+    kernel void blake3_chunk_full_cvs(device const uchar *input [[buffer(0)]],
+                                      device uchar *chunkCVs [[buffer(1)]],
+                                      constant BLAKE3ChunkParams &params [[buffer(2)]],
+                                      uint gid [[thread_position_in_grid]]) {
+        device const uchar *chunk = input + params.inputOffset + ulong(gid) * 1024UL;
+        ulong chunkCounter = params.baseChunkCounter + ulong(gid);
+        bool canLoadWords = params.canLoadWords != 0u;
+
+        uint cv[8] = {
+            IV[0], IV[1], IV[2], IV[3],
+            IV[4], IV[5], IV[6], IV[7]
+        };
+
+        if (canLoadWords) {
+            device const uint *chunkWords32 = reinterpret_cast<device const uint *>(chunk);
+            for (uint blockIndex = 0u; blockIndex < 16u; blockIndex++) {
+                uint flags = 0u;
+                if (blockIndex == 0u) {
+                    flags |= 1u;
+                }
+                if (blockIndex == 15u) {
+                    flags |= 2u;
+                }
+
+                uint wordBase = blockIndex * 16u;
+                uint blockWords[16];
+                for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+                    blockWords[wordIndex] = load32_aligned(chunkWords32, wordBase + wordIndex);
+                }
+
+                compress_in_place(cv, blockWords, 64u, chunkCounter, flags);
+            }
+        } else {
+            for (uint blockIndex = 0u; blockIndex < 16u; blockIndex++) {
+                uint blockOffset = blockIndex * 64u;
+                uint flags = 0u;
+                if (blockIndex == 0u) {
+                    flags |= 1u;
+                }
+                if (blockIndex == 15u) {
+                    flags |= 2u;
+                }
+
+                uint blockWords[16];
+                for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+                    blockWords[wordIndex] = load32_exact(chunk, blockOffset + wordIndex * 4u);
+                }
+
+                compress_in_place(cv, blockWords, 64u, chunkCounter, flags);
+            }
+        }
+
+        device uint *out = reinterpret_cast<device uint *>(chunkCVs + ulong(gid) * 32UL);
+        for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+            store32_aligned(out, wordIndex, cv[wordIndex]);
+        }
+    }
+
+    kernel void blake3_chunk_full_aligned_cvs(device const uchar *input [[buffer(0)]],
+                                              device uchar *chunkCVs [[buffer(1)]],
+                                              constant BLAKE3ChunkParams &params [[buffer(2)]],
+                                              uint gid [[thread_position_in_grid]]) {
+        device const uchar *chunk = input + params.inputOffset + ulong(gid) * 1024UL;
+        ulong chunkCounter = params.baseChunkCounter + ulong(gid);
+
+        uint cv[8];
+        chunk_full_aligned_cv(chunk, chunkCounter, cv);
+
+        device uint *out = reinterpret_cast<device uint *>(chunkCVs + ulong(gid) * 32UL);
+        for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+            store32_aligned(out, wordIndex, cv[wordIndex]);
+        }
+    }
+
+    static inline void tile_reduce_exact(threadgroup uint *tileScratch,
+                                         uint tileChunkCount,
+                                         uint tid) {
+        for (uint activeCount = tileChunkCount; activeCount > 1u; activeCount >>= 1u) {
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            uint parentCount = activeCount >> 1u;
+            uint blockWords[16];
+            if (tid < parentCount) {
+                uint leftWordBase = tid * 16u;
+                for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+                    blockWords[wordIndex] = tileScratch[leftWordBase + wordIndex];
+                }
+            }
+
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (tid < parentCount) {
+                uint outWordBase = tid * 8u;
+                uint cv[8];
+                parent_cv(cv, blockWords);
+                for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                    tileScratch[outWordBase + wordIndex] = cv[wordIndex];
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    static inline void tile_reduce_pingpong_exact(threadgroup uint *tileScratch,
+                                                 device uchar *tileCVs,
+                                                 uint tileChunkCount,
+                                                 uint tid,
+                                                 uint tgid) {
+        threadgroup uint *src = tileScratch;
+        threadgroup uint *dst = tileScratch + tileChunkCount * 8u;
+
+        for (uint activeCount = tileChunkCount; activeCount > 1u; activeCount >>= 1u) {
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            uint parentCount = activeCount >> 1u;
+            if (tid < parentCount) {
+                uint leftWordBase = tid * 16u;
+                uint blockWords[16];
+                for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+                    blockWords[wordIndex] = src[leftWordBase + wordIndex];
+                }
+
+                uint outWordBase = tid * 8u;
+                uint cv[8];
+                parent_cv(cv, blockWords);
+                for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                    dst[outWordBase + wordIndex] = cv[wordIndex];
+                }
+            }
+            threadgroup uint *tmp = src;
+            src = dst;
+            dst = tmp;
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid == 0u) {
+            device uint *out = reinterpret_cast<device uint *>(tileCVs + ulong(tgid) * 32UL);
+            for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                store32_aligned(out, wordIndex, src[wordIndex]);
+            }
+        }
+    }
+
+    static inline void chunk_tile_cvs(device const uchar *input,
+                                      device uchar *tileCVs,
+                                      constant BLAKE3ChunkParams &params,
+                                      threadgroup uint *tileScratch,
+                                      uint tileChunkCount,
+                                      uint tid,
+                                      uint gid,
+                                      uint tgid) {
+        if (gid >= params.chunkCount) {
+            return;
+        }
+
+        device const uchar *chunk = input + params.inputOffset + ulong(gid) * 1024UL;
+        ulong chunkCounter = params.baseChunkCounter + ulong(gid);
+        uint cv[8];
+        chunk_full_aligned_cv(chunk, chunkCounter, cv);
+
+        uint scratchBase = tid * 8u;
+        for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+            tileScratch[scratchBase + wordIndex] = cv[wordIndex];
+        }
+
+        tile_reduce_exact(tileScratch, tileChunkCount, tid);
+
+        if (tid == 0u) {
+            device uint *out = reinterpret_cast<device uint *>(tileCVs + ulong(tgid) * 32UL);
+            for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                store32_aligned(out, wordIndex, tileScratch[wordIndex]);
+            }
+        }
+    }
+
+    static inline void chunk_tile_pingpong_cvs(device const uchar *input,
+                                               device uchar *tileCVs,
+                                               constant BLAKE3ChunkParams &params,
+                                               threadgroup uint *tileScratch,
+                                               uint tileChunkCount,
+                                               uint tid,
+                                               uint gid,
+                                               uint tgid) {
+        if (gid >= params.chunkCount) {
+            return;
+        }
+
+        device const uchar *chunk = input + params.inputOffset + ulong(gid) * 1024UL;
+        ulong chunkCounter = params.baseChunkCounter + ulong(gid);
+        uint cv[8];
+        chunk_full_aligned_cv(chunk, chunkCounter, cv);
+
+        uint scratchBase = tid * 8u;
+        for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+            tileScratch[scratchBase + wordIndex] = cv[wordIndex];
+        }
+
+        tile_reduce_pingpong_exact(tileScratch, tileCVs, tileChunkCount, tid, tgid);
+    }
+
+    static inline void reduce_simdgroup32_cv(thread uint cv[8],
+                                             uint simdLane) {
+        for (uint offset = 1u; offset < 32u; offset <<= 1u) {
+            uint partner[8];
+            for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                partner[wordIndex] = simd_shuffle_down(cv[wordIndex], ushort(offset));
+            }
+
+            if ((simdLane & ((offset << 1u) - 1u)) == 0u) {
+                uint blockWords[16];
+                for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                    blockWords[wordIndex] = cv[wordIndex];
+                    blockWords[wordIndex + 8u] = partner[wordIndex];
+                }
+                parent_cv(cv, blockWords);
+            }
+        }
+    }
+
+    static inline void chunk_tile128_simdgroup_cvs(device const uchar *input,
+                                                   device uchar *tileCVs,
+                                                   constant BLAKE3ChunkParams &params,
+                                                   threadgroup uint *tileScratch,
+                                                   uint tid,
+                                                   uint gid,
+                                                   uint tgid,
+                                                   uint simdLane,
+                                                   uint simdGroup) {
+        device const uchar *chunk = input + params.inputOffset + ulong(gid) * 1024UL;
+        ulong chunkCounter = params.baseChunkCounter + ulong(gid);
+        uint cv[8];
+        chunk_full_aligned_cv(chunk, chunkCounter, cv);
+
+        reduce_simdgroup32_cv(cv, simdLane);
+
+        if (simdLane == 0u) {
+            uint scratchBase = simdGroup * 8u;
+            for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                tileScratch[scratchBase + wordIndex] = cv[wordIndex];
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid < 2u) {
+            uint blockWords[16];
+            uint wordBase = tid * 16u;
+            for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+                blockWords[wordIndex] = tileScratch[wordBase + wordIndex];
+            }
+            parent_cv(cv, blockWords);
+            uint outWordBase = tid * 8u;
+            for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                tileScratch[outWordBase + wordIndex] = cv[wordIndex];
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid == 0u) {
+            uint blockWords[16];
+            for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+                blockWords[wordIndex] = tileScratch[wordIndex];
+            }
+            parent_cv(cv, blockWords);
+            device uint *out = reinterpret_cast<device uint *>(tileCVs + ulong(tgid) * 32UL);
+            for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                store32_aligned(out, wordIndex, cv[wordIndex]);
+            }
+        }
+    }
+
+    kernel void blake3_chunk_tile128_cvs(device const uchar *input [[buffer(0)]],
+                                         device uchar *tileCVs [[buffer(1)]],
+                                         constant BLAKE3ChunkParams &params [[buffer(2)]],
+                                         threadgroup uint *tileScratch [[threadgroup(0)]],
+                                         uint tid [[thread_position_in_threadgroup]],
+                                         uint gid [[thread_position_in_grid]],
+                                         uint tgid [[threadgroup_position_in_grid]]) {
+        chunk_tile_cvs(input, tileCVs, params, tileScratch, 128u, tid, gid, tgid);
+    }
+
+    kernel void blake3_chunk_tile256_cvs(device const uchar *input [[buffer(0)]],
+                                         device uchar *tileCVs [[buffer(1)]],
+                                         constant BLAKE3ChunkParams &params [[buffer(2)]],
+                                         threadgroup uint *tileScratch [[threadgroup(0)]],
+                                         uint tid [[thread_position_in_threadgroup]],
+                                         uint gid [[thread_position_in_grid]],
+                                         uint tgid [[threadgroup_position_in_grid]]) {
+        chunk_tile_cvs(input, tileCVs, params, tileScratch, 256u, tid, gid, tgid);
+    }
+
+    kernel void blake3_chunk_tile512_cvs(device const uchar *input [[buffer(0)]],
+                                         device uchar *tileCVs [[buffer(1)]],
+                                         constant BLAKE3ChunkParams &params [[buffer(2)]],
+                                         threadgroup uint *tileScratch [[threadgroup(0)]],
+                                         uint tid [[thread_position_in_threadgroup]],
+                                         uint gid [[thread_position_in_grid]],
+                                         uint tgid [[threadgroup_position_in_grid]]) {
+        chunk_tile_cvs(input, tileCVs, params, tileScratch, 512u, tid, gid, tgid);
+    }
+
+    kernel void blake3_chunk_tile1024_cvs(device const uchar *input [[buffer(0)]],
+                                          device uchar *tileCVs [[buffer(1)]],
+                                          constant BLAKE3ChunkParams &params [[buffer(2)]],
+                                          threadgroup uint *tileScratch [[threadgroup(0)]],
+                                          uint tid [[thread_position_in_threadgroup]],
+                                          uint gid [[thread_position_in_grid]],
+                                          uint tgid [[threadgroup_position_in_grid]]) {
+        chunk_tile_cvs(input, tileCVs, params, tileScratch, 1024u, tid, gid, tgid);
+    }
+
+    kernel void blake3_chunk_tile128_simdgroup_cvs(device const uchar *input [[buffer(0)]],
+                                                   device uchar *tileCVs [[buffer(1)]],
+                                                   constant BLAKE3ChunkParams &params [[buffer(2)]],
+                                                   threadgroup uint *tileScratch [[threadgroup(0)]],
+                                                   uint tid [[thread_position_in_threadgroup]],
+                                                   uint gid [[thread_position_in_grid]],
+                                                   uint tgid [[threadgroup_position_in_grid]],
+                                                   uint simdLane [[thread_index_in_simdgroup]],
+                                                   uint simdGroup [[simdgroup_index_in_threadgroup]]) {
+        chunk_tile128_simdgroup_cvs(input, tileCVs, params, tileScratch, tid, gid, tgid, simdLane, simdGroup);
+    }
+
+    kernel void blake3_chunk_tile128_pingpong_cvs(device const uchar *input [[buffer(0)]],
+                                                  device uchar *tileCVs [[buffer(1)]],
+                                                  constant BLAKE3ChunkParams &params [[buffer(2)]],
+                                                  threadgroup uint *tileScratch [[threadgroup(0)]],
+                                                  uint tid [[thread_position_in_threadgroup]],
+                                                  uint gid [[thread_position_in_grid]],
+                                                  uint tgid [[threadgroup_position_in_grid]]) {
+        chunk_tile_pingpong_cvs(input, tileCVs, params, tileScratch, 128u, tid, gid, tgid);
+    }
+
+    kernel void blake3_chunk_tile256_pingpong_cvs(device const uchar *input [[buffer(0)]],
+                                                  device uchar *tileCVs [[buffer(1)]],
+                                                  constant BLAKE3ChunkParams &params [[buffer(2)]],
+                                                  threadgroup uint *tileScratch [[threadgroup(0)]],
+                                                  uint tid [[thread_position_in_threadgroup]],
+                                                  uint gid [[thread_position_in_grid]],
+                                                  uint tgid [[threadgroup_position_in_grid]]) {
+        chunk_tile_pingpong_cvs(input, tileCVs, params, tileScratch, 256u, tid, gid, tgid);
+    }
+
+    kernel void blake3_chunk_tile512_pingpong_cvs(device const uchar *input [[buffer(0)]],
+                                                  device uchar *tileCVs [[buffer(1)]],
+                                                  constant BLAKE3ChunkParams &params [[buffer(2)]],
+                                                  threadgroup uint *tileScratch [[threadgroup(0)]],
+                                                  uint tid [[thread_position_in_threadgroup]],
+                                                  uint gid [[thread_position_in_grid]],
+                                                  uint tgid [[threadgroup_position_in_grid]]) {
+        chunk_tile_pingpong_cvs(input, tileCVs, params, tileScratch, 512u, tid, gid, tgid);
+    }
+
+    kernel void blake3_chunk_tile1024_pingpong_cvs(device const uchar *input [[buffer(0)]],
+                                                   device uchar *tileCVs [[buffer(1)]],
+                                                   constant BLAKE3ChunkParams &params [[buffer(2)]],
+                                                   threadgroup uint *tileScratch [[threadgroup(0)]],
+                                                   uint tid [[thread_position_in_threadgroup]],
+                                                   uint gid [[thread_position_in_grid]],
+                                                   uint tgid [[threadgroup_position_in_grid]]) {
+        chunk_tile_pingpong_cvs(input, tileCVs, params, tileScratch, 1024u, tid, gid, tgid);
+    }
+
+    kernel void blake3_parent_cvs(device const uchar *inputCVs [[buffer(0)]],
+                                  device uchar *parentCVs [[buffer(1)]],
+                                  constant BLAKE3ParentParams &params [[buffer(2)]],
+                                  uint gid [[thread_position_in_grid]]) {
+        uint parentCount = params.inputCount / 2u;
+        bool hasOdd = (params.inputCount & 1u) != 0u;
+
+        if (gid < parentCount) {
+            device const uint *block = reinterpret_cast<device const uint *>(inputCVs + ulong(gid) * 64UL);
+            uint blockWords[16];
+            for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+                blockWords[wordIndex] = load32_aligned(block, wordIndex);
+            }
+
+            uint cv[8] = {
+                IV[0], IV[1], IV[2], IV[3],
+                IV[4], IV[5], IV[6], IV[7]
+            };
+            compress_in_place(cv, blockWords, 64u, 0UL, 4u);
+
+            device uint *out = reinterpret_cast<device uint *>(parentCVs + ulong(gid) * 32UL);
+            for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                store32_aligned(out, wordIndex, cv[wordIndex]);
+            }
+            return;
+        }
+
+        if (hasOdd && gid == parentCount) {
+            device const uint *last = reinterpret_cast<device const uint *>(inputCVs + ulong(params.inputCount - 1u) * 32UL);
+            device uint *out = reinterpret_cast<device uint *>(parentCVs + ulong(parentCount) * 32UL);
+            for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                store32_aligned(out, wordIndex, load32_aligned(last, wordIndex));
+            }
+        }
+    }
+
+    kernel void blake3_parent4_exact_cvs(device const uchar *inputCVs [[buffer(0)]],
+                                         device uchar *parentCVs [[buffer(1)]],
+                                         constant BLAKE3ParentParams &params [[buffer(2)]],
+                                         uint gid [[thread_position_in_grid]]) {
+        uint outputCount = params.inputCount / 4u;
+        if (gid >= outputCount) {
+            return;
+        }
+
+        device const uint *inputWords = reinterpret_cast<device const uint *>(inputCVs + ulong(gid) * 128UL);
+        uint cvs[2][8];
+
+        for (uint pairIndex = 0u; pairIndex < 2u; pairIndex++) {
+            uint blockWords[16];
+            uint wordBase = pairIndex * 16u;
+            for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+                blockWords[wordIndex] = load32_aligned(inputWords, wordBase + wordIndex);
+            }
+            parent_cv(cvs[pairIndex], blockWords);
+        }
+
+        uint blockWords[16];
+        for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+            blockWords[wordIndex] = cvs[0][wordIndex];
+            blockWords[wordIndex + 8u] = cvs[1][wordIndex];
+        }
+        parent_cv(cvs[0], blockWords);
+
+        device uint *out = reinterpret_cast<device uint *>(parentCVs + ulong(gid) * 32UL);
+        for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+            store32_aligned(out, wordIndex, cvs[0][wordIndex]);
+        }
+    }
+
+    kernel void blake3_parent4_cvs(device const uchar *inputCVs [[buffer(0)]],
+                                   device uchar *parentCVs [[buffer(1)]],
+                                   constant BLAKE3ParentParams &params [[buffer(2)]],
+                                   uint gid [[thread_position_in_grid]]) {
+        uint fullGroupCount = params.inputCount / 4u;
+        uint remainder = params.inputCount & 3u;
+        uint outputCount = fullGroupCount + (remainder == 0u ? 0u : 1u);
+        if (gid >= outputCount) {
+            return;
+        }
+
+        if (gid < fullGroupCount) {
+            device const uint *inputWords = reinterpret_cast<device const uint *>(inputCVs + ulong(gid) * 128UL);
+            uint cvs[2][8];
+
+            for (uint pairIndex = 0u; pairIndex < 2u; pairIndex++) {
+                uint blockWords[16];
+                uint wordBase = pairIndex * 16u;
+                for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+                    blockWords[wordIndex] = load32_aligned(inputWords, wordBase + wordIndex);
+                }
+                parent_cv(cvs[pairIndex], blockWords);
+            }
+
+            uint blockWords[16];
+            for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                blockWords[wordIndex] = cvs[0][wordIndex];
+                blockWords[wordIndex + 8u] = cvs[1][wordIndex];
+            }
+            parent_cv(cvs[0], blockWords);
+
+            device uint *out = reinterpret_cast<device uint *>(parentCVs + ulong(gid) * 32UL);
+            for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                store32_aligned(out, wordIndex, cvs[0][wordIndex]);
+            }
+            return;
+        }
+
+        device const uint *tailWords = reinterpret_cast<device const uint *>(inputCVs + ulong(fullGroupCount) * 128UL);
+        device uint *out = reinterpret_cast<device uint *>(parentCVs + ulong(fullGroupCount) * 32UL);
+
+        if (remainder == 1u) {
+            for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                store32_aligned(out, wordIndex, load32_aligned(tailWords, wordIndex));
+            }
+            return;
+        }
+
+        uint blockWords[16];
+        for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+            blockWords[wordIndex] = load32_aligned(tailWords, wordIndex);
+        }
+        uint cv[8];
+        parent_cv(cv, blockWords);
+
+        if (remainder == 3u) {
+            for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                blockWords[wordIndex] = cv[wordIndex];
+                blockWords[wordIndex + 8u] = load32_aligned(tailWords, 16u + wordIndex);
+            }
+            parent_cv(cv, blockWords);
+        }
+
+        for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+            store32_aligned(out, wordIndex, cv[wordIndex]);
+        }
+    }
+
+    kernel void blake3_parent16_cvs(device const uchar *inputCVs [[buffer(0)]],
+                                    device uchar *parentCVs [[buffer(1)]],
+                                    constant BLAKE3ParentParams &params [[buffer(2)]],
+                                    uint gid [[thread_position_in_grid]]) {
+        uint outputCount = params.inputCount / 16u;
+        if (gid >= outputCount) {
+            return;
+        }
+
+        device const uint *inputWords = reinterpret_cast<device const uint *>(inputCVs + ulong(gid) * 512UL);
+        uint cvs[8][8];
+
+        for (uint pairIndex = 0u; pairIndex < 8u; pairIndex++) {
+            uint blockWords[16];
+            uint wordBase = pairIndex * 16u;
+            for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+                blockWords[wordIndex] = load32_aligned(inputWords, wordBase + wordIndex);
+            }
+            parent_cv(cvs[pairIndex], blockWords);
+        }
+
+        for (uint parentIndex = 0u; parentIndex < 4u; parentIndex++) {
+            uint blockWords[16];
+            for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                blockWords[wordIndex] = cvs[parentIndex * 2u][wordIndex];
+                blockWords[wordIndex + 8u] = cvs[parentIndex * 2u + 1u][wordIndex];
+            }
+            parent_cv(cvs[parentIndex], blockWords);
+        }
+
+        for (uint parentIndex = 0u; parentIndex < 2u; parentIndex++) {
+            uint blockWords[16];
+            for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                blockWords[wordIndex] = cvs[parentIndex * 2u][wordIndex];
+                blockWords[wordIndex + 8u] = cvs[parentIndex * 2u + 1u][wordIndex];
+            }
+            parent_cv(cvs[parentIndex], blockWords);
+        }
+
+        uint blockWords[16];
+        for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+            blockWords[wordIndex] = cvs[0][wordIndex];
+            blockWords[wordIndex + 8u] = cvs[1][wordIndex];
+        }
+        parent_cv(cvs[0], blockWords);
+
+        device uint *out = reinterpret_cast<device uint *>(parentCVs + ulong(gid) * 32UL);
+        for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+            store32_aligned(out, wordIndex, cvs[0][wordIndex]);
+        }
+    }
+
+    kernel void blake3_parent16_tail_cvs(device const uchar *inputCVs [[buffer(0)]],
+                                         device uchar *parentCVs [[buffer(1)]],
+                                         constant BLAKE3ParentParams &params [[buffer(2)]],
+                                         uint gid [[thread_position_in_grid]]) {
+        uint fullGroupCount = params.inputCount / 16u;
+        uint remainder = params.inputCount & 15u;
+        uint outputCount = fullGroupCount + (remainder == 0u ? 0u : 1u);
+        if (gid >= outputCount) {
+            return;
+        }
+
+        if (gid < fullGroupCount) {
+            device const uint *inputWords = reinterpret_cast<device const uint *>(inputCVs + ulong(gid) * 512UL);
+            uint cvs[8][8];
+
+            for (uint pairIndex = 0u; pairIndex < 8u; pairIndex++) {
+                uint blockWords[16];
+                uint wordBase = pairIndex * 16u;
+                for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+                    blockWords[wordIndex] = load32_aligned(inputWords, wordBase + wordIndex);
+                }
+                parent_cv(cvs[pairIndex], blockWords);
+            }
+
+            for (uint parentIndex = 0u; parentIndex < 4u; parentIndex++) {
+                uint blockWords[16];
+                for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                    blockWords[wordIndex] = cvs[parentIndex * 2u][wordIndex];
+                    blockWords[wordIndex + 8u] = cvs[parentIndex * 2u + 1u][wordIndex];
+                }
+                parent_cv(cvs[parentIndex], blockWords);
+            }
+
+            for (uint parentIndex = 0u; parentIndex < 2u; parentIndex++) {
+                uint blockWords[16];
+                for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                    blockWords[wordIndex] = cvs[parentIndex * 2u][wordIndex];
+                    blockWords[wordIndex + 8u] = cvs[parentIndex * 2u + 1u][wordIndex];
+                }
+                parent_cv(cvs[parentIndex], blockWords);
+            }
+
+            uint blockWords[16];
+            for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                blockWords[wordIndex] = cvs[0][wordIndex];
+                blockWords[wordIndex + 8u] = cvs[1][wordIndex];
+            }
+            parent_cv(cvs[0], blockWords);
+
+            device uint *out = reinterpret_cast<device uint *>(parentCVs + ulong(gid) * 32UL);
+            for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                store32_aligned(out, wordIndex, cvs[0][wordIndex]);
+            }
+            return;
+        }
+
+        device const uint *tailWords = reinterpret_cast<device const uint *>(inputCVs + ulong(fullGroupCount) * 512UL);
+        uint tailCVs[15][8];
+        for (uint cvIndex = 0u; cvIndex < remainder; cvIndex++) {
+            uint wordBase = cvIndex * 8u;
+            for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+                tailCVs[cvIndex][wordIndex] = load32_aligned(tailWords, wordBase + wordIndex);
+            }
+        }
+        reduce_tail_cvs(tailCVs, remainder);
+
+        device uint *out = reinterpret_cast<device uint *>(parentCVs + ulong(fullGroupCount) * 32UL);
+        for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+            store32_aligned(out, wordIndex, tailCVs[0][wordIndex]);
+        }
+    }
+
+    kernel void blake3_root_digest(device const uchar *rootCVs [[buffer(0)]],
+                                   device uchar *digest [[buffer(1)]],
+                                   uint gid [[thread_position_in_grid]]) {
+        if (gid != 0u) {
+            return;
+        }
+
+        device const uint *rootWords = reinterpret_cast<device const uint *>(rootCVs);
+        uint blockWords[16];
+        for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+            blockWords[wordIndex] = load32_aligned(rootWords, wordIndex);
+        }
+
+        uint cv[8] = {
+            IV[0], IV[1], IV[2], IV[3],
+            IV[4], IV[5], IV[6], IV[7]
+        };
+        compress_in_place(cv, blockWords, 64u, 0UL, 12u);
+
+        device uint *digestWords = reinterpret_cast<device uint *>(digest);
+        for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+            store32_aligned(digestWords, wordIndex, cv[wordIndex]);
+        }
+    }
+
+    kernel void blake3_root3_digest(device const uchar *rootCVs [[buffer(0)]],
+                                    device uchar *digest [[buffer(1)]],
+                                    uint gid [[thread_position_in_grid]]) {
+        if (gid != 0u) {
+            return;
+        }
+
+        device const uint *inputWords = reinterpret_cast<device const uint *>(rootCVs);
+        uint leftCV[8];
+        uint blockWords[16];
+
+        for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+            blockWords[wordIndex] = load32_aligned(inputWords, wordIndex);
+        }
+        parent_cv(leftCV, blockWords);
+
+        for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+            blockWords[wordIndex] = leftCV[wordIndex];
+            blockWords[wordIndex + 8u] = load32_aligned(inputWords, 16u + wordIndex);
+        }
+
+        uint cv[8] = {
+            IV[0], IV[1], IV[2], IV[3],
+            IV[4], IV[5], IV[6], IV[7]
+        };
+        compress_in_place(cv, blockWords, 64u, 0UL, 12u);
+
+        device uint *digestWords = reinterpret_cast<device uint *>(digest);
+        for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+            store32_aligned(digestWords, wordIndex, cv[wordIndex]);
+        }
+    }
+
+    kernel void blake3_root4_digest(device const uchar *rootCVs [[buffer(0)]],
+                                    device uchar *digest [[buffer(1)]],
+                                    uint gid [[thread_position_in_grid]]) {
+        if (gid != 0u) {
+            return;
+        }
+
+        device const uint *inputWords = reinterpret_cast<device const uint *>(rootCVs);
+        uint cvs[2][8];
+
+        for (uint pairIndex = 0u; pairIndex < 2u; pairIndex++) {
+            uint blockWords[16];
+            uint wordBase = pairIndex * 16u;
+            for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+                blockWords[wordIndex] = load32_aligned(inputWords, wordBase + wordIndex);
+            }
+            parent_cv(cvs[pairIndex], blockWords);
+        }
+
+        uint blockWords[16];
+        for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+            blockWords[wordIndex] = cvs[0][wordIndex];
+            blockWords[wordIndex + 8u] = cvs[1][wordIndex];
+        }
+
+        uint cv[8] = {
+            IV[0], IV[1], IV[2], IV[3],
+            IV[4], IV[5], IV[6], IV[7]
+        };
+        compress_in_place(cv, blockWords, 64u, 0UL, 12u);
+
+        device uint *digestWords = reinterpret_cast<device uint *>(digest);
+        for (uint wordIndex = 0u; wordIndex < 8u; wordIndex++) {
+            store32_aligned(digestWords, wordIndex, cv[wordIndex]);
         }
     }
 

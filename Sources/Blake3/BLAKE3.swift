@@ -5,6 +5,9 @@ import Foundation
 /// The default one-shot path uses the fastest enabled Swift CPU implementation for the current input size.
 /// Use ``Context`` when hashing many inputs and you want to reuse CPU work buffers across calls.
 public enum BLAKE3 {
+    private static let defaultCPUContextThreadDictionaryKey = "com.blake3swift.defaultCPUContext"
+    private static let cpuContextThreadDictionaryKeyPrefix = "com.blake3swift.cpuContext."
+
     /// Default backend policy used by ``hash(_:)``.
     public enum BackendPolicy: String, Sendable {
         /// Chooses the fastest built-in path for the input and host.
@@ -166,14 +169,9 @@ public enum BLAKE3 {
     ///
     /// The buffer only needs to remain valid for the duration of this call.
     public static func hashCPU(_ input: UnsafeRawBufferPointer) -> Digest {
-        var workspace = BLAKE3Core.Workspace()
-        return Digest(output: BLAKE3Core.rootOutputParallel(
-            input,
-            key: BLAKE3Core.iv,
-            flags: 0,
-            maxWorkers: nil,
-            workspace: &workspace
-        ))
+        withDefaultCPUContext { context in
+            context.hash(input, mode: .automatic)
+        }
     }
 
     /// Hashes contiguous input using the serial CPU implementation with SIMD where available.
@@ -227,16 +225,35 @@ public enum BLAKE3 {
         _ input: UnsafeRawBufferPointer,
         maxWorkers: Int? = nil
     ) -> Digest {
-        var workspace = BLAKE3Core.Workspace()
-        let scheduler = BLAKE3Core.defaultScheduler(forByteCount: input.count, maxWorkers: maxWorkers)
-        return Digest(output: BLAKE3Core.rootOutputParallel(
-            input,
-            key: BLAKE3Core.iv,
-            flags: 0,
-            maxWorkers: maxWorkers,
-            scheduler: scheduler,
-            workspace: &workspace
-        ))
+        withCPUContext(maxWorkers: maxWorkers) { context in
+            context.hash(input, mode: .parallel(maxWorkers: maxWorkers))
+        }
+    }
+
+    private static func withDefaultCPUContext<T>(
+        _ body: (Context) -> T
+    ) -> T {
+        withCPUContext(maxWorkers: nil, body)
+    }
+
+    private static func withCPUContext<T>(
+        maxWorkers: Int?,
+        _ body: (Context) -> T
+    ) -> T {
+        let threadDictionary = Thread.current.threadDictionary
+        let key: String = if let maxWorkers {
+            "\(cpuContextThreadDictionaryKeyPrefix)\(BLAKE3Core.normalizedParallelWorkerCount(maxWorkers))"
+        } else {
+            defaultCPUContextThreadDictionaryKey
+        }
+
+        if let context = threadDictionary[key] as? Context {
+            return body(context)
+        }
+
+        let context = Context(maxWorkers: maxWorkers)
+        threadDictionary[key] = context
+        return body(context)
     }
 
     /// Computes a 32-byte BLAKE3 keyed hash.

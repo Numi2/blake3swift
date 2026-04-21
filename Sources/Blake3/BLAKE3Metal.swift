@@ -64,9 +64,18 @@ public enum BLAKE3Metal {
 
         static let unkeyed = HashMode(key: BLAKE3Core.iv, flags: 0)
 
+        var isUnkeyedDigestFastPathEligible: Bool {
+            flags == 0 && key == BLAKE3Core.iv
+        }
+
         var metalKey: BLAKE3MetalKeyWords {
             BLAKE3MetalKeyWords(key)
         }
+    }
+
+    enum HashCommandFamily: Equatable {
+        case digestOnly
+        case generic
     }
 
     /// Source for Metal kernel library creation.
@@ -3015,6 +3024,15 @@ public enum BLAKE3Metal {
             guard length > 0 else {
                 return BLAKE3.hash(UnsafeRawBufferPointer(start: nil, count: 0))
             }
+            if length <= BLAKE3.chunkByteCount, policy != .cpu {
+                return try BLAKE3Metal.hashOneChunkBatch(
+                    buffer: privateBuffer.buffer,
+                    ranges: [0..<length],
+                    mode: .unkeyed,
+                    pipelines: pipelines,
+                    commandQueue: commandQueue
+                ).first ?? BLAKE3.hash(UnsafeRawBufferPointer(start: nil, count: 0))
+            }
             return try hash(buffer: privateBuffer.buffer, length: length, policy: policy)
         }
 
@@ -5312,7 +5330,7 @@ public enum BLAKE3Metal {
                 threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
             )
 
-            try encodeCVReductionCommands(
+            try encodeGenericCVReductionCommands(
                 currentBuffer: cvBuffer,
                 nextBuffer: scratchBuffer,
                 currentCount: outputChunkCount,
@@ -5444,7 +5462,231 @@ public enum BLAKE3Metal {
         return commandBuffer
     }
 
+    private static func hashCommandFamily(for mode: HashMode) -> HashCommandFamily {
+        mode.isUnkeyedDigestFastPathEligible ? .digestOnly : .generic
+    }
+
+    static func _debugHashCommandFamilyForUnkeyedDigest() -> HashCommandFamily {
+        hashCommandFamily(for: .unkeyed)
+    }
+
+    static func _debugHashCommandFamilyForKeyedDigest(key: some ContiguousBytes) throws -> HashCommandFamily {
+        try key.withUnsafeBytes { raw in
+            try hashCommandFamily(for: keyedHashMode(raw))
+        }
+    }
+
+    static func _debugHashCommandFamilyForDerivedMaterial(context: String) -> HashCommandFamily {
+        hashCommandFamily(for: deriveKeyMaterialMode(context: context))
+    }
+
+    static func _debugXOFCommandFamily() -> HashCommandFamily {
+        .generic
+    }
+
     private static func encodeHashCommands(
+        buffer: MTLBuffer,
+        range: Range<Int>,
+        chunkCount: Int,
+        pipelines: BLAKE3MetalPipelines,
+        mode: HashMode = .unkeyed,
+        allowsFusedTile: Bool = true,
+        cvBuffer: MTLBuffer,
+        scratchBuffer: MTLBuffer,
+        digestBuffer: MTLBuffer,
+        parameterBuffer: MTLBuffer,
+        encoder: MTLComputeCommandEncoder
+    ) throws {
+        switch hashCommandFamily(for: mode) {
+        case .digestOnly:
+            try encodeDigestHashCommands(
+                buffer: buffer,
+                range: range,
+                chunkCount: chunkCount,
+                pipelines: pipelines.digest,
+                allowsFusedTile: allowsFusedTile,
+                cvBuffer: cvBuffer,
+                scratchBuffer: scratchBuffer,
+                digestBuffer: digestBuffer,
+                parameterBuffer: parameterBuffer,
+                encoder: encoder
+            )
+        case .generic:
+            try encodeGenericHashCommands(
+                buffer: buffer,
+                range: range,
+                chunkCount: chunkCount,
+                pipelines: pipelines,
+                mode: mode,
+                allowsFusedTile: allowsFusedTile,
+                cvBuffer: cvBuffer,
+                scratchBuffer: scratchBuffer,
+                digestBuffer: digestBuffer,
+                parameterBuffer: parameterBuffer,
+                encoder: encoder
+            )
+        }
+    }
+
+    private static func encodeDigestHashCommands(
+        buffer: MTLBuffer,
+        range: Range<Int>,
+        chunkCount: Int,
+        pipelines: BLAKE3MetalDigestPipelines,
+        allowsFusedTile: Bool = true,
+        cvBuffer: MTLBuffer,
+        scratchBuffer: MTLBuffer,
+        digestBuffer: MTLBuffer,
+        parameterBuffer: MTLBuffer,
+        encoder: MTLComputeCommandEncoder
+    ) throws {
+        let canLoadWords = canLoadWords(buffer: buffer, range: range)
+        let params = BLAKE3MetalDigestChunkParams(
+            inputOffset: UInt64(range.lowerBound),
+            inputLength: UInt64(range.count),
+            baseChunkCounter: 0,
+            chunkCount: UInt32(chunkCount),
+            canLoadWords: canLoadWords ? 1 : 0
+        )
+        copyParameter(params, into: parameterBuffer, slot: 0)
+        let tilePlan = fusedTilePlan(
+            buffer: buffer,
+            range: range,
+            chunkCount: chunkCount,
+            canLoadWords: canLoadWords,
+            allowsFusedTile: allowsFusedTile,
+            pipelines: pipelines
+        )
+
+        let currentBuffer = cvBuffer
+        let nextBuffer = scratchBuffer
+        let currentCount: Int
+        let parameterSlot = 1
+
+        if let tilePlan {
+            encoder.setComputePipelineState(tilePlan.pipeline)
+            encoder.setBuffer(buffer, offset: 0, index: 0)
+            encoder.setBuffer(cvBuffer, offset: 0, index: 1)
+            encoder.setBuffer(parameterBuffer, offset: 0, index: 2)
+            encoder.setThreadgroupMemoryLength(tilePlan.threadgroupMemoryByteCount, index: 0)
+            encoder.dispatchThreadgroups(
+                MTLSize(width: chunkCount / tilePlan.chunkCount, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: tilePlan.chunkCount, height: 1, depth: 1)
+            )
+            currentCount = chunkCount / tilePlan.chunkCount
+        } else {
+            let chunkPipeline = if range.count.isMultiple(of: BLAKE3.chunkByteCount) {
+                canUseAlignedFullChunkKernel(buffer: buffer, range: range)
+                    ? pipelines.chunkFullAlignedCVs
+                    : pipelines.chunkFullCVs
+            } else {
+                pipelines.chunkCVs
+            }
+
+            encoder.setComputePipelineState(chunkPipeline)
+            encoder.setBuffer(buffer, offset: 0, index: 0)
+            encoder.setBuffer(cvBuffer, offset: 0, index: 1)
+            encoder.setBuffer(parameterBuffer, offset: 0, index: 2)
+            dispatchThreads(
+                count: chunkCount,
+                pipeline: chunkPipeline,
+                encoder: encoder
+            )
+            currentCount = chunkCount
+        }
+
+        try encodeDigestCVReductionCommands(
+            currentBuffer: currentBuffer,
+            nextBuffer: nextBuffer,
+            currentCount: currentCount,
+            pipelines: pipelines,
+            digestBuffer: digestBuffer,
+            parameterBuffer: parameterBuffer,
+            startingParameterSlot: parameterSlot,
+            encoder: encoder
+        )
+    }
+
+    private static func encodeDigestCVReductionCommands(
+        currentBuffer initialCurrentBuffer: MTLBuffer,
+        nextBuffer initialNextBuffer: MTLBuffer,
+        currentCount initialCurrentCount: Int,
+        pipelines: BLAKE3MetalDigestPipelines,
+        digestBuffer: MTLBuffer,
+        parameterBuffer: MTLBuffer,
+        startingParameterSlot: Int,
+        encoder: MTLComputeCommandEncoder
+    ) throws {
+        var currentBuffer = initialCurrentBuffer
+        var nextBuffer = initialNextBuffer
+        var currentCount = initialCurrentCount
+        var parameterSlot = startingParameterSlot
+
+        while currentCount > 4 {
+            let parentParams = BLAKE3MetalDigestParentParams(inputCount: UInt32(currentCount))
+            copyParameter(parentParams, into: parameterBuffer, slot: parameterSlot)
+            let useWideReduction = currentCount >= wideParentReductionThreshold
+            let useQuadReduction = !useWideReduction
+                && currentCount >= quadParentReductionThreshold
+            let pipeline = if useWideReduction {
+                currentCount.isMultiple(of: 16)
+                    ? pipelines.parent16CVs
+                    : pipelines.parent16TailCVs
+            } else if useQuadReduction {
+                currentCount.isMultiple(of: 4)
+                    ? pipelines.parent4ExactCVs
+                    : pipelines.parent4CVs
+            } else {
+                pipelines.parentCVs
+            }
+            let nextCount = if useWideReduction {
+                (currentCount + 15) / 16
+            } else if useQuadReduction {
+                (currentCount + 3) / 4
+            } else {
+                (currentCount + 1) / 2
+            }
+            encoder.setComputePipelineState(pipeline)
+            encoder.setBuffer(currentBuffer, offset: 0, index: 0)
+            encoder.setBuffer(nextBuffer, offset: 0, index: 1)
+            encoder.setBuffer(parameterBuffer, offset: parameterOffset(for: parameterSlot), index: 2)
+            dispatchThreads(
+                count: nextCount,
+                pipeline: pipeline,
+                encoder: encoder
+            )
+
+            swap(&currentBuffer, &nextBuffer)
+            currentCount = nextCount
+            parameterSlot += 1
+        }
+
+        let rootPipeline: MTLComputePipelineState? = switch currentCount {
+        case 2:
+            pipelines.rootDigest
+        case 3:
+            pipelines.root3Digest
+        case 4:
+            pipelines.root4Digest
+        default:
+            nil
+        }
+        guard let rootPipeline else {
+            encoder.endEncoding()
+            throw BLAKE3Error.metalCommandFailed("Unable to create digest-only root encoder.")
+        }
+        encoder.setComputePipelineState(rootPipeline)
+        encoder.setBuffer(currentBuffer, offset: 0, index: 0)
+        encoder.setBuffer(digestBuffer, offset: 0, index: 1)
+        dispatchThreads(
+            count: 1,
+            pipeline: rootPipeline,
+            encoder: encoder
+        )
+        encoder.endEncoding()
+    }
+
+    private static func encodeGenericHashCommands(
         buffer: MTLBuffer,
         range: Range<Int>,
         chunkCount: Int,
@@ -5515,7 +5757,7 @@ public enum BLAKE3Metal {
             currentCount = chunkCount
         }
 
-        try encodeCVReductionCommands(
+        try encodeGenericCVReductionCommands(
             currentBuffer: currentBuffer,
             nextBuffer: nextBuffer,
             currentCount: currentCount,
@@ -5528,7 +5770,7 @@ public enum BLAKE3Metal {
         )
     }
 
-    private static func encodeCVReductionCommands(
+    private static func encodeGenericCVReductionCommands(
         currentBuffer initialCurrentBuffer: MTLBuffer,
         nextBuffer initialNextBuffer: MTLBuffer,
         currentCount initialCurrentCount: Int,
@@ -6121,6 +6363,122 @@ public enum BLAKE3Metal {
         )
     }
 
+    private static func fusedTilePlan(
+        buffer: MTLBuffer,
+        range: Range<Int>,
+        chunkCount: Int,
+        canLoadWords: Bool,
+        allowsFusedTile: Bool = true,
+        pipelines: BLAKE3MetalDigestPipelines
+    ) -> FusedTilePlan? {
+        guard allowsFusedTile else {
+            return nil
+        }
+        switch fusedTileReductionStrategy {
+        case .simdGroup:
+            if let plan = fusedTilePlan(
+                buffer: buffer,
+                range: range,
+                chunkCount: chunkCount,
+                canLoadWords: canLoadWords,
+                reductionStrategy: .simdGroup,
+                pipelines: pipelines
+            ) {
+                return plan
+            }
+            if let plan = fusedTilePlan(
+                buffer: buffer,
+                range: range,
+                chunkCount: chunkCount,
+                canLoadWords: canLoadWords,
+                reductionStrategy: .pingPong,
+                pipelines: pipelines
+            ) {
+                return plan
+            }
+            return fusedTilePlan(
+                buffer: buffer,
+                range: range,
+                chunkCount: chunkCount,
+                canLoadWords: canLoadWords,
+                reductionStrategy: .inPlace,
+                pipelines: pipelines
+            )
+        case .pingPong:
+            if let plan = fusedTilePlan(
+                buffer: buffer,
+                range: range,
+                chunkCount: chunkCount,
+                canLoadWords: canLoadWords,
+                reductionStrategy: .pingPong,
+                pipelines: pipelines
+            ) {
+                return plan
+            }
+            return fusedTilePlan(
+                buffer: buffer,
+                range: range,
+                chunkCount: chunkCount,
+                canLoadWords: canLoadWords,
+                reductionStrategy: .inPlace,
+                pipelines: pipelines
+            )
+        case .inPlace:
+            return fusedTilePlan(
+                buffer: buffer,
+                range: range,
+                chunkCount: chunkCount,
+                canLoadWords: canLoadWords,
+                reductionStrategy: .inPlace,
+                pipelines: pipelines
+            )
+        }
+    }
+
+    private static func fusedTilePlan(
+        buffer: MTLBuffer,
+        range: Range<Int>,
+        chunkCount: Int,
+        canLoadWords: Bool,
+        reductionStrategy: FusedTileReductionStrategy,
+        pipelines: BLAKE3MetalDigestPipelines
+    ) -> FusedTilePlan? {
+        let tileChunkCount = fusedTileChunkCount
+        guard tileChunkCount > 0 else {
+            return nil
+        }
+        let tileByteCount = tileChunkCount * BLAKE3.chunkByteCount
+        let threadgroupMemoryByteCount = reductionStrategy.threadgroupMemoryByteCount(
+            tileChunkCount: tileChunkCount
+        )
+        guard tileByteCount > 0,
+              buffer.storageMode != .private,
+              range.count.isMultiple(of: tileByteCount),
+              canLoadWords,
+              chunkCount >= tileChunkCount * 2,
+              threadgroupMemoryByteCount <= buffer.device.maxThreadgroupMemoryLength,
+              let tilePipeline = fusedTilePipeline(
+                tileChunkCount: tileChunkCount,
+                reductionStrategy: reductionStrategy,
+                pipelines: pipelines
+              )
+        else {
+            return nil
+        }
+        let executionWidth = max(1, tilePipeline.threadExecutionWidth)
+        guard tileChunkCount <= tilePipeline.maxTotalThreadsPerThreadgroup,
+              tileChunkCount.isMultiple(of: executionWidth),
+              reductionStrategy != .simdGroup || (tileChunkCount == 128 && executionWidth == 32)
+        else {
+            return nil
+        }
+        return FusedTilePlan(
+            chunkCount: tileChunkCount,
+            pipeline: tilePipeline,
+            threadgroupMemoryByteCount: threadgroupMemoryByteCount
+        )
+    }
+
     private static func canUseAlignedFullChunkKernel(buffer: MTLBuffer, range: Range<Int>) -> Bool {
         canLoadWords(buffer: buffer, range: range)
     }
@@ -6147,6 +6505,35 @@ public enum BLAKE3Metal {
         tileChunkCount: Int,
         reductionStrategy: FusedTileReductionStrategy,
         pipelines: BLAKE3MetalPipelines
+    ) -> MTLComputePipelineState? {
+        switch (tileChunkCount, reductionStrategy) {
+        case (128, .inPlace):
+            return pipelines.chunkTile128CVs
+        case (256, .inPlace):
+            return pipelines.chunkTile256CVs
+        case (512, .inPlace):
+            return pipelines.chunkTile512CVs
+        case (1024, .inPlace):
+            return pipelines.chunkTile1024CVs
+        case (128, .simdGroup):
+            return pipelines.chunkTile128SIMDGroupCVs
+        case (128, .pingPong):
+            return pipelines.chunkTile128PingPongCVs
+        case (256, .pingPong):
+            return pipelines.chunkTile256PingPongCVs
+        case (512, .pingPong):
+            return pipelines.chunkTile512PingPongCVs
+        case (1024, .pingPong):
+            return pipelines.chunkTile1024PingPongCVs
+        default:
+            return nil
+        }
+    }
+
+    private static func fusedTilePipeline(
+        tileChunkCount: Int,
+        reductionStrategy: FusedTileReductionStrategy,
+        pipelines: BLAKE3MetalDigestPipelines
     ) -> MTLComputePipelineState? {
         switch (tileChunkCount, reductionStrategy) {
         case (128, .inPlace):

@@ -3142,6 +3142,7 @@ if let metalDevice {
     }
     if !requestedMetalTimingModes.isEmpty {
         print("headlineRows=default-auto and overlapping metal timing modes run in interleaved ping-pong order")
+        print("overheadAcceptance=prefer benchmarks/run-isolated-overhead.sh for resident/private/staged/wrapped tuning; mixed rows are secondary when upload paths change")
     }
 }
 #endif

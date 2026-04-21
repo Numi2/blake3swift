@@ -1311,6 +1311,99 @@ final class BLAKE3Tests: XCTestCase {
         }
     }
 
+    func testMetalDigestOnlyFastPathMatchesCPUAcrossOverheadModes() throws {
+        guard BLAKE3Metal.isAvailable else {
+            throw XCTSkip("Metal is not available on this host.")
+        }
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let context = try BLAKE3Metal.makeContext(device: device)
+        let sizes = [
+            0,
+            1,
+            1_023,
+            1_024,
+            1_025,
+            16 * 1_024 * 1_024,
+            64 * 1_024 * 1_024,
+            256 * 1_024 * 1_024
+        ]
+
+        for size in sizes {
+            let input = deterministicInput(byteCount: size)
+            let expected = BLAKE3.hash(input)
+
+            let sharedBuffer = try XCTUnwrap(
+                device.makeBuffer(length: max(1, input.count), options: .storageModeShared)
+            )
+            if !input.isEmpty {
+                input.withUnsafeBytes { raw in
+                    sharedBuffer.contents().copyMemory(from: raw.baseAddress!, byteCount: input.count)
+                }
+            }
+            XCTAssertEqual(
+                try context.hash(buffer: sharedBuffer, length: input.count, policy: .gpu),
+                expected,
+                "resident digest mismatch for byteCount=\(size)"
+            )
+
+            XCTAssertEqual(
+                try context.hash(input: input, policy: .gpu),
+                expected,
+                "wrapped digest mismatch for byteCount=\(size)"
+            )
+
+            let stagingBuffer = try context.makeStagingBuffer(capacity: max(1, input.count))
+            XCTAssertEqual(
+                try context.hash(input: input, using: stagingBuffer, policy: .gpu),
+                expected,
+                "staged digest mismatch for byteCount=\(size)"
+            )
+
+            let privateBuffer = try context.makePrivateBuffer(capacity: max(1, input.count))
+            try context.replaceContents(of: privateBuffer, with: input)
+            XCTAssertEqual(
+                try context.hash(privateBuffer: privateBuffer, policy: .gpu),
+                expected,
+                "private digest mismatch for byteCount=\(size)"
+            )
+        }
+    }
+
+    func testMetalDigestOnlyFastPathLeavesKeyedDeriveAndXOFOnGenericFamily() throws {
+        let key = Array("whats the Elvish word for friend".utf8)
+        let contextString = "example.com 2026-04-21 digest-fast-path"
+        let input = deterministicInput(byteCount: 16 * 1_024 * 1_024 + 333)
+
+        XCTAssertEqual(BLAKE3Metal._debugHashCommandFamilyForUnkeyedDigest(), .digestOnly)
+        XCTAssertEqual(
+            try BLAKE3Metal._debugHashCommandFamilyForKeyedDigest(key: key),
+            .generic
+        )
+        XCTAssertEqual(
+            BLAKE3Metal._debugHashCommandFamilyForDerivedMaterial(context: contextString),
+            .generic
+        )
+        XCTAssertEqual(BLAKE3Metal._debugXOFCommandFamily(), .generic)
+
+        let expectedKeyed = try BLAKE3.keyedHash(key: key, input: input)
+        XCTAssertEqual(
+            try BLAKE3Metal.keyedHash(key: key, input: input, policy: .gpu),
+            expectedKeyed
+        )
+
+        let expectedDerived = try BLAKE3.deriveKey(context: contextString, material: input)
+        XCTAssertEqual(
+            try BLAKE3Metal.deriveKey(context: contextString, material: input, policy: .gpu),
+            expectedDerived
+        )
+
+        let expectedXOF = try BLAKE3.hash(input, outputByteCount: 97)
+        XCTAssertEqual(
+            try BLAKE3Metal.hash(input: input, outputByteCount: 97, policy: .gpu),
+            expectedXOF
+        )
+    }
+
     func testMetalOneChunkBatchMatchesCPUAcrossSmallRanges() throws {
         guard BLAKE3Metal.isAvailable else {
             throw XCTSkip("Metal is not available on this host.")

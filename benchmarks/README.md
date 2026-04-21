@@ -47,6 +47,14 @@ benchmarks/run-file-reality.sh
 
 Runs each selected file strategy in a separate benchmark process, validates every JSON report, captures thermal snapshots before and after each mode, and writes a `summary.md` table when `jq` is available. Use this for file rows where mmap page-in, file-cache warmth, and run order can dominate the hash-path cost.
 
+## Isolated Overhead Runs
+
+```sh
+benchmarks/run-isolated-overhead.sh
+```
+
+Runs `resident`, `private`, `staged`, and `wrapped` Metal modes in separate benchmark processes for `16 MiB`, `64 MiB`, and `256 MiB` by default, validates every JSON report, and writes a `summary.md` table when `jq` is available. Use this as the primary acceptance harness for small and mid-size Metal overhead tuning; keep the mixed publication sweep as a secondary sanity check when overlapping `default-auto` or `e2e` upload paths change.
+
 ## Metal Autotune
 
 ```sh
@@ -66,6 +74,7 @@ Runs measured Metal gate and mode sweeps and writes validated recommendation JSO
 - `FILE_MODES`: for `run-file-reality.sh`, space-separated file modes to run in isolated processes. Default: `read mmap-parallel metal-tiled-mmap metal-staged-read`.
 - `REPEATS`: for `run-file-reality.sh`, number of isolated passes per file mode. Default: `1`.
 - `COOLDOWN_SECONDS`: for `run-file-reality.sh`, delay between isolated file-mode runs. Default: `20`; set to `0` for quick validation.
+- `ISOLATED_METAL_MODES`: for `run-isolated-overhead.sh`, space-separated Metal modes to run in isolated processes. Default: `resident private staged wrapped`.
 - `MEMORY_STATS`: set to `1` to include process RSS plus allocator bytes/block snapshots in benchmark output.
 - `METAL_LIBRARY`: optional path to a precompiled `BLAKE3Metal.metallib`.
 - `MINIMUM_GPU_BYTES`: optional `.automatic` Metal CPU/GPU gate for benchmark contexts.

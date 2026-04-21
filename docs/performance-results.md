@@ -11,6 +11,96 @@ This file records candidate public performance data after sustained measurements
 - Record whether Metal rows used `runtime-source` or a packaged `.metallib`.
 - Do not present a single best sample as sustained throughput.
 
+## April 21, 2026 CPU One-Shot Reusable-Context Follow-Up
+
+This pass stopped chasing the strict `single-simd` apples-to-apples CPU baseline and instead targeted the fastest Swift CPU one-shot execution model already exposed by the library: the parallel tree path.
+
+Code change:
+
+- `BLAKE3.hashCPU(_:)` now reuses a per-thread unkeyed `BLAKE3.Context` instead of rebuilding the parallel scheduler and chaining-value workspace on every call.
+- `BLAKE3.hashParallel(_:maxWorkers:)` now uses the same per-thread reusable-context strategy, keyed by normalized worker count, so explicit worker-count calls no longer pay one-shot scheduler/workspace setup on each hash.
+
+Focused benchmark commands:
+
+```sh
+./.build/release/blake3-bench --sizes 64m,256m,1g --iterations 5 --metal-modes none --cryptokit-modes none
+./.build/release/blake3-bench --sizes 64m,256m,1g --iterations 5 --metal-modes none --cryptokit-modes none --cpu-workers 10
+```
+
+Representative validated medians from the same code state:
+
+| Input | CPU parallel | CPU context-auto | CPU parallel-10 |
+| --- | ---: | ---: | ---: |
+| 64 MiB | 10.16 | 10.30 | 10.05 |
+| 256 MiB | 10.72 | 10.53 | 9.97 |
+| 1 GiB | 11.62 | 11.14 | 11.67 |
+
+Interpretation:
+
+- The public Swift CPU fast path is now firmly back in the `10+ GiB/s` band at `64 MiB` and `256 MiB`, and in the mid-`11 GiB/s` band at `1 GiB`, without changing the hashing algorithm or correctness surface.
+- On this local M4, `10` workers remained the best explicit worker count for large inputs after rerunning the sweep cleanly; lower worker counts lost too much at `256 MiB` and `1 GiB`.
+- The improvement is durable enough to keep in code, but it did not beat the existing promoted README CPU-parallel rows across all sizes cleanly enough to justify a README table rewrite from this run alone.
+
+## April 21, 2026 Digest-Only Metal Fast Path Recovery
+
+Primary overhead-recovery artifact:
+
+```sh
+benchmarks/results/20260421T-digest-fastpath-isolated
+```
+
+This change set restores a dedicated digest-only Metal kernel family for plain unkeyed 32-byte digests while leaving keyed hashing, derive-key material, XOF, and batch APIs on the generalized kernel family. It also promotes `benchmarks/run-isolated-overhead.sh` to the primary acceptance harness for `resident`, `private`, `staged`, and `wrapped` tuning so the upload-heavy `default-auto` and `e2e` rows do not dominate the thermal/order profile.
+
+The table reports validated median GiB/s from the isolated per-mode JSON reports:
+
+| Input | Metal resident GPU | Metal private GPU | Metal staged GPU | Metal wrapped GPU |
+| --- | ---: | ---: | ---: | ---: |
+| 16 MiB | 9.98 | 11.30 | 11.14 | 15.96 |
+| 64 MiB | 37.89 | 38.15 | 14.92 | 29.93 |
+| 256 MiB | 44.94 | 57.92 | 18.10 | 30.85 |
+
+Interpretation:
+
+- `private-gpu`, `staged-gpu`, and `wrapped-gpu` recovered the weak small/mid-size rows from the earlier branch comparison without touching the large owned-shared upload path.
+- `resident-gpu` recovered clearly at 64 MiB and improved the 16 MiB floor, but the 256 MiB resident row remained the noisiest overhead result across same-day repeats.
+- The dedicated digest-only split is the promoted change. The isolated artifact above is the primary acceptance reference for these overhead modes.
+
+Secondary sanity artifacts:
+
+```sh
+benchmarks/results/20260421T-digest-fastpath-secondary
+benchmarks/results/20260421T-digest-fastpath-secondary/e2e.json
+```
+
+The mixed overhead rerun under `overhead-mixed.json` is kept as a cross-check only. In that mixed pass, `resident-gpu` at 256 MiB landed at 47.60 GiB/s, slightly above the earlier weak comparison row, but the run order remained noisy enough that it was not promoted over the isolated harness. The focused `e2e` sanity rerun measured 15.35/20.40 GiB/s for `e2e-auto` and 15.39/20.26 GiB/s for `e2e-gpu` at 512 MiB/1 GiB, keeping the large upload path in the same high-teens to low-20s band.
+
+## April 21, 2026 Digest-Only Fused-Tile Follow-Up
+
+Follow-up tuning artifacts:
+
+```sh
+benchmarks/results/20260421T-resident256-digest-tuning
+benchmarks/results/20260421T-digest-default-expanded
+benchmarks/results/20260421T-digest-inplace128-expanded
+benchmarks/results/20260421T-digest-inplace128-e2e
+benchmarks/results/20260421T-digest-resident-wrapped-confirm
+```
+
+After the digest-only split, a second pass tested whether the digest family should also move from the default `128`-chunk ping-pong fused-tile reducer to the older `128`-chunk in-place reducer.
+
+What looked promising:
+
+- The quick 256 MiB sweep under `20260421T-resident256-digest-tuning` favored `inplace128` for `resident` and `wrapped`.
+- The expanded isolated run under `20260421T-digest-inplace128-expanded` raised several digest-only rows, including `resident-gpu` 256 MiB from 50.58 to 71.87 GiB/s, `staged-gpu` 256 MiB from 14.83 to 18.32 GiB/s, and `wrapped-gpu` 256 MiB from 34.82 to 40.25 GiB/s versus the matching `20260421T-digest-default-expanded` control.
+- The focused `e2e` sanity pass under `20260421T-digest-inplace128-e2e` stayed in band, measuring 20.72 GiB/s at 512 MiB and 19.87 GiB/s at 1 GiB for `e2e-gpu`.
+
+Why it was not promoted:
+
+- The direct interleaved `resident,wrapped` confirmation under `20260421T-digest-resident-wrapped-confirm` did not hold the wrapped win. `wrapped-gpu` fell from 40.24 to 30.09 GiB/s at 64 MiB and from 47.30 to 44.03 GiB/s at 256 MiB when the candidate was rerun in the tighter A/B setup.
+- `resident-gpu` remained favorable in that confirm, but the wrapped regressions were large enough that the retune did not meet the bar for a new default.
+
+Conclusion: the digest-only kernel split is the durable recovery, but `BLAKE3_SWIFT_METAL_FUSED_TILE_REDUCTION=inplace` remains an opt-in experiment rather than the new default. The branch keeps the `128`-chunk ping-pong reducer as the shipped setting.
+
 ## April 19, 2026 Fused Tile Overhead-Focused Run
 
 Current focused copy/no-copy overhead artifact:

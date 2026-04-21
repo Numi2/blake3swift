@@ -1,14 +1,45 @@
 # BLAKE3Swift
 
-BLAKE3Swift is a dependency-free Swift implementation of BLAKE3 for Apple platforms. It includes a native Swift scalar core, SIMD4 CPU paths, bounded-memory streaming and file hashing, and a Metal backend for high-throughput hashing on Apple silicon.
+BLAKE3Swift is an independent BLAKE3 implementation for Apple platforms. The library target is pure Swift and dependency-free, and the repository also includes streaming and file APIs, benchmark support, and an optional Metal backend for large unkeyed workloads on Apple silicon.
 
-The project is performance-focused, but correctness comes first: the Swift implementation is tested against the official BLAKE3 vectors, keyed hashing, key derivation, extended output, streaming updates, file hashing, and Metal/CPU parity.
+The goal is straightforward: a Swift-first BLAKE3 implementation with explicit execution paths, reproducible measurements, and conservative correctness checks. This is not the upstream BLAKE3 project. The implementation is tested against the official BLAKE3 vectors, keyed hashing, key derivation, extended output, streaming behavior, file hashing, and Metal/CPU parity, and its CPU baselines are benchmarked against vendored official C code.
 
-## Latest Results
+## Performance Snapshot
 
-Local release benchmarks on Apple M4 are used to tune the Swift CPU and Metal backends and to keep correctness checks attached to every timing row. All numbers below are current `flatkernels` results from `benchmarks/results/20260419T-readme-flatkernels-current`, generated April 19, 2026 on macOS 26.5 with Swift 6.3, runtime Metal source, the 16 MiB Metal crossover, 64 MiB mmap Metal tiles, 32 MiB staged-read Metal tiles, and 4 benchmark iterations. The generated CPU/Metal, file, and CryptoKit JSON reports were validated.
+Unless noted otherwise, the numbers below are medians from local release runs on Apple M4 with 10 active CPUs, macOS 26.5, and Swift 6.3. All promoted rows come from validated JSON artifacts under `benchmarks/results`. The first table is the apples-to-apples comparison that matters most for evaluating the core implementation: in-process CPU one-shot hashing against the vendored official C implementation. Parallel CPU, default dispatch, and Metal rows are reported separately because they are different execution models and timing classes.
 
-All tables report median GiB/s. Default `BLAKE3.hash` and the overlapping Metal timing-class headline rows are measured in an interleaved ping-pong order at each size so one row family does not always run earlier or later in the thermal sequence. The official C row is the vendored in-process BLAKE3 one-shot comparison point, not a claim about every upstream BLAKE3 configuration. CryptoKit SHA-256 is a cross-algorithm Apple platform baseline from the companion `cryptokit-comparison` run, not BLAKE3 parity.
+### Apples-to-Apples CPU One-Shot Baseline
+
+| Input | Official C one-shot | Swift scalar | Swift SIMD4 | Swift SIMD4 as % of C |
+| --- | ---: | ---: | ---: | ---: |
+| 16 MiB | 2.23 | 1.15 | 1.79 | 80% |
+| 64 MiB | 2.19 | 1.15 | 1.77 | 81% |
+| 256 MiB | 2.20 | 1.16 | 1.80 | 82% |
+| 512 MiB | 2.19 | 1.16 | 1.79 | 82% |
+| 1 GiB | 2.19 | 1.16 | 1.80 | 82% |
+
+On this machine, the fastest pure Swift one-shot CPU path in the promoted artifact is the SIMD4 implementation at `1.77` to `1.80 GiB/s`, which is about `80%` to `82%` of the vendored official C one-shot. That is the fairest benchmark in this README for judging the core implementation itself. It is not a claim about threaded upstream C, other compilers, or other hardware.
+
+### Detailed Engineering Results
+
+The table below keeps the current promoted higher-level and accelerator rows. The `CPU parallel`, public `BLAKE3.hash(input)` row, `resident`, `private`, `wrapped`, and `staged` values come from `benchmarks/results/20260419T-readme-flatkernels-current`, which is the last broad publication-style sweep kept in the README. The `end-to-end` row comes from the later focused artifact `benchmarks/results/20260421T-e2e-record`, because that timing class changed after the broad sweep.
+
+| Input | Swift CPU parallel | Public `BLAKE3.hash(input)` | Metal end-to-end GPU | Metal resident GPU | Metal private GPU | Metal wrapped GPU | Metal staged GPU |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 64 MiB | 9.91 | 17.86 | 17.69 | 33.38 | 40.52 | 30.31 | 13.95 |
+| 256 MiB | 10.78 | 33.21 | 15.48 | 51.90 | 57.43 | 45.50 | 19.91 |
+| 1 GiB | 11.52 | 41.87 | 18.56 | 63.15 | 59.21 | 34.00 | 23.95 |
+
+Timing-class notes:
+
+- `CPU parallel` is the 10-worker CPU tree path on this machine.
+- `Public BLAKE3.hash(input)` is the default synchronous one-shot API exposed by the library. On this machine and branch, it uses CPU parallel hashing below the 16 MiB Metal threshold and, for larger unkeyed digest inputs on Metal-capable Apple silicon, it can switch to the automatic Metal path.
+- `Metal end-to-end` includes shared buffer allocation, copy/setup, hashing, and digest extraction.
+- `Metal resident`, `private`, `wrapped`, and `staged` are explicit engineering timing classes with different ownership and transfer costs; they should not be compared directly against the CPU one-shot baseline above.
+
+### Original Publication Layout
+
+The following tables restore the broader publication-style layout from `benchmarks/results/20260419T-readme-flatkernels-current`. They are included here for readers who want the full sweep in the older format rather than the compressed engineering summary above.
 
 CPU buffer hashing:
 
@@ -20,9 +51,9 @@ CPU buffer hashing:
 | 512 MiB | 2.19 | 1.16 | 1.79 | 11.12 | 11.00 |
 | 1 GiB | 2.19 | 1.16 | 1.80 | 11.52 | 11.58 |
 
-Default API and platform baseline:
+Public API and cross-algorithm baseline:
 
-| Input | Default `BLAKE3.hash` | CryptoKit SHA-256 |
+| Input | Public `BLAKE3.hash(input)` | CryptoKit SHA-256 |
 | --- | ---: | ---: |
 | 16 MiB | 9.65 | 2.78 |
 | 64 MiB | 17.86 | 2.90 |
@@ -30,7 +61,7 @@ Default API and platform baseline:
 | 512 MiB | 35.22 | 2.92 |
 | 1 GiB | 41.87 | 2.87 |
 
-Metal timing classes are separated by ownership and transfer cost. Resident mode starts after input is already in a shared Metal buffer. Private mode hashes a pre-created private buffer and excludes setup copy. Staged mode includes copying Swift bytes into a reused shared Metal buffer. Wrapped mode includes no-copy Metal buffer wrapping over existing Swift bytes. End-to-end mode includes shared buffer allocation/copy from Swift bytes plus hashing.
+Metal timing classes:
 
 | Input | Resident GPU | Private GPU | Staged GPU | Wrapped GPU | End-to-end GPU |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -40,94 +71,7 @@ Metal timing classes are separated by ownership and transfer cost. Resident mode
 | 512 MiB | 60.80 | 64.90 | 23.05 | 51.01 | 6.31 |
 | 1 GiB | 63.15 | 59.21 | 23.95 | 34.00 | 2.22 |
 
-Focused end-to-end record, validated April 21, 2026: `e2e` now uses a heap-backed shared upload buffer in the benchmark harness so the timing class still includes allocation, memcpy, and hashing without forcing Metal's internal allocate-and-copy helper path. The validated artifact at `benchmarks/results/20260421T-e2e-record` is a focused `e2e` run, not a replacement for the broader publication sweep above.
-
-| Input | End-to-end Auto | End-to-end GPU |
-| --- | ---: | ---: |
-| 64 MiB | 16.04 | 17.69 |
-| 256 MiB | 15.51 | 15.48 |
-| 512 MiB | 16.20 | 16.34 |
-| 1 GiB | 18.63 | 18.56 |
-
-Follow-up page-aligned upload record, also validated April 21, 2026: `BLAKE3Metal.Context.makeOwnedSharedBuffer(copying:)` now backs owned shared uploads with page-aligned `bytesNoCopy` storage, and the benchmark uses that same runtime helper. The focused artifact at `benchmarks/results/20260421T-page-aligned-upload-record` improved the large `e2e-gpu` rows to 16.79 GiB/s at 256 MiB, 16.72 GiB/s at 512 MiB, and 18.57 GiB/s at 1 GiB. The 64 MiB row remained noisier in this run, so the mixed-size focused table above is still the cleaner reference for that size class.
-
-Size-aware upload-cache follow-up, also validated April 21, 2026: owned shared uploads now use write-combined CPU cache mode only up to 128 MiB, while larger uploads stay on the default cache mode. The focused artifact at `benchmarks/results/20260421T-size-aware-upload-record` raised the `64 MiB` `e2e-gpu` row again to 17.71 GiB/s while keeping the larger `e2e` rows in the same mid-to-high teens band.
-
-Owned-upload fused-tile cap follow-up, also validated April 21, 2026: the benchmark-only owned shared upload hash path now keeps fused tiling only up to 128 MiB and falls back to the non-fused large shared-buffer path above that cap. The focused artifact at `benchmarks/results/20260421T-owned-shared-fused-tile-cap` pushed the `1 GiB` `e2e-gpu` row to 19.93 GiB/s while keeping the 256 MiB and 512 MiB rows in the same mid-16 GiB/s band. The 64 MiB row remained noisier, so `benchmarks/results/20260421T-size-aware-upload-record` is still the cleaner reference for that size class.
-
-Focused one-chunk batch records from April 20-21, 2026 use resident Metal buffers on Apple M4 with runtime
-Metal source, 64 MiB input, 5 iterations, and JSON validation. These targeted rows are tuning records for
-the batch APIs; they do not replace the full publication sweep above. The 64 B rows use the contiguous
-single-block Metal batch kernel with row-specific pipeline widths; the 1024 B rows use the full-chunk
-plan/write pipelines. The fused aggregate path is correct, but it was not the record holder in this run.
-
-| Batch item | Pipeline width | Metal row | Median GiB/s | Min GiB/s | P95 GiB/s |
-| ---: | ---: | --- | ---: | ---: | ---: |
-| 64 B | 23 | `resident-plan-write-pipeline-23-gpu` | 42.67 | 32.24 | 43.79 |
-| 64 B | 28 | `resident-plan-write-private-pipeline-28-gpu` | 46.97 | 45.98 | 47.60 |
-| 64 B | 27 | `resident-plan-write-private-chained-pipeline-27-gpu` | 33.84 | 33.54 | 34.34 |
-| 1024 B | 8 | `resident-plan-write-pipeline-8-gpu` | 62.91 | 53.47 | 64.98 |
-| 1024 B | 8 | `resident-plan-write-private-chained-pipeline-8-gpu` | 59.76 | 50.84 | 66.17 |
-
-Record commands:
-
-```bash
-swift run -c release blake3-bench \
-  --sizes 64m \
-  --iterations 5 \
-  --metal-modes resident \
-  --operation-modes batch-one-chunk \
-  --batch-item-bytes 64 \
-  --batch-pipeline-width 23 \
-  --file-modes none \
-  --cryptokit-modes none \
-  --json-output /tmp/blake3-batch-contiguous-block-64-w23-next.json
-
-swift run -c release blake3-bench \
-  --sizes 64m \
-  --iterations 5 \
-  --metal-modes resident \
-  --operation-modes batch-one-chunk \
-  --batch-item-bytes 64 \
-  --batch-pipeline-width 28 \
-  --file-modes none \
-  --cryptokit-modes none \
-  --json-output /tmp/blake3-batch-width28-chained-confirm.json
-
-swift run -c release blake3-bench \
-  --sizes 64m \
-  --iterations 5 \
-  --metal-modes resident \
-  --operation-modes batch-one-chunk \
-  --batch-item-bytes 64 \
-  --batch-pipeline-width 27 \
-  --file-modes none \
-  --cryptokit-modes none \
-  --json-output /tmp/blake3-batch-width27-stability-confirm-seq.json
-
-swift run -c release blake3-bench \
-  --sizes 64m \
-  --iterations 5 \
-  --metal-modes resident \
-  --operation-modes batch-one-chunk \
-  --batch-item-bytes 1024 \
-  --batch-pipeline-width 8 \
-  --file-modes none \
-  --cryptokit-modes none \
-  --json-output /tmp/blake3-batch-final-1024-w8.json
-```
-
-File rows include timed file open/stat, the selected access strategy, hashing, finalization, and close; benchmark file creation is excluded. File mmap, tiled mmap, and staged-read rows are page-in and thermal sensitive, so the table reports this current run directly.
-
-| File input | CPU read | CPU mmap | CPU mmap parallel | Metal mmap GPU | Metal tiled mmap GPU | Metal staged read GPU |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 16 MiB | 4.31 | 1.10 | 7.79 | 6.07 | 1.68 | 2.76 |
-| 64 MiB | 5.00 | 1.11 | 8.34 | 5.91 | 2.67 | 3.76 |
-| 256 MiB | 7.00 | 1.11 | 9.26 | 9.08 | 6.42 | 9.63 |
-| 512 MiB | 7.53 | 1.10 | 9.63 | 9.25 | 5.77 | 10.09 |
-| 1 GiB | 7.69 | 1.11 | 10.05 | 3.03 | 4.12 | 2.25 |
-
-The current `flatkernels` branch includes the block-state streaming hasher, local SIMD4 four-chunk subtree collapse, uninitialized CV workspace arrays in hot leaf/parent staging, scalar full-chunk unrolling, and size-aware CPU read inflight buffering. The fresh publication build completed in 125.60 seconds; the scalar unroll remains a compile-time versus runtime tradeoff.
+The full experiment log, including focused `e2e` follow-ups, small/mid-size digest-only Metal recovery, file-path results, one-chunk batch results, and rejected tuning experiments, is tracked in [docs/performance-results.md](docs/performance-results.md).
 
 ## Features
 
@@ -143,6 +87,7 @@ The current `flatkernels` branch includes the block-state streaming hasher, loca
 - CPU file strategies for buffered reads and memory-mapped hashing.
 - File APIs cover unkeyed digest/XOF, keyed digest/XOF, and derive-key material output across CPU and Metal strategies.
 - Metal resident-buffer, no-copy Swift input, one-chunk batch hashing, keyed hashing, derive-key material hashing, XOF, staged-buffer, tuned private-staged, async pipeline, tiled mmap file, and staged-read file hashing APIs.
+- Dedicated digest-only Metal kernels for plain unkeyed 32-byte digests, with the generalized Metal kernel family retained for keyed hashing, derive-key material, XOF, and batch APIs.
 - Fused Metal tile reduction for aligned full-chunk shared-memory inputs.
 - Metal file hashing can use no-copy mmap pages or staged reads into bounded shared buffers; large complete prefixes reduce to GPU subtree chaining values before CPU stack merge.
 - Runtime Metal compilation fallback plus precompiled `.metallib` loading for production startup control.
@@ -446,6 +391,12 @@ print(digest)
 
 ## Benchmarking
 
+For publication-quality numbers, keep three questions separate:
+
+- How does the core Swift implementation compare with the vendored official C one-shot baseline?
+- How fast is the user-visible application path, such as `BLAKE3.hash` or Metal end-to-end hashing?
+- How fast is a steady-state accelerator path when setup and ownership costs are intentionally held fixed?
+
 Build and test first:
 
 ```bash
@@ -453,7 +404,18 @@ swift build -c release
 swift test
 ```
 
-Run a CPU and Metal throughput sweep:
+Start with the apples-to-apples CPU one-shot baseline:
+
+```bash
+swift run -c release blake3-bench \
+  --sizes 16m,64m,256m,512m,1g \
+  --iterations 5 \
+  --metal-modes none \
+  --file-modes none \
+  --cryptokit-modes none
+```
+
+Then run the broader CPU and Metal engineering sweep:
 
 ```bash
 swift run -c release blake3-bench \
@@ -461,6 +423,14 @@ swift run -c release blake3-bench \
   --iterations 5 \
   --metal-modes resident,staged,private
 ```
+
+For small/mid-size Metal overhead work, use isolated per-mode processes instead of the mixed publication sweep:
+
+```bash
+benchmarks/run-isolated-overhead.sh
+```
+
+Do not compare `resident`, `private`, `wrapped`, or `staged` rows directly against the CPU one-shot baseline. They intentionally exclude different parts of the application path.
 
 Add keyed hash, derive-key, and XOF rows to the same table:
 

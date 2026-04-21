@@ -1,0 +1,33 @@
+date_utc=2026-04-21T13:15:01Z
+commit=87b1997b5f9ce1b44cd290d814bc706cc7239a80
+working_tree=dirty
+git_status= M Sources/Blake3/BLAKE3Metal.swift
+git_status= M Sources/Blake3/BLAKE3MetalKernel.swift
+git_status= M Sources/Blake3Benchmark/main.swift
+git_status= M Tests/Blake3Tests/BLAKE3Tests.swift
+git_status= M benchmarks/README.md
+git_status=?? benchmarks/results/20260421T-branch-compare/
+git_status=?? benchmarks/results/20260421T-digest-default-expanded/
+git_status=?? benchmarks/results/20260421T-digest-fastpath-e2e/
+git_status=?? benchmarks/results/20260421T-digest-fastpath-isolated/
+git_status=?? benchmarks/results/20260421T-digest-fastpath-mixed/
+git_status=?? benchmarks/results/20260421T-digest-fastpath-secondary/
+git_status=?? benchmarks/results/20260421T-digest-inplace128-expanded/
+git_status=?? benchmarks/results/20260421T-resident256-digest-tuning/
+git_status=?? benchmarks/run-isolated-overhead.sh
+swift=Apple Swift version 6.3 (swiftlang-6.3.0.123.5 clang-2100.0.123.102) Target: arm64-apple-macosx26.0 
+ProductName:		macOS
+ProductVersion:		26.5
+BuildVersion:		25F5058e
+Apple M4
+Mac16,12
+performance_cores=4
+active_cpus=10
+metal_library=runtime-source
+sizes=16m,64m,256m,512m,1g
+iterations=4
+isolated_metal_modes=resident staged wrapped
+cooldown_seconds=0
+minimum_gpu_bytes=default
+acceptance_harness=primary-overhead
+notes=run resident/private/staged/wrapped in separate benchmark processes; mixed publication sweep is secondary
