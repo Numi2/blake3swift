@@ -47,7 +47,7 @@ enum BLAKE3Core {
         var indexOffset: Int = 0
 
         func store(_ value: ChainingValue, at index: Int) {
-            baseAddress[index - indexOffset] = value
+            baseAddress.advanced(by: index - indexOffset).initialize(to: value)
         }
     }
 
@@ -1278,6 +1278,7 @@ enum BLAKE3Core {
         next.removeAll(keepingCapacity: true)
 
         next = Array(unsafeUninitializedCapacity: nextCount) { nextBuffer, initializedCount in
+            let nextStorage = SendableCVStorage(baseAddress: nextBuffer.baseAddress!)
             if parentCount < parallelParentMinCount || maxWorkers == 1 {
                 current.withUnsafeBufferPointer { currentBuffer in
                     reduceParentRange(
@@ -1286,7 +1287,7 @@ enum BLAKE3Core {
                         current: SendableCVInput(baseAddress: currentBuffer.baseAddress!),
                         key: key,
                         flags: flags,
-                        output: SendableCVStorage(baseAddress: nextBuffer.baseAddress!)
+                        output: nextStorage
                     )
                 }
             } else {
@@ -1297,7 +1298,6 @@ enum BLAKE3Core {
                 let parentsPerWorker = (parentCount + workerCount - 1) / workerCount
                 current.withUnsafeBufferPointer { currentBuffer in
                     let currentInput = SendableCVInput(baseAddress: currentBuffer.baseAddress!)
-                    let nextStorage = SendableCVStorage(baseAddress: nextBuffer.baseAddress!)
                     parallelPerform(iterations: workerCount, scheduler: scheduler) { workerIndex in
                         let start = workerIndex * parentsPerWorker
                         let end = min(parentCount, start + parentsPerWorker)
@@ -1317,7 +1317,7 @@ enum BLAKE3Core {
             }
 
             if !count.isMultiple(of: 2) {
-                nextBuffer[nextCount - 1] = current[count - 1]
+                nextStorage.store(current[count - 1], at: nextCount - 1)
             }
             initializedCount = nextCount
         }

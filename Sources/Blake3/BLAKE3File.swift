@@ -404,7 +404,7 @@ public enum BLAKE3File {
     ) throws -> [UInt8] {
         enableReadAhead(fd: fd)
         let clampedBufferSize = max(1, min(bufferSize, fileSize))
-        let readInflightCount = configuredReadInflightCount(fileSize: fileSize)
+        let readInflightCount = configuredReadInflightCount()
         let buffers = (0..<readInflightCount).map { _ in
             UnsafeMutableRawPointer.allocate(
                 byteCount: clampedBufferSize,
@@ -1411,14 +1411,16 @@ public enum BLAKE3File {
         return 1 << (Int.bitWidth - value.leadingZeroBitCount - 1)
     }
 
-    private static func configuredReadInflightCount(fileSize: Int) -> Int {
+    private static func configuredReadInflightCount() -> Int {
+        // The CPU file path overlaps one read with one subtree reduction worker. Higher values only add
+        // buffer churn because this implementation does not schedule multiple independent CPU tile workers.
         guard let rawValue = ProcessInfo.processInfo
             .environment["BLAKE3_SWIFT_READ_INFLIGHT"],
               let parsed = Int(rawValue)
         else {
-            return fileSize >= 128 * 1024 * 1024 ? 4 : 2
+            return 2
         }
-        return min(max(parsed, 1), 4)
+        return min(max(parsed, 1), 2)
     }
 
     private static func validateOutput(outputByteCount: Int, seek: UInt64) throws {

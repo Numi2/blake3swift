@@ -42,7 +42,11 @@ private final class BLAKE3HasherStorage: @unchecked Sendable {
     }
 
     deinit {
-        reset(keepingCapacity: false, wiping: containsSecretState)
+        clearState(
+            keepingCapacity: false,
+            wiping: containsSecretState,
+            restoreCurrentChunk: false
+        )
         if containsSecretState {
             BLAKE3Core.secureWipe(&key)
         }
@@ -199,7 +203,19 @@ private final class BLAKE3HasherStorage: @unchecked Sendable {
     }
 
     func reset(keepingCapacity: Bool = true, wiping: Bool? = nil) {
-        let shouldWipe = wiping ?? containsSecretState
+        clearState(
+            keepingCapacity: keepingCapacity,
+            wiping: wiping ?? containsSecretState,
+            restoreCurrentChunk: true
+        )
+    }
+
+    private func clearState(
+        keepingCapacity: Bool,
+        wiping: Bool,
+        restoreCurrentChunk: Bool
+    ) {
+        let shouldWipe = wiping
         cvStack.reset(keepingCapacity: keepingCapacity, wiping: shouldWipe)
         if shouldWipe {
             BLAKE3Core.secureWipe(&currentCV)
@@ -208,7 +224,11 @@ private final class BLAKE3HasherStorage: @unchecked Sendable {
             }
             BLAKE3Core.secureWipeChainingValues(&parallelChunkCVs)
         }
-        resetCurrentChunk()
+        if restoreCurrentChunk {
+            resetCurrentChunk()
+        } else {
+            discardCurrentChunk()
+        }
         parallelChunkCVs.removeAll(keepingCapacity: keepingCapacity)
     }
 
@@ -312,6 +332,12 @@ private final class BLAKE3HasherStorage: @unchecked Sendable {
 
     private func resetCurrentChunk() {
         currentCV = key
+        compressedBlockCount = 0
+        resetBufferedBlock()
+    }
+
+    private func discardCurrentChunk() {
+        currentCV = BLAKE3Core.ChainingValue(repeating: 0)
         compressedBlockCount = 0
         resetBufferedBlock()
     }
