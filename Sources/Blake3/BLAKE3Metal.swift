@@ -38,6 +38,7 @@ public enum BLAKE3Metal {
     private static let largeGridThreadThreshold = 1024 * 1024
     private static let smallGridSIMDGroupsPerThreadgroup = 8
     private static let largeGridSIMDGroupsPerThreadgroup = 4
+    private static let writeCombinedOwnedSharedBufferMaxBytes = 128 * 1024 * 1024
     private static let fusedTileChunkCount = configuredFusedTileChunkCount()
     private static let fusedTileReductionStrategy = configuredFusedTileReductionStrategy()
 
@@ -3139,10 +3140,16 @@ public enum BLAKE3Metal {
             }
             allocation.copyMemory(from: baseAddress, byteCount: input.count)
 
+            let resourceOptions: MTLResourceOptions = if input.count <= BLAKE3Metal.writeCombinedOwnedSharedBufferMaxBytes {
+                [.storageModeShared, .cpuCacheModeWriteCombined]
+            } else {
+                .storageModeShared
+            }
+
             guard let buffer = device.makeBuffer(
                 bytesNoCopy: allocation,
                 length: allocationLength,
-                options: .storageModeShared,
+                options: resourceOptions,
                 deallocator: { pointer, _ in
                     free(pointer)
                 }
