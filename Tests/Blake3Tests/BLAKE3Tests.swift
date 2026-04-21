@@ -1,5 +1,6 @@
 import XCTest
 @_spi(Benchmark) @testable import Blake3
+import Blake3BenchmarkSupport
 #if canImport(CryptoKit)
 import CryptoKit
 #endif
@@ -277,6 +278,70 @@ final class BLAKE3Tests: XCTestCase {
             let expected = BLAKE3.hashCPU(input)
             XCTAssertEqual(BLAKE3.hash(input), expected, "default hash mismatch for byteCount=\(size)")
             XCTAssertEqual(BLAKE3.hashSerial(input), expected, "serial hash mismatch for byteCount=\(size)")
+        }
+    }
+
+    func testOfficialCBLAKE3DifferentialHashes() {
+        let sizes = [
+            0,
+            1,
+            63,
+            64,
+            65,
+            1_023,
+            1_024,
+            1_025,
+            2_047,
+            2_048,
+            2_049,
+            4_095,
+            4_096,
+            4_097,
+            16_383,
+            16_384,
+            16_385,
+            65_535,
+            65_536,
+            65_537,
+            256 * 1_024 - 1,
+            256 * 1_024,
+            256 * 1_024 + 1,
+            1_024 * 1_024 + 333,
+            3 * 1_024 * 1_024 + 777
+        ]
+
+        for size in sizes {
+            let input = deterministicInput(byteCount: size)
+            let expected = input.withUnsafeBytes { OfficialCBLAKE3.hash($0) }
+
+            XCTAssertEqual(
+                BLAKE3.hash(input),
+                expected,
+                "default hash mismatch against official C for byteCount=\(size)"
+            )
+            XCTAssertEqual(
+                BLAKE3.hashSerial(input),
+                expected,
+                "serial hash mismatch against official C for byteCount=\(size)"
+            )
+            XCTAssertEqual(
+                BLAKE3.hashScalar(input),
+                expected,
+                "scalar hash mismatch against official C for byteCount=\(size)"
+            )
+            XCTAssertEqual(
+                BLAKE3.hashParallel(input, maxWorkers: 2),
+                expected,
+                "parallel hash mismatch against official C for byteCount=\(size)"
+            )
+
+            var hasher = BLAKE3.Hasher()
+            update(&hasher, with: input, splitPattern: [1, 63, 64, 65, 1_023, 1_024, 1_025, 4_097])
+            XCTAssertEqual(
+                hasher.finalize(),
+                expected,
+                "streaming hash mismatch against official C for byteCount=\(size)"
+            )
         }
     }
 

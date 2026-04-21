@@ -41,7 +41,7 @@ let package = Package(
         ),
         .testTarget(
             name: "Blake3Tests",
-            dependencies: ["Blake3"],
+            dependencies: ["Blake3", "Blake3BenchmarkSupport"],
             resources: [
                 .copy("Resources/test_vectors.json")
             ]
