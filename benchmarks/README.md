@@ -25,6 +25,8 @@ Collects separate output files for:
 
 Each publication run writes Markdown tables and matching JSON reports with per-sample timings, then validates the JSON report before exiting.
 
+Within each size, the default `BLAKE3.hash` row and the overlapping Metal headline timing classes run in an interleaved ping-pong order so the published medians are less sensitive to simple run-order thermal drift.
+
 Default publication sizes are `16 MiB`, `64 MiB`, `256 MiB`, `512 MiB`, and `1 GiB`.
 
 External upstream CLI checks, such as `b3sum`, should be stored beside the publication run as separate artifacts. They include process startup and CLI file handling, so keep them out of the in-process benchmark tables.

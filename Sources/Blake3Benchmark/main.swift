@@ -1280,7 +1280,19 @@ private func makeMetalBuffer(device: MTLDevice, input: [UInt8]) -> MTLBuffer? {
         guard let baseAddress = raw.baseAddress else {
             return nil
         }
-        return device.makeBuffer(bytes: baseAddress, length: input.count, options: .storageModeShared)
+        // Benchmark the alloc+memcpy+hash timing class without forcing Metal's internal allocate-and-copy path.
+        let allocation = UnsafeMutableRawPointer.allocate(
+            byteCount: input.count,
+            alignment: MemoryLayout<UInt>.alignment
+        )
+        allocation.copyMemory(from: baseAddress, byteCount: input.count)
+        return device.makeBuffer(
+            bytesNoCopy: allocation,
+            length: input.count,
+            options: .storageModeShared
+        ) { pointer, _ in
+            pointer.deallocate()
+        }
     }
 }
 
@@ -1294,11 +1306,15 @@ private func runBenchmark(
 ) -> BenchmarkResult {
     var sampleNanoseconds = [UInt64]()
     sampleNanoseconds.reserveCapacity(iterations)
-    var finalDigest = operation(input)
+    var finalDigest = autoreleasepool {
+        operation(input)
+    }
 
     for _ in 0..<iterations {
         let started = DispatchTime.now().uptimeNanoseconds
-        finalDigest = operation(input)
+        finalDigest = autoreleasepool {
+            operation(input)
+        }
         let elapsed = DispatchTime.now().uptimeNanoseconds - started
         sampleNanoseconds.append(elapsed)
     }
@@ -1311,6 +1327,59 @@ private func runBenchmark(
         digest: finalDigest,
         expectedDigest: expectedDigest
     )
+}
+
+private struct BenchmarkCandidate {
+    let backend: String
+    let mode: String
+    let byteCount: Int
+    let expectedDigest: BLAKE3.Digest?
+    let operation: ([UInt8]) -> BLAKE3.Digest
+}
+
+private func runInterleavedBenchmarks(
+    input: [UInt8],
+    iterations: Int,
+    candidates: [BenchmarkCandidate]
+) -> [BenchmarkResult] {
+    guard !candidates.isEmpty else {
+        return []
+    }
+
+    var sampleNanoseconds = Array(repeating: [UInt64](), count: candidates.count)
+    for index in sampleNanoseconds.indices {
+        sampleNanoseconds[index].reserveCapacity(iterations)
+    }
+    var finalDigests = candidates.map { candidate in
+        autoreleasepool {
+            candidate.operation(input)
+        }
+    }
+    let candidateIndices = Array(candidates.indices)
+
+    for pass in 0..<iterations {
+        let orderedIndices = pass.isMultiple(of: 2) ? candidateIndices : candidateIndices.reversed()
+        for candidateIndex in orderedIndices {
+            let candidate = candidates[candidateIndex]
+            let started = DispatchTime.now().uptimeNanoseconds
+            finalDigests[candidateIndex] = autoreleasepool {
+                candidate.operation(input)
+            }
+            let elapsed = DispatchTime.now().uptimeNanoseconds - started
+            sampleNanoseconds[candidateIndex].append(elapsed)
+        }
+    }
+
+    return candidates.enumerated().map { index, candidate in
+        BenchmarkResult(
+            backend: candidate.backend,
+            mode: candidate.mode,
+            byteCount: candidate.byteCount,
+            sampleNanoseconds: sampleNanoseconds[index],
+            digest: finalDigests[index],
+            expectedDigest: candidate.expectedDigest
+        )
+    }
 }
 
 private struct PipelinedBenchmarkCandidate {
@@ -1335,7 +1404,11 @@ private func runInterleavedPipelinedBenchmarks(
     for index in sampleNanoseconds.indices {
         sampleNanoseconds[index].reserveCapacity(iterations)
     }
-    var finalDigests = candidates.map { $0.operation(input) }
+    var finalDigests = candidates.map { candidate in
+        autoreleasepool {
+            candidate.operation(input)
+        }
+    }
     let candidateIndices = Array(candidates.indices)
 
     for pass in 0..<iterations {
@@ -1345,7 +1418,9 @@ private func runInterleavedPipelinedBenchmarks(
             for candidateIndex in candidateIndices {
                 let candidate = candidates[candidateIndex]
                 let started = DispatchTime.now().uptimeNanoseconds
-                finalDigests[candidateIndex] = candidate.operation(input)
+                finalDigests[candidateIndex] = autoreleasepool {
+                    candidate.operation(input)
+                }
                 let elapsed = DispatchTime.now().uptimeNanoseconds - started
                 sampleNanoseconds[candidateIndex].append(max(1, elapsed / UInt64(candidate.operationsPerSample)))
             }
@@ -1353,7 +1428,9 @@ private func runInterleavedPipelinedBenchmarks(
             for candidateIndex in candidateIndices.reversed() {
                 let candidate = candidates[candidateIndex]
                 let started = DispatchTime.now().uptimeNanoseconds
-                finalDigests[candidateIndex] = candidate.operation(input)
+                finalDigests[candidateIndex] = autoreleasepool {
+                    candidate.operation(input)
+                }
                 let elapsed = DispatchTime.now().uptimeNanoseconds - started
                 sampleNanoseconds[candidateIndex].append(max(1, elapsed / UInt64(candidate.operationsPerSample)))
             }
@@ -3059,6 +3136,9 @@ if let metalDevice {
     if requestedMetalTimingModes.contains(.endToEnd) {
         print("metal-e2e includes: \(MetalTimingMode.endToEnd.description)")
     }
+    if !requestedMetalTimingModes.isEmpty {
+        print("headlineRows=default-auto and overlapping metal timing modes run in interleaved ping-pong order")
+    }
 }
 #endif
 print("sizes=\(requestedSizes.map(formatBytes).joined(separator: ", "))")
@@ -3170,14 +3250,7 @@ for size in requestedSizes {
     ) { rawInput in
         cpuContext.hash(rawInput, mode: .automatic)
     }
-    let defaultAuto = runRawBenchmark(
-        backend: "blake3",
-        mode: "default-auto",
-        input: input,
-        iterations: iterations
-    ) { rawInput in
-        BLAKE3.hash(rawInput)
-    }
+    var defaultAuto: BenchmarkResult?
 
     var operationResults = [BenchmarkResult]()
     let expectedKeyedDigest: BLAKE3.Digest? = if requestedOperationTimingModes.contains(.keyed)
@@ -3566,109 +3639,174 @@ for size in requestedSizes {
                 options: .storageModePrivate
             )
             : nil
+        var headlineCandidates = [
+            BenchmarkCandidate(
+                backend: "blake3",
+                mode: "default-auto",
+                byteCount: input.count,
+                expectedDigest: nil
+            ) { bytes in
+                bytes.withUnsafeBytes { rawInput in
+                    BLAKE3.hash(rawInput)
+                }
+            }
+        ]
         if requestedMetalTimingModes.contains(.resident) {
-            metalAuto = runBenchmark(
-                backend: "metal",
-                mode: "resident-auto",
-                input: input,
-                iterations: iterations
-            ) { _ in
-                hashMetalAutoForBenchmark(context: metalContext, buffer: metalBuffer, length: size)
-            }
-            metalGPU = runBenchmark(
-                backend: "metal",
-                mode: "resident-gpu",
-                input: input,
-                iterations: iterations
-            ) { _ in
-                hashMetalGPUForBenchmark(context: metalContext, buffer: metalBuffer, length: size)
-            }
+            headlineCandidates.append(
+                BenchmarkCandidate(
+                    backend: "metal",
+                    mode: "resident-auto",
+                    byteCount: input.count,
+                    expectedDigest: nil
+                ) { _ in
+                    hashMetalAutoForBenchmark(context: metalContext, buffer: metalBuffer, length: size)
+                }
+            )
+            headlineCandidates.append(
+                BenchmarkCandidate(
+                    backend: "metal",
+                    mode: "resident-gpu",
+                    byteCount: input.count,
+                    expectedDigest: nil
+                ) { _ in
+                    hashMetalGPUForBenchmark(context: metalContext, buffer: metalBuffer, length: size)
+                }
+            )
         }
         if requestedMetalTimingModes.contains(.privateResident),
            size > BLAKE3.chunkByteCount,
            let privateBuffer = try? metalContext.makePrivateBuffer(input: input) {
-            metalPrivateGPU = runBenchmark(
-                backend: "metal",
-                mode: "private-gpu",
-                input: input,
-                iterations: iterations
-            ) { _ in
-                return try! metalContext.hash(privateBuffer: privateBuffer, policy: .gpu)
-            }
+            headlineCandidates.append(
+                BenchmarkCandidate(
+                    backend: "metal",
+                    mode: "private-gpu",
+                    byteCount: input.count,
+                    expectedDigest: nil
+                ) { _ in
+                    try! metalContext.hash(privateBuffer: privateBuffer, policy: .gpu)
+                }
+            )
         }
         if requestedMetalTimingModes.contains(.privateStaged),
            size > BLAKE3.chunkByteCount,
            let privateBuffer = try? metalContext.makePrivateBuffer(capacity: size),
            let privateStagingBuffer = try? metalContext.makeStagingBuffer(capacity: size) {
-            metalPrivateStagedGPU = runBenchmark(
-                backend: "metal",
-                mode: "private-staged-gpu",
-                input: input,
-                iterations: iterations
-            ) { bytes in
-                try! metalContext.hash(
-                    input: bytes,
-                    using: privateStagingBuffer,
-                    privateBuffer: privateBuffer,
-                    policy: .gpu
-                )
-            }
+            headlineCandidates.append(
+                BenchmarkCandidate(
+                    backend: "metal",
+                    mode: "private-staged-gpu",
+                    byteCount: input.count,
+                    expectedDigest: nil
+                ) { bytes in
+                    try! metalContext.hash(
+                        input: bytes,
+                        using: privateStagingBuffer,
+                        privateBuffer: privateBuffer,
+                        policy: .gpu
+                    )
+                }
+            )
         }
         if requestedMetalTimingModes.contains(.staged),
            let stagingBuffer = try? metalContext.makeStagingBuffer(capacity: size) {
-            metalStagedAuto = runBenchmark(
-                backend: "metal",
-                mode: "staged-auto",
-                input: input,
-                iterations: iterations
-            ) { bytes in
-                try! metalContext.hash(input: bytes, using: stagingBuffer, policy: .automatic)
-            }
-            metalStagedGPU = runBenchmark(
-                backend: "metal",
-                mode: "staged-gpu",
-                input: input,
-                iterations: iterations
-            ) { bytes in
-                try! metalContext.hash(input: bytes, using: stagingBuffer, policy: .gpu)
-            }
+            headlineCandidates.append(
+                BenchmarkCandidate(
+                    backend: "metal",
+                    mode: "staged-auto",
+                    byteCount: input.count,
+                    expectedDigest: nil
+                ) { bytes in
+                    try! metalContext.hash(input: bytes, using: stagingBuffer, policy: .automatic)
+                }
+            )
+            headlineCandidates.append(
+                BenchmarkCandidate(
+                    backend: "metal",
+                    mode: "staged-gpu",
+                    byteCount: input.count,
+                    expectedDigest: nil
+                ) { bytes in
+                    try! metalContext.hash(input: bytes, using: stagingBuffer, policy: .gpu)
+                }
+            )
         }
         if requestedMetalTimingModes.contains(.wrapped) {
-            metalWrappedAuto = runBenchmark(
-                backend: "metal",
-                mode: "wrapped-auto",
-                input: input,
-                iterations: iterations
-            ) { bytes in
-                try! metalContext.hash(input: bytes, policy: .automatic)
-            }
-            metalWrappedGPU = runBenchmark(
-                backend: "metal",
-                mode: "wrapped-gpu",
-                input: input,
-                iterations: iterations
-            ) { bytes in
-                try! metalContext.hash(input: bytes, policy: .gpu)
-            }
+            headlineCandidates.append(
+                BenchmarkCandidate(
+                    backend: "metal",
+                    mode: "wrapped-auto",
+                    byteCount: input.count,
+                    expectedDigest: nil
+                ) { bytes in
+                    try! metalContext.hash(input: bytes, policy: .automatic)
+                }
+            )
+            headlineCandidates.append(
+                BenchmarkCandidate(
+                    backend: "metal",
+                    mode: "wrapped-gpu",
+                    byteCount: input.count,
+                    expectedDigest: nil
+                ) { bytes in
+                    try! metalContext.hash(input: bytes, policy: .gpu)
+                }
+            )
         }
         if requestedMetalTimingModes.contains(.endToEnd) {
-            metalE2EAuto = runBenchmark(
-                backend: "metal",
-                mode: "e2e-auto",
-                input: input,
-                iterations: iterations
-            ) { bytes in
-                let buffer = makeMetalBuffer(device: metalDevice, input: bytes)!
-                return hashMetalAutoForBenchmark(context: metalContext, buffer: buffer, length: size)
-            }
-            metalE2EGPU = runBenchmark(
-                backend: "metal",
-                mode: "e2e-gpu",
-                input: input,
-                iterations: iterations
-            ) { bytes in
-                let buffer = makeMetalBuffer(device: metalDevice, input: bytes)!
-                return hashMetalGPUForBenchmark(context: metalContext, buffer: buffer, length: size)
+            headlineCandidates.append(
+                BenchmarkCandidate(
+                    backend: "metal",
+                    mode: "e2e-auto",
+                    byteCount: input.count,
+                    expectedDigest: nil
+                ) { bytes in
+                    let buffer = makeMetalBuffer(device: metalDevice, input: bytes)!
+                    return hashMetalAutoForBenchmark(context: metalContext, buffer: buffer, length: size)
+                }
+            )
+            headlineCandidates.append(
+                BenchmarkCandidate(
+                    backend: "metal",
+                    mode: "e2e-gpu",
+                    byteCount: input.count,
+                    expectedDigest: nil
+                ) { bytes in
+                    let buffer = makeMetalBuffer(device: metalDevice, input: bytes)!
+                    return hashMetalGPUForBenchmark(context: metalContext, buffer: buffer, length: size)
+                }
+            )
+        }
+
+        for result in runInterleavedBenchmarks(
+            input: input,
+            iterations: iterations,
+            candidates: headlineCandidates
+        ) {
+            switch result.mode {
+            case "default-auto":
+                defaultAuto = result
+            case "resident-auto":
+                metalAuto = result
+            case "resident-gpu":
+                metalGPU = result
+            case "private-gpu":
+                metalPrivateGPU = result
+            case "private-staged-gpu":
+                metalPrivateStagedGPU = result
+            case "staged-auto":
+                metalStagedAuto = result
+            case "staged-gpu":
+                metalStagedGPU = result
+            case "wrapped-auto":
+                metalWrappedAuto = result
+            case "wrapped-gpu":
+                metalWrappedGPU = result
+            case "e2e-auto":
+                metalE2EAuto = result
+            case "e2e-gpu":
+                metalE2EGPU = result
+            default:
+                break
             }
         }
         if requestedMetalTimingModes.contains(.resident),
@@ -4341,6 +4479,20 @@ for size in requestedSizes {
         }
     }
     #endif
+
+    if defaultAuto == nil {
+        defaultAuto = runRawBenchmark(
+            backend: "blake3",
+            mode: "default-auto",
+            input: input,
+            iterations: iterations
+        ) { rawInput in
+            BLAKE3.hash(rawInput)
+        }
+    }
+    guard let defaultAuto else {
+        fatalError("missing default-auto benchmark result")
+    }
 
     var results = [scalar, single, parallel, officialC, cpuContextAuto, defaultAuto]
     results.append(contentsOf: operationResults)

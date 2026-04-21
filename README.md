@@ -8,7 +8,7 @@ The project is performance-focused, but correctness comes first: the Swift imple
 
 Local release benchmarks on Apple M4 are used to tune the Swift CPU and Metal backends and to keep correctness checks attached to every timing row. All numbers below are current `flatkernels` results from `benchmarks/results/20260419T-readme-flatkernels-current`, generated April 19, 2026 on macOS 26.5 with Swift 6.3, runtime Metal source, the 16 MiB Metal crossover, 64 MiB mmap Metal tiles, 32 MiB staged-read Metal tiles, and 4 benchmark iterations. The generated CPU/Metal, file, and CryptoKit JSON reports were validated.
 
-All tables report median GiB/s. The official C row is the vendored in-process BLAKE3 one-shot comparison point, not a claim about every upstream BLAKE3 configuration. CryptoKit SHA-256 is a cross-algorithm Apple platform baseline from the companion `cryptokit-comparison` run, not BLAKE3 parity.
+All tables report median GiB/s. Default `BLAKE3.hash` and the overlapping Metal timing-class headline rows are measured in an interleaved ping-pong order at each size so one row family does not always run earlier or later in the thermal sequence. The official C row is the vendored in-process BLAKE3 one-shot comparison point, not a claim about every upstream BLAKE3 configuration. CryptoKit SHA-256 is a cross-algorithm Apple platform baseline from the companion `cryptokit-comparison` run, not BLAKE3 parity.
 
 CPU buffer hashing:
 
@@ -39,6 +39,15 @@ Metal timing classes are separated by ownership and transfer cost. Resident mode
 | 256 MiB | 51.90 | 57.43 | 19.91 | 45.50 | 11.03 |
 | 512 MiB | 60.80 | 64.90 | 23.05 | 51.01 | 6.31 |
 | 1 GiB | 63.15 | 59.21 | 23.95 | 34.00 | 2.22 |
+
+Focused end-to-end record, validated April 21, 2026: `e2e` now uses a heap-backed shared upload buffer in the benchmark harness so the timing class still includes allocation, memcpy, and hashing without forcing Metal's internal allocate-and-copy helper path. The validated artifact at `benchmarks/results/20260421T-e2e-record` is a focused `e2e` run, not a replacement for the broader publication sweep above.
+
+| Input | End-to-end Auto | End-to-end GPU |
+| --- | ---: | ---: |
+| 64 MiB | 16.04 | 17.69 |
+| 256 MiB | 15.51 | 15.48 |
+| 512 MiB | 16.20 | 16.34 |
+| 1 GiB | 18.63 | 18.56 |
 
 Focused one-chunk batch records from April 20-21, 2026 use resident Metal buffers on Apple M4 with runtime
 Metal source, 64 MiB input, 5 iterations, and JSON validation. These targeted rows are tuning records for
