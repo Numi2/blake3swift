@@ -1280,19 +1280,7 @@ private func makeMetalBuffer(device: MTLDevice, input: [UInt8]) -> MTLBuffer? {
         guard let baseAddress = raw.baseAddress else {
             return nil
         }
-        // Benchmark the alloc+memcpy+hash timing class without forcing Metal's internal allocate-and-copy path.
-        let allocation = UnsafeMutableRawPointer.allocate(
-            byteCount: input.count,
-            alignment: MemoryLayout<UInt>.alignment
-        )
-        allocation.copyMemory(from: baseAddress, byteCount: input.count)
-        return device.makeBuffer(
-            bytesNoCopy: allocation,
-            length: input.count,
-            options: .storageModeShared
-        ) { pointer, _ in
-            pointer.deallocate()
-        }
+        return device.makeBuffer(bytes: baseAddress, length: input.count, options: .storageModeShared)
     }
 }
 
@@ -2865,9 +2853,7 @@ private func runMetalAutotune() throws {
                     input: input,
                     iterations: iterations
                 ) { bytes in
-                    guard let buffer = makeMetalBuffer(device: device, input: bytes) else {
-                        throw BLAKE3Error.metalCommandFailed("Unable to allocate end-to-end autotune buffer.")
-                    }
+                    let buffer = try modeContext.makeOwnedSharedBuffer(copying: bytes)
                     return try modeContext.hash(buffer: buffer, length: size, policy: .gpu)
                 }
             }
@@ -3760,7 +3746,7 @@ for size in requestedSizes {
                     byteCount: input.count,
                     expectedDigest: nil
                 ) { bytes in
-                    let buffer = makeMetalBuffer(device: metalDevice, input: bytes)!
+                    let buffer = try! metalContext.makeOwnedSharedBuffer(copying: bytes)
                     return hashMetalAutoForBenchmark(context: metalContext, buffer: buffer, length: size)
                 }
             )
@@ -3771,7 +3757,7 @@ for size in requestedSizes {
                     byteCount: input.count,
                     expectedDigest: nil
                 ) { bytes in
-                    let buffer = makeMetalBuffer(device: metalDevice, input: bytes)!
+                    let buffer = try! metalContext.makeOwnedSharedBuffer(copying: bytes)
                     return hashMetalGPUForBenchmark(context: metalContext, buffer: buffer, length: size)
                 }
             )

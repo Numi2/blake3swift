@@ -1,4 +1,5 @@
 #if canImport(Metal)
+import Darwin
 import Foundation
 import Metal
 
@@ -1181,9 +1182,8 @@ public enum BLAKE3Metal {
                 privateBuffer.length = 0
                 return
             }
-            guard let baseAddress = input.baseAddress,
-                  let source = device.makeBuffer(bytes: baseAddress, length: input.count, options: .storageModeShared),
-                  let commandBuffer = commandQueue.makeCommandBuffer(),
+            let source = try makeOwnedSharedBuffer(copying: input)
+            guard let commandBuffer = commandQueue.makeCommandBuffer(),
                   let blitEncoder = commandBuffer.makeBlitCommandEncoder()
             else {
                 throw BLAKE3Error.metalCommandFailed("Unable to stage private buffer upload.")
@@ -3110,6 +3110,47 @@ public enum BLAKE3Metal {
                 )
             }
             return try hash(buffer: stagingBuffer.buffer, length: input.count, policy: policy)
+        }
+
+        @_spi(Benchmark)
+        public func makeOwnedSharedBuffer(copying input: some ContiguousBytes) throws -> MTLBuffer {
+            try input.withUnsafeBytes { raw in
+                try makeOwnedSharedBuffer(copying: raw)
+            }
+        }
+
+        func makeOwnedSharedBuffer(copying input: UnsafeRawBufferPointer) throws -> MTLBuffer {
+            guard input.count > 0 else {
+                guard let buffer = device.makeBuffer(length: 1, options: .storageModeShared) else {
+                    throw BLAKE3Error.metalCommandFailed("Unable to allocate shared Metal buffer.")
+                }
+                return buffer
+            }
+            guard let baseAddress = input.baseAddress else {
+                throw BLAKE3Error.metalCommandFailed("Input bytes are unavailable.")
+            }
+
+            let pageSize = max(Int(getpagesize()), MemoryLayout<UnsafeMutableRawPointer>.alignment)
+            let allocationLength = ((input.count - 1) / pageSize + 1) * pageSize
+            var allocation: UnsafeMutableRawPointer?
+            let status = posix_memalign(&allocation, pageSize, allocationLength)
+            guard status == 0, let allocation else {
+                throw BLAKE3Error.metalCommandFailed("Unable to allocate page-aligned shared Metal buffer.")
+            }
+            allocation.copyMemory(from: baseAddress, byteCount: input.count)
+
+            guard let buffer = device.makeBuffer(
+                bytesNoCopy: allocation,
+                length: allocationLength,
+                options: .storageModeShared,
+                deallocator: { pointer, _ in
+                    free(pointer)
+                }
+            ) else {
+                free(allocation)
+                throw BLAKE3Error.metalCommandFailed("Unable to allocate shared Metal buffer.")
+            }
+            return buffer
         }
 
         /// Asynchronously hashes contiguous input through a staging buffer.

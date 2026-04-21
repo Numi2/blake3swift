@@ -49,6 +49,8 @@ Focused end-to-end record, validated April 21, 2026: `e2e` now uses a heap-backe
 | 512 MiB | 16.20 | 16.34 |
 | 1 GiB | 18.63 | 18.56 |
 
+Follow-up page-aligned upload record, also validated April 21, 2026: `BLAKE3Metal.Context.makeOwnedSharedBuffer(copying:)` now backs owned shared uploads with page-aligned `bytesNoCopy` storage, and the benchmark uses that same runtime helper. The focused artifact at `benchmarks/results/20260421T-page-aligned-upload-record` improved the large `e2e-gpu` rows to 16.79 GiB/s at 256 MiB, 16.72 GiB/s at 512 MiB, and 18.57 GiB/s at 1 GiB. The 64 MiB row remained noisier in this run, so the mixed-size focused table above is still the cleaner reference for that size class.
+
 Focused one-chunk batch records from April 20-21, 2026 use resident Metal buffers on Apple M4 with runtime
 Metal source, 64 MiB input, 5 iterations, and JSON validation. These targeted rows are tuning records for
 the batch APIs; they do not replace the full publication sweep above. The 64 B rows use the contiguous
