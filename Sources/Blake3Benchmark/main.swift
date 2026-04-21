@@ -771,6 +771,24 @@ private func hashMetalGPUForBenchmark(
 }
 
 @inline(never)
+private func hashMetalOwnedSharedAutoForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    length: Int
+) -> BLAKE3.Digest {
+    try! context.hashOwnedSharedUploadBuffer(buffer: buffer, length: length, policy: .automatic)
+}
+
+@inline(never)
+private func hashMetalOwnedSharedGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    length: Int
+) -> BLAKE3.Digest {
+    try! context.hashOwnedSharedUploadBuffer(buffer: buffer, length: length, policy: .gpu)
+}
+
+@inline(never)
 private func batchOneChunkMetalGPUForBenchmark(
     context: BLAKE3Metal.Context,
     buffer: MTLBuffer,
@@ -3747,7 +3765,7 @@ for size in requestedSizes {
                     expectedDigest: nil
                 ) { bytes in
                     let buffer = try! metalContext.makeOwnedSharedBuffer(copying: bytes)
-                    return hashMetalAutoForBenchmark(context: metalContext, buffer: buffer, length: size)
+                    return hashMetalOwnedSharedAutoForBenchmark(context: metalContext, buffer: buffer, length: size)
                 }
             )
             headlineCandidates.append(
@@ -3758,7 +3776,7 @@ for size in requestedSizes {
                     expectedDigest: nil
                 ) { bytes in
                     let buffer = try! metalContext.makeOwnedSharedBuffer(copying: bytes)
-                    return hashMetalGPUForBenchmark(context: metalContext, buffer: buffer, length: size)
+                    return hashMetalOwnedSharedGPUForBenchmark(context: metalContext, buffer: buffer, length: size)
                 }
             )
         }

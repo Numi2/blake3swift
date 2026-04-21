@@ -39,6 +39,7 @@ public enum BLAKE3Metal {
     private static let smallGridSIMDGroupsPerThreadgroup = 8
     private static let largeGridSIMDGroupsPerThreadgroup = 4
     private static let writeCombinedOwnedSharedBufferMaxBytes = 128 * 1024 * 1024
+    private static let ownedSharedUploadFusedTileMaxBytes = 128 * 1024 * 1024
     private static let fusedTileChunkCount = configuredFusedTileChunkCount()
     private static let fusedTileReductionStrategy = configuredFusedTileReductionStrategy()
 
@@ -1488,6 +1489,34 @@ public enum BLAKE3Metal {
             policy: ExecutionPolicy = .automatic
         ) throws -> BLAKE3.Digest {
             try hash(buffer: buffer, range: range, policy: policy, mode: .unkeyed)
+        }
+
+        @_spi(Benchmark)
+        public func hashOwnedSharedUploadBuffer(
+            buffer: MTLBuffer,
+            length: Int,
+            policy: ExecutionPolicy = .automatic
+        ) throws -> BLAKE3.Digest {
+            try hashOwnedSharedUploadBuffer(buffer: buffer, range: 0..<length, policy: policy)
+        }
+
+        @_spi(Benchmark)
+        public func hashOwnedSharedUploadBuffer(
+            buffer: MTLBuffer,
+            range: Range<Int>,
+            policy: ExecutionPolicy = .automatic
+        ) throws -> BLAKE3.Digest {
+            try BLAKE3Metal.hash(
+                buffer: buffer,
+                range: range,
+                policy: policy,
+                mode: .unkeyed,
+                minimumGPUByteCount: minimumGPUByteCount,
+                pipelines: pipelines,
+                commandQueue: commandQueue,
+                workspace: self,
+                allowsFusedTile: range.count <= BLAKE3Metal.ownedSharedUploadFusedTileMaxBytes
+            )
         }
 
         /// Hashes many independent resident-buffer ranges that each fit in one BLAKE3 chunk.
@@ -3915,7 +3944,8 @@ public enum BLAKE3Metal {
         minimumGPUByteCount: Int,
         pipelines: BLAKE3MetalPipelines,
         commandQueue: MTLCommandQueue,
-        workspace: Context
+        workspace: Context,
+        allowsFusedTile: Bool = true
     ) throws -> BLAKE3.Digest {
         guard range.lowerBound >= 0,
               range.upperBound <= buffer.length,
@@ -3950,6 +3980,7 @@ public enum BLAKE3Metal {
                 commandQueue: commandQueue,
                 retainsReferences: false,
                 mode: mode,
+                allowsFusedTile: allowsFusedTile,
                 cvBuffer: cvBuffer,
                 scratchBuffer: scratchBuffer,
                 digestBuffer: digestBuffer,
@@ -5339,6 +5370,7 @@ public enum BLAKE3Metal {
         commandQueue: MTLCommandQueue,
         retainsReferences: Bool,
         mode: HashMode = .unkeyed,
+        allowsFusedTile: Bool = true,
         cvBuffer: MTLBuffer,
         scratchBuffer: MTLBuffer,
         digestBuffer: MTLBuffer,
@@ -5359,6 +5391,7 @@ public enum BLAKE3Metal {
             chunkCount: chunkCount,
             pipelines: pipelines,
             mode: mode,
+            allowsFusedTile: allowsFusedTile,
             cvBuffer: cvBuffer,
             scratchBuffer: scratchBuffer,
             digestBuffer: digestBuffer,
@@ -5417,6 +5450,7 @@ public enum BLAKE3Metal {
         chunkCount: Int,
         pipelines: BLAKE3MetalPipelines,
         mode: HashMode = .unkeyed,
+        allowsFusedTile: Bool = true,
         cvBuffer: MTLBuffer,
         scratchBuffer: MTLBuffer,
         digestBuffer: MTLBuffer,
@@ -5439,6 +5473,7 @@ public enum BLAKE3Metal {
             range: range,
             chunkCount: chunkCount,
             canLoadWords: canLoadWords,
+            allowsFusedTile: allowsFusedTile,
             pipelines: pipelines
         )
 
@@ -5975,8 +6010,12 @@ public enum BLAKE3Metal {
         range: Range<Int>,
         chunkCount: Int,
         canLoadWords: Bool,
+        allowsFusedTile: Bool = true,
         pipelines: BLAKE3MetalPipelines
     ) -> FusedTilePlan? {
+        guard allowsFusedTile else {
+            return nil
+        }
         switch fusedTileReductionStrategy {
         case .simdGroup:
             if let plan = fusedTilePlan(

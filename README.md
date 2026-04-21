@@ -53,6 +53,8 @@ Follow-up page-aligned upload record, also validated April 21, 2026: `BLAKE3Meta
 
 Size-aware upload-cache follow-up, also validated April 21, 2026: owned shared uploads now use write-combined CPU cache mode only up to 128 MiB, while larger uploads stay on the default cache mode. The focused artifact at `benchmarks/results/20260421T-size-aware-upload-record` raised the `64 MiB` `e2e-gpu` row again to 17.71 GiB/s while keeping the larger `e2e` rows in the same mid-to-high teens band.
 
+Owned-upload fused-tile cap follow-up, also validated April 21, 2026: the benchmark-only owned shared upload hash path now keeps fused tiling only up to 128 MiB and falls back to the non-fused large shared-buffer path above that cap. The focused artifact at `benchmarks/results/20260421T-owned-shared-fused-tile-cap` pushed the `1 GiB` `e2e-gpu` row to 19.93 GiB/s while keeping the 256 MiB and 512 MiB rows in the same mid-16 GiB/s band. The 64 MiB row remained noisier, so `benchmarks/results/20260421T-size-aware-upload-record` is still the cleaner reference for that size class.
+
 Focused one-chunk batch records from April 20-21, 2026 use resident Metal buffers on Apple M4 with runtime
 Metal source, 64 MiB input, 5 iterations, and JSON validation. These targeted rows are tuning records for
 the batch APIs; they do not replace the full publication sweep above. The 64 B rows use the contiguous
