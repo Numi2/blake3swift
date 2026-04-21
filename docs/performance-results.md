@@ -170,7 +170,16 @@ benchmarks/results/20260421T-digest-fastpath-isolated
 
 This change set restores a dedicated digest-only Metal kernel family for plain unkeyed 32-byte digests while leaving keyed hashing, derive-key material, XOF, and batch APIs on the generalized kernel family. It also promotes `benchmarks/run-isolated-overhead.sh` to the primary acceptance harness for `resident`, `private`, `staged`, and `wrapped` tuning so the upload-heavy `default-auto` and `e2e` rows do not dominate the thermal/order profile.
 
-The table reports validated median GiB/s from the isolated per-mode JSON reports:
+The same patch also fixes the small private-buffer edge case for sub-chunk GPU validation by routing that case through the existing one-chunk batch kernel instead of falling back to a CPU path that cannot read private storage.
+
+Promoted overhead recovery claims from the isolated harness are intentionally narrow. The strongest corroborated wins were the 64 MiB forced-GPU rows, compared below against the earlier weak `flatkernels` branch-comparison artifact:
+
+| Input | Metal resident GPU | Metal private GPU | Metal staged GPU | Metal wrapped GPU |
+| --- | ---: | ---: | ---: | ---: |
+| 64 MiB old weak row | 25.07 | 21.30 | 10.26 | 15.65 |
+| 64 MiB isolated recovery | 37.89 | 38.15 | 14.92 | 29.93 |
+
+Supporting isolated medians from the same artifact were:
 
 | Input | Metal resident GPU | Metal private GPU | Metal staged GPU | Metal wrapped GPU |
 | --- | ---: | ---: | ---: | ---: |
@@ -180,9 +189,10 @@ The table reports validated median GiB/s from the isolated per-mode JSON reports
 
 Interpretation:
 
-- `private-gpu`, `staged-gpu`, and `wrapped-gpu` recovered the weak small/mid-size rows from the earlier branch comparison without touching the large owned-shared upload path.
-- `resident-gpu` recovered clearly at 64 MiB and improved the 16 MiB floor, but the 256 MiB resident row remained the noisiest overhead result across same-day repeats.
-- The dedicated digest-only split is the promoted change. The isolated artifact above is the primary acceptance reference for these overhead modes.
+- The dedicated digest-only split is the promoted change, and the isolated harness is the promoted primary acceptance method for these overhead modes.
+- The strongest benchmark claims are the 64 MiB `resident-gpu`, `private-gpu`, `staged-gpu`, and `wrapped-gpu` recoveries, because those rows improved materially and remained directionally consistent across same-day reruns.
+- The 16 MiB rows improved in the isolated artifact, but they remained more variance-sensitive and are kept as supporting data rather than headline claims.
+- `resident-gpu` at 256 MiB remained the noisiest row across same-day repeats and is not promoted as a durable win.
 
 Secondary sanity artifacts:
 
@@ -191,7 +201,7 @@ benchmarks/results/20260421T-digest-fastpath-secondary
 benchmarks/results/20260421T-digest-fastpath-secondary/e2e.json
 ```
 
-The mixed overhead rerun under `overhead-mixed.json` is kept as a cross-check only. In that mixed pass, `resident-gpu` at 256 MiB landed at 47.60 GiB/s, slightly above the earlier weak comparison row, but the run order remained noisy enough that it was not promoted over the isolated harness. The focused `e2e` sanity rerun measured 15.35/20.40 GiB/s for `e2e-auto` and 15.39/20.26 GiB/s for `e2e-gpu` at 512 MiB/1 GiB, keeping the large upload path in the same high-teens to low-20s band.
+The mixed overhead rerun under `overhead-mixed.json` is kept as a cross-check only. It supported the same overall direction for the 64 MiB recovery rows, while `resident-gpu` at 256 MiB landed at 47.60 GiB/s and remained too noisy to promote as a stable win. The focused `e2e` sanity rerun measured 15.35/20.40 GiB/s for `e2e-auto` and 15.39/20.26 GiB/s for `e2e-gpu` at 512 MiB/1 GiB, keeping the large upload path in the same high-teens to low-20s band.
 
 ## April 21, 2026 Digest-Only Fused-Tile Follow-Up
 

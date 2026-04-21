@@ -1,0 +1,33 @@
+date_utc=2026-04-21T16:06:24Z
+commit=315dd903f6ae537bbf5e4b6a7d04989ae19e6a2a
+working_tree=dirty
+git_status= M README.md
+git_status= M benchmarks/README.md
+git_status= M benchmarks/run-isolated-overhead.sh
+git_status= M docs/performance-results.md
+git_status=?? benchmarks/results/20260421T-full-suite-isolated-overhead/
+git_status=?? benchmarks/results/20260421T-full-suite-publication/
+swift=Apple Swift version 6.3 (swiftlang-6.3.0.123.5 clang-2100.0.123.102) Target: arm64-apple-macosx26.0 
+ProductName:		macOS
+ProductVersion:		26.5
+BuildVersion:		25F5058e
+Apple M4
+Mac16,12
+performance_cores=4
+active_cpus=10
+metal_library=runtime-source
+sizes=16m,64m,256m
+iterations=6
+isolated_metal_modes=resident private staged wrapped
+repeats=1
+cooldown_seconds=15
+cpu_workers=default
+minimum_gpu_bytes=default
+cryptokit_modes=none
+memory_stats=0
+default_backend=default
+default_metal_min_bytes_env=default
+fused_tile_chunks=default
+fused_tile_reduction=default
+acceptance_harness=primary-overhead
+notes=run resident/private/staged/wrapped in separate benchmark processes; mixed publication sweep is secondary

@@ -59,6 +59,18 @@ Metal timing classes:
 | 512 MiB | 60.80 | 64.90 | 23.05 | 51.01 | 6.31 |
 | 1 GiB | 63.15 | 59.21 | 23.95 | 34.00 | 2.22 |
 
+### Isolated Overhead Harness Records
+
+The integrated isolated overhead harness is kept as a separate acceptance record rather than overwriting the publication-style table above. These rows come from `benchmarks/results/20260421T-full-suite-isolated-overhead`, produced by `benchmarks/run-isolated-overhead.sh` after the harness was hardened to record active tuning env vars, support repeats, capture thermal snapshots, and validate every JSON artifact. They are useful for small/mid-size Metal tuning, but they remain a different measurement shape from the mixed publication sweep.
+
+| Input | Harness resident GPU | Harness private GPU | Harness staged GPU | Harness wrapped GPU |
+| --- | ---: | ---: | ---: | ---: |
+| 16 MiB | 12.55 | 9.29 | 8.73 | 9.56 |
+| 64 MiB | 42.99 | 35.90 | 15.12 | 29.84 |
+| 256 MiB | 63.67 | 57.21 | 18.13 | 29.22 |
+
+These harness rows are inserted for traceability, not as blind replacements for the curated publication rows. In this rerun, the clearest harness improvement was `resident-gpu` at `64 MiB`, while `private`, `staged`, and `wrapped` were mixed enough that the earlier curated references remain the cleaner headline table.
+
 ### SIMD4 CPU One-Shot Baseline
 
 | Input | Official C one-shot | Swift scalar | Swift SIMD4 | Swift SIMD4 as % of C |
@@ -430,7 +442,7 @@ For small/mid-size Metal overhead work, use isolated per-mode processes instead 
 benchmarks/run-isolated-overhead.sh
 ```
 
-Do not compare `resident`, `private`, `wrapped`, or `staged` rows directly against the CPU one-shot baseline. They intentionally exclude different parts of the application path.
+This harness now records the active tuning env vars, supports repeats, captures thermal snapshots, and validates every JSON artifact. Do not compare `resident`, `private`, `wrapped`, or `staged` rows directly against the CPU one-shot baseline. They intentionally exclude different parts of the application path.
 
 Add keyed hash, derive-key, and XOF rows to the same table:
 
