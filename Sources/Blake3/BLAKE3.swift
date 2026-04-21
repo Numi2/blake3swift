@@ -8,6 +8,39 @@ public enum BLAKE3 {
     private static let defaultCPUContextThreadDictionaryKey = "com.blake3swift.defaultCPUContext"
     private static let cpuContextThreadDictionaryKeyPrefix = "com.blake3swift.cpuContext."
 
+    private final class ThreadLocalCPUContext: NSObject {
+        private let scheduler: BLAKE3Core.ParallelScheduler
+        private let maxWorkers: Int
+        private var workspace = BLAKE3Core.Workspace()
+
+        init(maxWorkers: Int?) {
+            self.maxWorkers = BLAKE3Core.normalizedParallelWorkerCount(maxWorkers)
+            self.scheduler = BLAKE3Core.ParallelScheduler(workerCount: self.maxWorkers)
+        }
+
+        func hashAutomatic(_ input: UnsafeRawBufferPointer) -> Digest {
+            Digest(output: BLAKE3Core.rootOutputParallel(
+                input,
+                key: BLAKE3Core.iv,
+                flags: 0,
+                maxWorkers: nil,
+                scheduler: scheduler,
+                workspace: &workspace
+            ))
+        }
+
+        func hashParallel(_ input: UnsafeRawBufferPointer, maxWorkers: Int?) -> Digest {
+            Digest(output: BLAKE3Core.rootOutputParallel(
+                input,
+                key: BLAKE3Core.iv,
+                flags: 0,
+                maxWorkers: maxWorkers ?? self.maxWorkers,
+                scheduler: scheduler,
+                workspace: &workspace
+            ))
+        }
+    }
+
     /// Default backend policy used by ``hash(_:)``.
     public enum BackendPolicy: String, Sendable {
         /// Chooses the fastest built-in path for the input and host.
@@ -170,7 +203,7 @@ public enum BLAKE3 {
     /// The buffer only needs to remain valid for the duration of this call.
     public static func hashCPU(_ input: UnsafeRawBufferPointer) -> Digest {
         withDefaultCPUContext { context in
-            context.hash(input, mode: .automatic)
+            context.hashAutomatic(input)
         }
     }
 
@@ -226,19 +259,19 @@ public enum BLAKE3 {
         maxWorkers: Int? = nil
     ) -> Digest {
         withCPUContext(maxWorkers: maxWorkers) { context in
-            context.hash(input, mode: .parallel(maxWorkers: maxWorkers))
+            context.hashParallel(input, maxWorkers: maxWorkers)
         }
     }
 
     private static func withDefaultCPUContext<T>(
-        _ body: (Context) -> T
+        _ body: (ThreadLocalCPUContext) -> T
     ) -> T {
         withCPUContext(maxWorkers: nil, body)
     }
 
     private static func withCPUContext<T>(
         maxWorkers: Int?,
-        _ body: (Context) -> T
+        _ body: (ThreadLocalCPUContext) -> T
     ) -> T {
         let threadDictionary = Thread.current.threadDictionary
         let key: String = if let maxWorkers {
@@ -247,11 +280,11 @@ public enum BLAKE3 {
             defaultCPUContextThreadDictionaryKey
         }
 
-        if let context = threadDictionary[key] as? Context {
+        if let context = threadDictionary[key] as? ThreadLocalCPUContext {
             return body(context)
         }
 
-        let context = Context(maxWorkers: maxWorkers)
+        let context = ThreadLocalCPUContext(maxWorkers: maxWorkers)
         threadDictionary[key] = context
         return body(context)
     }

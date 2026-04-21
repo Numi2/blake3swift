@@ -12,23 +12,23 @@ Unless noted otherwise, the numbers below are medians from local release runs on
 
 | Input | Official C one-shot | Swift scalar | Swift SIMD4 | Swift SIMD4 as % of C |
 | --- | ---: | ---: | ---: | ---: |
-| 16 MiB | 2.23 | 1.15 | 1.79 | 80% |
-| 64 MiB | 2.19 | 1.15 | 1.77 | 81% |
-| 256 MiB | 2.20 | 1.16 | 1.80 | 82% |
-| 512 MiB | 2.19 | 1.16 | 1.79 | 82% |
-| 1 GiB | 2.19 | 1.16 | 1.80 | 82% |
+| 16 MiB | 2.27 | 1.17 | 1.84 | 81% |
+| 64 MiB | 2.24 | 1.17 | 1.80 | 80% |
+| 256 MiB | 2.21 | 1.17 | 1.80 | 81% |
+| 512 MiB | 2.20 | 1.17 | 1.79 | 81% |
+| 1 GiB | 2.20 | 1.17 | 1.79 | 81% |
 
-On this machine, the fastest pure Swift one-shot CPU path in the promoted artifact is the SIMD4 implementation at `1.77` to `1.80 GiB/s`, which is about `80%` to `82%` of the vendored official C one-shot. That is the fairest benchmark in this README for judging the core implementation itself. It is not a claim about threaded upstream C, other compilers, or other hardware.
+On this machine, the fastest pure Swift one-shot CPU path in the promoted artifact is the SIMD4 implementation at `1.79` to `1.84 GiB/s`, which is about `80%` to `81%` of the vendored official C one-shot. That is the fairest benchmark in this README for judging the core implementation itself. It is not a claim about threaded upstream C, other compilers, or other hardware.
 
 ### Detailed Engineering Results
 
-The table below keeps the current promoted higher-level and accelerator rows. The `CPU parallel`, public `BLAKE3.hash(input)` row, `resident`, `private`, `wrapped`, and `staged` values come from `benchmarks/results/20260419T-readme-flatkernels-current`, which is the last broad publication-style sweep kept in the README. The `end-to-end` row comes from the later focused artifact `benchmarks/results/20260421T-e2e-record`, because that timing class changed after the broad sweep.
+The table below keeps the current promoted higher-level and accelerator rows. The `CPU parallel` values now come from the focused validated CPU artifact `benchmarks/results/20260421T-cpu-parallel-parent-cutoff-2048-focused`, which confirms the lowered parent-reduction cutoff on the larger publication sizes. The public `BLAKE3.hash(input)` values remain from `benchmarks/results/20260421T-cpu-parallel-task-partition`, which is still the cleaner automatic-dispatch reference across the displayed sizes. The Metal `resident`, `private`, `wrapped`, and `staged` values still come from `benchmarks/results/20260419T-readme-flatkernels-current`, and the `end-to-end` row comes from the focused artifact `benchmarks/results/20260421T-e2e-record`.
 
 | Input | Swift CPU parallel | Public `BLAKE3.hash(input)` | Metal end-to-end GPU | Metal resident GPU | Metal private GPU | Metal wrapped GPU | Metal staged GPU |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 64 MiB | 9.91 | 17.86 | 17.69 | 33.38 | 40.52 | 30.31 | 13.95 |
-| 256 MiB | 10.78 | 33.21 | 15.48 | 51.90 | 57.43 | 45.50 | 19.91 |
-| 1 GiB | 11.52 | 41.87 | 18.56 | 63.15 | 59.21 | 34.00 | 23.95 |
+| 64 MiB | 11.77 | 22.01 | 17.69 | 33.38 | 40.52 | 30.31 | 13.95 |
+| 256 MiB | 12.10 | 41.18 | 15.48 | 51.90 | 57.43 | 45.50 | 19.91 |
+| 1 GiB | 12.34 | 47.13 | 18.56 | 63.15 | 59.21 | 34.00 | 23.95 |
 
 Timing-class notes:
 
@@ -39,27 +39,27 @@ Timing-class notes:
 
 ### Original Publication Layout
 
-The following tables restore the broader publication-style layout from `benchmarks/results/20260419T-readme-flatkernels-current`. They are included here for readers who want the full sweep in the older format rather than the compressed engineering summary above.
+The following tables keep the broader publication-style layout while mixing promoted artifacts by timing class: the apples-to-apples serial CPU rows now come from `benchmarks/results/20260421T-cpu-parallel-parent-cutoff-2048`, the `16 MiB` CPU-parallel/context row also comes from that broad artifact, the `64 MiB` to `1 GiB` CPU-parallel/context rows come from `benchmarks/results/20260421T-cpu-parallel-parent-cutoff-2048-focused`, the public automatic row remains from `benchmarks/results/20260421T-cpu-parallel-task-partition`, and the Metal timing-class rows remain from `benchmarks/results/20260419T-readme-flatkernels-current`.
 
 CPU buffer hashing:
 
 | Input | Official C one-shot | Swift scalar | Swift SIMD4 | Swift CPU parallel | CPU context-auto |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 16 MiB | 2.23 | 1.15 | 1.79 | 8.72 | 9.15 |
-| 64 MiB | 2.19 | 1.15 | 1.77 | 9.91 | 9.92 |
-| 256 MiB | 2.20 | 1.16 | 1.80 | 10.78 | 10.61 |
-| 512 MiB | 2.19 | 1.16 | 1.79 | 11.12 | 11.00 |
-| 1 GiB | 2.19 | 1.16 | 1.80 | 11.52 | 11.58 |
+| 16 MiB | 2.27 | 1.17 | 1.84 | 10.39 | 10.04 |
+| 64 MiB | 2.24 | 1.17 | 1.80 | 11.77 | 11.71 |
+| 256 MiB | 2.21 | 1.17 | 1.80 | 12.10 | 12.27 |
+| 512 MiB | 2.20 | 1.17 | 1.79 | 12.27 | 12.29 |
+| 1 GiB | 2.20 | 1.17 | 1.79 | 12.34 | 12.27 |
 
 Public API and cross-algorithm baseline:
 
 | Input | Public `BLAKE3.hash(input)` | CryptoKit SHA-256 |
 | --- | ---: | ---: |
-| 16 MiB | 9.65 | 2.78 |
-| 64 MiB | 17.86 | 2.90 |
-| 256 MiB | 33.21 | 2.94 |
-| 512 MiB | 35.22 | 2.92 |
-| 1 GiB | 41.87 | 2.87 |
+| 16 MiB | 9.23 | 2.78 |
+| 64 MiB | 22.01 | 2.90 |
+| 256 MiB | 41.18 | 2.94 |
+| 512 MiB | 47.84 | 2.92 |
+| 1 GiB | 47.13 | 2.87 |
 
 Metal timing classes:
 

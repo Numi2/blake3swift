@@ -15,7 +15,10 @@ enum BLAKE3Core {
     static let simdMinBytes = 16 * 1_024
     static let serialArrayMinBytes = 16 * 1_024
     static let parallelMinBytes = 96 * 1_024
-    static let parallelParentMinCount = 4_096
+    static let parallelParentMinCount = 2_048
+    static let parallelTasksPerWorker = 8
+    static let parallelChunkMinItemsPerTask = 16
+    static let parallelParentMinItemsPerTask = 16
     static let persistentSchedulerMinBytes = 16 * 1_024 * 1_024
     static let defaultParallelWorkerCount = detectedDefaultParallelWorkerCount()
     static let defaultParallelScheduler = ParallelScheduler(workerCount: defaultParallelWorkerCount)
@@ -1150,13 +1153,18 @@ enum BLAKE3Core {
             requested: maxWorkers ?? scheduler?.workerCount,
             workItems: chunkCount
         )
-        let chunksPerWorker = (chunkCount + workerCount - 1) / workerCount
+        let taskCount = partitionTaskCount(
+            workItems: chunkCount,
+            workerCount: workerCount,
+            minItemsPerTask: parallelChunkMinItemsPerTask
+        )
+        let chunksPerTask = (chunkCount + taskCount - 1) / taskCount
         let fullChunkCount = input.count / chunkLen
         let inputBytes = SendableRawBuffer(baseAddress: baseAddress, count: input.count)
 
         output = Array(unsafeUninitializedCapacity: chunkCount) { outputBuffer, initializedCount in
             let outputStorage = SendableCVStorage(baseAddress: outputBuffer.baseAddress!)
-            if workerCount == 1 {
+            if taskCount == 1 {
                 writeChunkChainingValueRange(
                     start: 0,
                     end: chunkCount,
@@ -1168,9 +1176,9 @@ enum BLAKE3Core {
                     output: outputStorage
                 )
             } else {
-                parallelPerform(iterations: workerCount, scheduler: scheduler) { workerIndex in
-                    let start = workerIndex * chunksPerWorker
-                    let end = min(chunkCount, start + chunksPerWorker)
+                parallelPerform(iterations: taskCount, scheduler: scheduler) { taskIndex in
+                    let start = taskIndex * chunksPerTask
+                    let end = min(chunkCount, start + chunksPerTask)
                     guard start < end else {
                         return
                     }
@@ -1294,13 +1302,18 @@ enum BLAKE3Core {
                     requested: maxWorkers ?? scheduler?.workerCount,
                     workItems: parentCount
                 )
-                let parentsPerWorker = (parentCount + workerCount - 1) / workerCount
+                let taskCount = partitionTaskCount(
+                    workItems: parentCount,
+                    workerCount: workerCount,
+                    minItemsPerTask: parallelParentMinItemsPerTask
+                )
+                let parentsPerTask = (parentCount + taskCount - 1) / taskCount
                 current.withUnsafeBufferPointer { currentBuffer in
                     let currentInput = SendableCVInput(baseAddress: currentBuffer.baseAddress!)
                     let nextStorage = SendableCVStorage(baseAddress: nextBuffer.baseAddress!)
-                    parallelPerform(iterations: workerCount, scheduler: scheduler) { workerIndex in
-                        let start = workerIndex * parentsPerWorker
-                        let end = min(parentCount, start + parentsPerWorker)
+                    parallelPerform(iterations: taskCount, scheduler: scheduler) { taskIndex in
+                        let start = taskIndex * parentsPerTask
+                        let end = min(parentCount, start + parentsPerTask)
                         guard start < end else {
                             return
                         }
@@ -1372,6 +1385,22 @@ enum BLAKE3Core {
     private static func clampedWorkerCount(requested: Int?, workItems: Int) -> Int {
         let workers = normalizedParallelWorkerCount(requested)
         return max(1, min(workers, workItems))
+    }
+
+    private static func partitionTaskCount(
+        workItems: Int,
+        workerCount: Int,
+        minItemsPerTask: Int
+    ) -> Int {
+        guard workItems > 1, workerCount > 1 else {
+            return 1
+        }
+        let maxTaskCount = min(
+            workItems,
+            max(workerCount, workerCount * parallelTasksPerWorker)
+        )
+        let boundedByWorkSize = max(1, workItems / max(1, minItemsPerTask))
+        return max(1, min(maxTaskCount, boundedByWorkSize))
     }
 
     static func defaultScheduler(forByteCount byteCount: Int, maxWorkers: Int?) -> ParallelScheduler? {

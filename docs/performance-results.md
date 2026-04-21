@@ -41,6 +41,125 @@ Interpretation:
 - On this local M4, `10` workers remained the best explicit worker count for large inputs after rerunning the sweep cleanly; lower worker counts lost too much at `256 MiB` and `1 GiB`.
 - The improvement is durable enough to keep in code, but it did not beat the existing promoted README CPU-parallel rows across all sizes cleanly enough to justify a README table rewrite from this run alone.
 
+Follow-up refinement:
+
+- The internal one-shot reuse path now uses a private thread-local scheduler/workspace holder instead of routing through the public `BLAKE3.Context` object, so the fast path no longer pays `Context`'s `NSLock` overhead when there is no cross-thread sharing.
+
+Focused validation command:
+
+```sh
+./.build/release/blake3-bench --sizes 256m,512m,1g --iterations 5 --metal-modes none --cryptokit-modes none --cpu-workers 10
+```
+
+Validated medians from that follow-up:
+
+| Input | CPU parallel-10 |
+| --- | ---: |
+| 256 MiB | 10.62 |
+| 512 MiB | 11.45 |
+| 1 GiB | 11.72 |
+
+This follow-up kept the large-input row above the previous promoted `1 GiB` CPU-parallel README number and improved the `512 MiB` band as well, but `256 MiB` still did not clear the existing published median, so the README remained unchanged.
+
+Rejected follow-ups from the same CPU track:
+
+- Raising `parallelParentMinCount` from `4_096` to `16_384` regressed the medium and large parallel rows. A focused `256 MiB`, `512 MiB`, `1 GiB` `parallel-10` rerun fell to 9.42/10.85/11.38 GiB/s, so the higher cutoff was reverted.
+- Slight worker oversubscription did not help. In a 7-iteration `256 MiB`, `512 MiB`, `1 GiB` sweep, `parallel-11` landed at 9.24/10.93/10.89 GiB/s and `parallel-12` at 9.68/10.18/11.58 GiB/s, both weaker overall than `parallel-10`.
+
+## April 21, 2026 CPU Parallel Task Partition Promotion
+
+Promoted artifact:
+
+```sh
+benchmarks/results/20260421T-cpu-parallel-task-partition
+```
+
+This follow-up keeps the lock-free thread-local CPU fast path and changes the internal CPU parallel scheduler shape: chunk-CV generation and parent reduction now split work into more tasks than workers, with minimum per-task work sizes, instead of handing one fixed range to each worker. On local Apple silicon this improves the medium and large CPU-parallel rows without changing the BLAKE3 tree shape or correctness contract.
+
+Validated median GiB/s from `report.json`:
+
+| Input | Official C one-shot | Swift scalar | Swift SIMD4 | Swift CPU parallel | CPU context-auto | Public `BLAKE3.hash(input)` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 MiB | 2.16 | 1.14 | 1.71 | 9.72 | 9.74 | 9.23 |
+| 64 MiB | 2.16 | 1.15 | 1.75 | 10.83 | 10.86 | 22.01 |
+| 256 MiB | 2.15 | 1.15 | 1.75 | 11.30 | 11.27 | 41.18 |
+| 512 MiB | 2.17 | 1.13 | 1.75 | 11.52 | 11.54 | 47.84 |
+| 1 GiB | 2.17 | 1.15 | 1.75 | 11.57 | 11.75 | 47.13 |
+
+Interpretation:
+
+- `Swift CPU parallel` now clears the prior published CPU-parallel medians across the whole promoted size set.
+- `Public BLAKE3.hash(input)` improved materially at and above the 64 MiB threshold because the stronger CPU-parallel path feeds the automatic dispatcher before Metal takes over the larger sizes.
+- The serial apples-to-apples baseline stayed in the same `~1.7` to `1.8 GiB/s` band, so this promotion is about the real Swift fast path, not a change in the fairness baseline.
+- An early version of this experiment accidentally allowed the `maxWorkers == 1` path to split into parallel tasks; that bug was fixed before the promoted artifact was recorded.
+
+## April 21, 2026 CPU Parallel Task Partition Retune
+
+Promoted follow-up artifact:
+
+```sh
+benchmarks/results/20260421T-cpu-parallel-task-partition-v2
+```
+
+This retune keeps the same task-partition architecture but changes the constants to `parallelTasksPerWorker = 8` and `parallelChunkMinItemsPerTask = parallelParentMinItemsPerTask = 16`. On the local M4 that produced another clean step up in the CPU-parallel path while keeping the serial apples-to-apples baseline stable.
+
+Validated median GiB/s from `report.json`:
+
+| Input | Official C one-shot | Swift scalar | Swift SIMD4 | Swift CPU parallel | CPU context-auto | Public `BLAKE3.hash(input)` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 MiB | 2.18 | 1.14 | 1.73 | 10.06 | 10.03 | 9.70 |
+| 64 MiB | 2.18 | 1.15 | 1.77 | 11.30 | 11.30 | 17.62 |
+| 256 MiB | 2.17 | 1.15 | 1.76 | 11.82 | 11.88 | 45.93 |
+| 512 MiB | 2.17 | 1.15 | 1.75 | 12.08 | 12.06 | 51.50 |
+| 1 GiB | 2.17 | 1.15 | 1.76 | 12.05 | 12.01 | 34.30 |
+
+Interpretation:
+
+- `Swift CPU parallel` now clears `12 GiB/s` at `512 MiB` and remains just above `12 GiB/s` at `1 GiB`, while materially improving the stubborn `256 MiB` row to `11.82 GiB/s`.
+- `CPU context-auto` stays in essentially the same high band, which is what we want because the internal one-shot fast path and the explicit reusable-context path are now structurally similar.
+- The public automatic path improved at `256 MiB` and `512 MiB`, but it remained noisier and more timing-class-sensitive at `64 MiB` and `1 GiB`, so this retune is promoted mainly as a CPU-parallel result rather than a blanket replacement for every default-auto README row.
+
+## April 21, 2026 CPU Parallel Parent Cutoff 2048
+
+Promoted broad artifact:
+
+```sh
+benchmarks/results/20260421T-cpu-parallel-parent-cutoff-2048
+```
+
+Focused confirmation artifact:
+
+```sh
+benchmarks/results/20260421T-cpu-parallel-parent-cutoff-2048-focused
+```
+
+This follow-up keeps the promoted task-partition retune but lowers `parallelParentMinCount` from `4_096` to `2_048`, letting parent reduction remain parallel slightly deeper into the tree. On the local M4 that raised the medium and large CPU rows again without changing the serial one-shot SIMD path or the hashing contract.
+
+Validated median GiB/s from the broad `report.json`:
+
+| Input | Official C one-shot | Swift scalar | Swift SIMD4 | Swift CPU parallel | CPU context-auto | Public `BLAKE3.hash(input)` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 MiB | 2.27 | 1.17 | 1.84 | 10.39 | 10.04 | 9.30 |
+| 64 MiB | 2.24 | 1.17 | 1.80 | 10.83 | 11.79 | 14.62 |
+| 256 MiB | 2.21 | 1.17 | 1.80 | 12.38 | 12.20 | 46.19 |
+| 512 MiB | 2.20 | 1.17 | 1.79 | 12.42 | 12.34 | 58.27 |
+| 1 GiB | 2.20 | 1.17 | 1.79 | 12.38 | 12.30 | 59.40 |
+
+Focused confirmation median GiB/s from the large-size `report.json`:
+
+| Input | Official C one-shot | Swift scalar | Swift SIMD4 | Swift CPU parallel-10 | CPU context-auto | Public `BLAKE3.hash(input)` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 64 MiB | 2.23 | 1.17 | 1.86 | 11.77 | 11.71 | 14.68 |
+| 256 MiB | 2.22 | 1.17 | 1.81 | 12.10 | 12.27 | 40.01 |
+| 512 MiB | 2.20 | 1.17 | 1.80 | 12.27 | 12.29 | 58.10 |
+| 1 GiB | 2.20 | 1.17 | 1.79 | 12.34 | 12.27 | 59.38 |
+
+Interpretation:
+
+- Lowering the parent-reduction parallel cutoff is a durable CPU win. The broad run clears `12 GiB/s` from `256 MiB` upward, and the focused follow-up confirms that the large-input band remains in the `12.1` to `12.3 GiB/s` range while recovering `64 MiB` to `11.77 GiB/s`.
+- The serial apples-to-apples Swift baseline also moved up slightly in this code state, with `single-simd` now landing around `1.79` to `1.86 GiB/s`, still well below the multi-threaded fast path but stronger than the earlier same-day broad runs.
+- The public automatic row remains too sensitive to run order and automatic CPU/GPU dispatch to promote as a clean replacement for the README default-auto reference, so this promotion is scoped to the CPU-parallel and CPU-context rows.
+
 ## April 21, 2026 Digest-Only Metal Fast Path Recovery
 
 Primary overhead-recovery artifact:
