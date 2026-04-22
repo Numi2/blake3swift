@@ -55,6 +55,7 @@ private enum MetalTimingMode: String {
 #endif
 
 private enum FileTimingMode: String {
+    case automatic
     case read
     case memoryMapped = "mmap"
     case memoryMappedParallel = "mmap-parallel"
@@ -66,6 +67,8 @@ private enum FileTimingMode: String {
 
     var description: String {
         switch self {
+        case .automatic:
+            return "timed BLAKE3File.hash(path:) automatic strategy; regular files may select staged Metal hashing or bounded CPU mmap based on the default backend policy and size gate"
         case .read:
             return "timed file open/stat, two-buffer bounded read loop, overlapped CPU subtree reductions for regular files, finalize, close; benchmark file creation excluded"
         case .memoryMapped:
@@ -269,6 +272,8 @@ private func fileTimingModes() -> [FileTimingMode] {
 
     let modes = tokens.compactMap { token -> FileTimingMode? in
         switch token {
+        case "automatic", "auto", "default":
+            return .automatic
         case "read", "stream", "streaming":
             return .read
         case "mmap", "memory-mapped", "mapped":
@@ -3461,6 +3466,21 @@ for size in requestedSizes {
                 }
             }
 
+            if requestedFileTimingModes.contains(.automatic) {
+                let strategy = BLAKE3File.Strategy.automatic
+                fileResults.append(
+                    try runFileBenchmark(
+                        backend: "blake3-file",
+                        mode: "automatic",
+                        path: path,
+                        byteCount: size,
+                        iterations: iterations
+                    ) { path in
+                        try BLAKE3File.hash(path: path, strategy: strategy)
+                    }
+                )
+                try appendFileOperationRows(backend: "blake3-file", modePrefix: "automatic", strategy: strategy)
+            }
             if requestedFileTimingModes.contains(.read) {
                 let strategy = BLAKE3File.Strategy.read()
                 fileResults.append(

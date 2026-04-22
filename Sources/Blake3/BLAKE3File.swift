@@ -24,6 +24,9 @@ public enum BLAKE3File {
     /// Default tile size used by staged Metal read paths.
     public static let metalStagedReadTileByteCount = 32 * 1024 * 1024
 
+    /// Minimum regular-file size where the automatic strategy may prefer staged Metal hashing.
+    public static let automaticMetalMinimumByteCount = 128 * 1024 * 1024
+
     private struct HashMode: Sendable {
         let key: BLAKE3Core.ChainingValue
         let flags: UInt32
@@ -39,7 +42,11 @@ public enum BLAKE3File {
 
     /// File hashing strategy.
     public enum Strategy: Equatable, Sendable {
-        /// Chooses the bounded memory-mapped CPU path with read fallback.
+        /// Chooses the fastest built-in regular-file path for the current default backend policy.
+        ///
+        /// CPU-only processes use the bounded memory-mapped CPU path with read fallback. When the
+        /// default backend policy allows Metal and a regular file meets the default Metal size gate,
+        /// this prefers staged Metal file hashing with CPU fallback.
         case automatic
         /// Streams the file through bounded reusable read buffers.
         case read(bufferSize: Int = BLAKE3File.readTileByteCount)
@@ -177,6 +184,37 @@ public enum BLAKE3File {
         strategy: Strategy = .automatic
     ) async throws -> BLAKE3.Digest {
         try Task.checkCancellation()
+        if case .automatic = strategy {
+            #if canImport(Metal)
+            if shouldUseMetalAutomaticFileStrategy(path: path) {
+                let output = try await Task.detached {
+                    try hashMetalStagedRead(
+                        path: path,
+                        tileByteCount: BLAKE3File.metalStagedReadTileByteCount,
+                        fallbackToCPU: true,
+                        librarySource: .runtimeSource,
+                        mode: .unkeyed,
+                        outputByteCount: BLAKE3.digestByteCount,
+                        seek: 0,
+                        cancellationCheck: { try Task.checkCancellation() }
+                    )
+                }.value
+                return try digest(from: output)
+            }
+            #endif
+
+            return try await Task.detached {
+                try hash(
+                    path: path,
+                    strategy: .memoryMappedParallel(maxThreads: nil),
+                    mode: .unkeyed,
+                    outputByteCount: BLAKE3.digestByteCount,
+                    seek: 0,
+                    cancellationCheck: { try Task.checkCancellation() }
+                )
+            }.value
+        }
+
         #if canImport(Metal)
         if case let .metalMemoryMapped(policy, fallbackToCPU, librarySource) = strategy {
             return try await hashMetalMappedAsync(
@@ -259,6 +297,20 @@ public enum BLAKE3File {
         }
         switch strategy {
         case .automatic:
+            #if canImport(Metal)
+            if shouldUseMetalAutomaticFileStrategy(path: path) {
+                return try hashMetalStagedRead(
+                    path: path,
+                    tileByteCount: BLAKE3File.metalStagedReadTileByteCount,
+                    fallbackToCPU: true,
+                    librarySource: .runtimeSource,
+                    mode: mode,
+                    outputByteCount: outputByteCount,
+                    seek: seek,
+                    cancellationCheck: cancellationCheck
+                )
+            }
+            #endif
             return try hashMapped(
                 path: path,
                 fallbackToRead: true,
@@ -1591,6 +1643,30 @@ public enum BLAKE3File {
         _ = fcntl(fd, F_RDAHEAD, 1)
         #endif
     }
+
+    #if canImport(Metal)
+    private static func shouldUseMetalAutomaticFileStrategy(path: String) -> Bool {
+        guard BLAKE3.defaultBackendPolicy != .cpu else {
+            return false
+        }
+
+        var info = stat()
+        let status = path.withCString { fileSystemPath in
+            stat(fileSystemPath, &info)
+        }
+        guard status == 0,
+              isRegularFile(mode: info.st_mode),
+              info.st_size > 0,
+              info.st_size <= off_t(Int.max)
+        else {
+            return false
+        }
+
+        let minimumByteCount = max(BLAKE3.defaultMetalMinimumByteCount, automaticMetalMinimumByteCount)
+        return Int(info.st_size) >= minimumByteCount
+    }
+    #endif
+
 
     private static func withMappedRegion<R>(
         path: String,
