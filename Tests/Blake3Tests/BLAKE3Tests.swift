@@ -1812,19 +1812,23 @@ final class BLAKE3Tests: XCTestCase {
         )
         XCTAssertEqual(BLAKE3Metal._debugXOFCommandFamily(), .generic)
 
-        let expectedKeyed = try BLAKE3.keyedHash(key: key, input: input)
+        let expectedKeyed = officialKeyedDigest(key: key, input: input)
         XCTAssertEqual(
             try BLAKE3Metal.keyedHash(key: key, input: input, policy: .gpu),
             expectedKeyed
         )
 
-        let expectedDerived = try BLAKE3.deriveKey(context: contextString, material: input)
+        let expectedDerived = officialDerivedBytes(
+            context: contextString,
+            material: input,
+            outputByteCount: BLAKE3.digestByteCount
+        )
         XCTAssertEqual(
             try BLAKE3Metal.deriveKey(context: contextString, material: input, policy: .gpu),
             expectedDerived
         )
 
-        let expectedXOF = try BLAKE3.hash(input, outputByteCount: 97)
+        let expectedXOF = officialXOFBytes(input: input, outputByteCount: 97)
         XCTAssertEqual(
             try BLAKE3Metal.hash(input: input, outputByteCount: 97, policy: .gpu),
             expectedXOF
@@ -1854,14 +1858,7 @@ final class BLAKE3Tests: XCTestCase {
             device.makeBuffer(bytes: raw.baseAddress!, length: raw.count, options: .storageModeShared)
         })
         let expected = ranges.map { range in
-            input.withUnsafeBytes { raw in
-                BLAKE3.hash(
-                    UnsafeRawBufferPointer(
-                        start: raw.baseAddress!.advanced(by: range.lowerBound),
-                        count: range.count
-                    )
-                )
-            }
+            officialDigest(Array(input[range]))
         }
 
         XCTAssertEqual(
@@ -2247,14 +2244,7 @@ final class BLAKE3Tests: XCTestCase {
             device.makeBuffer(bytes: raw.baseAddress!, length: raw.count, options: .storageModeShared)
         })
         let prefixedFullChunkExpected = prefixedFullChunkRanges.map { range in
-            prefixedFullChunkInput.withUnsafeBytes { raw in
-                BLAKE3.hash(
-                    UnsafeRawBufferPointer(
-                        start: raw.baseAddress!.advanced(by: range.lowerBound),
-                        count: range.count
-                    )
-                )
-            }
+            officialDigest(Array(prefixedFullChunkInput[range]))
         }
         let prefixedFullChunkPlan = try context.makeOneChunkBatchPlan(
             buffer: prefixedFullChunkBuffer,
@@ -2316,26 +2306,10 @@ final class BLAKE3Tests: XCTestCase {
 
         let key = deterministicInput(byteCount: BLAKE3.keyByteCount)
         let expectedKeyed = ranges.map { range in
-            input.withUnsafeBytes { raw in
-                try! BLAKE3.keyedHash(
-                    key: key,
-                    input: UnsafeRawBufferPointer(
-                        start: raw.baseAddress!.advanced(by: range.lowerBound),
-                        count: range.count
-                    )
-                )
-            }
+            officialKeyedDigest(key: key, input: Array(input[range]))
         }
         let fullChunkExpectedKeyed = fullChunkRanges.map { range in
-            fullChunkInput.withUnsafeBytes { raw in
-                try! BLAKE3.keyedHash(
-                    key: key,
-                    input: UnsafeRawBufferPointer(
-                        start: raw.baseAddress!.advanced(by: range.lowerBound),
-                        count: range.count
-                    )
-                )
-            }
+            officialKeyedDigest(key: key, input: Array(fullChunkInput[range]))
         }
         XCTAssertEqual(
             try context.keyedHashOneChunkBatch(key: key, buffer: buffer, ranges: ranges),
@@ -2542,7 +2516,7 @@ final class BLAKE3Tests: XCTestCase {
 
         for size in sizes {
             let input = deterministicInput(byteCount: size)
-            let expected = try BLAKE3.keyedHash(key: key, input: input)
+            let expected = officialKeyedDigest(key: key, input: input)
 
             XCTAssertEqual(
                 try BLAKE3Metal.keyedHash(key: key, input: input, policy: .gpu),
@@ -2583,9 +2557,11 @@ final class BLAKE3Tests: XCTestCase {
 
         for outputSize in outputSizes {
             for seek in seeks {
-                var unkeyedHasher = BLAKE3.Hasher()
-                unkeyedHasher.update(input)
-                let expected = xofBytes(from: unkeyedHasher, count: outputSize, seek: seek)
+                let expected = officialXOFBytes(
+                    input: input,
+                    outputByteCount: outputSize,
+                    seek: seek
+                )
                 XCTAssertEqual(
                     try BLAKE3Metal.hash(
                         input: input,
@@ -2597,9 +2573,12 @@ final class BLAKE3Tests: XCTestCase {
                     "unkeyed GPU XOF mismatch for outputSize=\(outputSize), seek=\(seek)"
                 )
 
-                var keyedHasher = try BLAKE3.Hasher(key: key)
-                keyedHasher.update(input)
-                let expectedKeyed = xofBytes(from: keyedHasher, count: outputSize, seek: seek)
+                let expectedKeyed = officialKeyedXOFBytes(
+                    key: key,
+                    input: input,
+                    outputByteCount: outputSize,
+                    seek: seek
+                )
                 XCTAssertEqual(
                     try BLAKE3Metal.keyedHash(
                         key: key,
@@ -2621,9 +2600,11 @@ final class BLAKE3Tests: XCTestCase {
                 byteCount: input.count
             )
         }
-        var unkeyedHasher = BLAKE3.Hasher()
-        unkeyedHasher.update(input)
-        let expectedResidentXOF = xofBytes(from: unkeyedHasher, count: 513, seek: 17)
+        let expectedResidentXOF = officialXOFBytes(
+            input: input,
+            outputByteCount: 513,
+            seek: 17
+        )
         XCTAssertEqual(
             try context.hash(
                 buffer: buffer,
@@ -2715,9 +2696,11 @@ final class BLAKE3Tests: XCTestCase {
             BLAKE3.hashCPU(expectedResidentXOF)
         )
 
-        var largeOutputHasher = BLAKE3.Hasher()
-        largeOutputHasher.update(input)
-        let expectedLargeResidentXOF = xofBytes(from: largeOutputHasher, count: 4_096, seek: 17)
+        let expectedLargeResidentXOF = officialXOFBytes(
+            input: input,
+            outputByteCount: 4_096,
+            seek: 17
+        )
         let largePrivateOutputBuffer = try XCTUnwrap(device.makeBuffer(length: 4_096, options: .storageModePrivate))
         XCTAssertEqual(
             try context.writeXOFAndHashOutput(
@@ -2731,9 +2714,12 @@ final class BLAKE3Tests: XCTestCase {
             BLAKE3.hashCPU(expectedLargeResidentXOF)
         )
 
-        var keyedHasher = try BLAKE3.Hasher(key: key)
-        keyedHasher.update(input)
-        let expectedResidentKeyedXOF = xofBytes(from: keyedHasher, count: 513, seek: 17)
+        let expectedResidentKeyedXOF = officialKeyedXOFBytes(
+            key: key,
+            input: input,
+            outputByteCount: 513,
+            seek: 17
+        )
         XCTAssertEqual(
             try context.keyedHash(
                 key: key,
@@ -2832,9 +2818,12 @@ final class BLAKE3Tests: XCTestCase {
 
         for outputSize in outputSizes {
             for seek in seeks {
-                var hasher = BLAKE3.Hasher(deriveKeyContext: kdfContext)
-                hasher.update(input)
-                let expected = xofBytes(from: hasher, count: outputSize, seek: seek)
+                let expected = officialDerivedBytes(
+                    context: kdfContext,
+                    material: input,
+                    outputByteCount: outputSize,
+                    seek: seek
+                )
 
                 XCTAssertEqual(
                     try BLAKE3Metal.deriveKey(
@@ -2868,9 +2857,12 @@ final class BLAKE3Tests: XCTestCase {
                 byteCount: input.count
             )
         }
-        var hasher = BLAKE3.Hasher(deriveKeyContext: kdfContext)
-        hasher.update(input)
-        let expectedResidentDerived = xofBytes(from: hasher, count: 513, seek: 17)
+        let expectedResidentDerived = officialDerivedBytes(
+            context: kdfContext,
+            material: input,
+            outputByteCount: 513,
+            seek: 17
+        )
         XCTAssertEqual(
             try metalContext.deriveKey(
                 context: kdfContext,
@@ -2977,7 +2969,7 @@ final class BLAKE3Tests: XCTestCase {
             )
         }
 
-        XCTAssertEqual(digest, BLAKE3.hash(input))
+        XCTAssertEqual(digest, officialDigest(input))
     }
 
     func testMetalAsyncHashMatchesSynchronousPaths() async throws {
@@ -2987,7 +2979,7 @@ final class BLAKE3Tests: XCTestCase {
         let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
         let context = try BLAKE3Metal.makeContext(device: device)
         let input = deterministicInput(byteCount: 2 * 1_024 * 1_024 + 333)
-        let expected = BLAKE3.hash(input)
+        let expected = officialDigest(input)
         let buffer = try XCTUnwrap(input.withUnsafeBytes { raw in
             device.makeBuffer(bytes: raw.baseAddress!, length: raw.count, options: .storageModeShared)
         })
@@ -3023,7 +3015,7 @@ final class BLAKE3Tests: XCTestCase {
             deterministicInput(byteCount: 3 * 1_024 * 1_024 + 17),
             deterministicInput(byteCount: 3 * 1_024 * 1_024 + 777)
         ]
-        let expected = inputs.map { BLAKE3.hash($0) }
+        let expected = inputs.map(officialDigest)
         let cases = try inputs.enumerated().map { index, input in
             let buffer = try XCTUnwrap(input.withUnsafeBytes { raw in
                 device.makeBuffer(bytes: raw.baseAddress!, length: raw.count, options: .storageModeShared)
@@ -3061,7 +3053,7 @@ final class BLAKE3Tests: XCTestCase {
             deterministicInput(byteCount: 3 * 1_024 * 1_024 + 777)
         ]
         let inputCapacity = try XCTUnwrap(inputs.map(\.count).max())
-        let expected = inputs.map { BLAKE3.hash($0) }
+        let expected = inputs.map(officialDigest)
         let pipeline = try context.makeAsyncPipeline(
             inputCapacity: inputCapacity,
             inFlightCount: 2,
@@ -3100,7 +3092,7 @@ final class BLAKE3Tests: XCTestCase {
             [UInt8]()
         ]
         let inputCapacity = try XCTUnwrap(inputs.map(\.count).max())
-        let expected = inputs.map { BLAKE3.hash($0) }
+        let expected = inputs.map(officialDigest)
         let pipeline = try context.makeAsyncPipeline(
             inputCapacity: inputCapacity,
             inFlightCount: 2,
@@ -3204,6 +3196,67 @@ private func loadTestVectors() throws -> TestVectors {
 
 private func deterministicInput(byteCount: Int) -> [UInt8] {
     (0..<byteCount).map { UInt8($0 % 251) }
+}
+
+private func officialDigest(_ input: [UInt8]) -> BLAKE3.Digest {
+    input.withUnsafeBytes { OfficialCBLAKE3.hash($0) }
+}
+
+private func officialXOFBytes(
+    input: [UInt8],
+    outputByteCount: Int,
+    seek: UInt64 = 0
+) -> [UInt8] {
+    input.withUnsafeBytes {
+        OfficialCBLAKE3.hash($0, outputByteCount: outputByteCount, seek: seek)
+    }
+}
+
+private func officialKeyedDigest(
+    key: [UInt8],
+    input: [UInt8]
+) -> BLAKE3.Digest {
+    key.withUnsafeBytes { keyRaw in
+        input.withUnsafeBytes { inputRaw in
+            OfficialCBLAKE3.keyedHash(key: keyRaw, input: inputRaw)
+        }
+    }
+}
+
+private func officialKeyedXOFBytes(
+    key: [UInt8],
+    input: [UInt8],
+    outputByteCount: Int,
+    seek: UInt64 = 0
+) -> [UInt8] {
+    key.withUnsafeBytes { keyRaw in
+        input.withUnsafeBytes { inputRaw in
+            OfficialCBLAKE3.keyedHash(
+                key: keyRaw,
+                input: inputRaw,
+                outputByteCount: outputByteCount,
+                seek: seek
+            )
+        }
+    }
+}
+
+private func officialDerivedBytes(
+    context: String,
+    material: [UInt8],
+    outputByteCount: Int,
+    seek: UInt64 = 0
+) -> [UInt8] {
+    context.utf8CString.withUnsafeBytes { contextRaw in
+        material.withUnsafeBytes { materialRaw in
+            OfficialCBLAKE3.deriveKey(
+                context: UnsafeRawBufferPointer(rebasing: contextRaw.dropLast()),
+                material: materialRaw,
+                outputByteCount: outputByteCount,
+                seek: seek
+            )
+        }
+    }
 }
 
 private func withTemporaryDirectory<R>(
