@@ -726,6 +726,7 @@ public enum BLAKE3File {
             }
             let alignedTileByteCount = alignedMetalTileByteCount(tileByteCount)
             let tileChunkCapacity = max(1, alignedTileByteCount / BLAKE3.chunkByteCount)
+            let subtreeDecompositionChunkThreshold = configuredMetalMappedSubtreeDecompositionChunkThreshold()
             let context = try BLAKE3Metal.cachedContext(device: device, librarySource: librarySource)
             let chunkCVBuffer = try context.makeChunkChainingValueBuffer(chunkCapacity: tileChunkCapacity)
 
@@ -764,20 +765,20 @@ public enum BLAKE3File {
                         let completeChunkCount = completeChunkByteCount / BLAKE3.chunkByteCount
                         if !isFinalTile,
                            completeChunkByteCount == alignedTileByteCount,
-                           completeChunkCount.nonzeroBitCount == 1 {
-                            let cv = try await context.chunkSubtreeChainingValueAsync(
+                           (completeChunkCount.nonzeroBitCount == 1
+                               || completeChunkCount >= subtreeDecompositionChunkThreshold) {
+                            let entries = try await collectCompleteMetalChunkEntriesAsync(
+                                context: context,
                                 buffer: fileBuffer,
                                 range: chunkRange,
+                                chunkCount: completeChunkCount,
                                 baseChunkCounter: stack.finalizedChunkCount,
-                                mode: mode.metalMode
+                                chunkCVBuffer: chunkCVBuffer,
+                                subtreeDecompositionChunkThreshold: subtreeDecompositionChunkThreshold,
+                                mode: mode
                             )
                             try Task.checkCancellation()
-                            stack.pushSubtreeCV(
-                                cv,
-                                chunkCount: UInt64(completeChunkCount),
-                                key: mode.key,
-                                flags: mode.flags
-                            )
+                            pushMetalFileStackEntries(entries, into: &stack, mode: mode)
                         } else {
                             let chunkCount = try await context.writeChunkChainingValuesAsync(
                                 buffer: fileBuffer,
@@ -861,6 +862,7 @@ public enum BLAKE3File {
             let alignedTileByteCount = alignedMetalTileByteCount(tileByteCount)
             let tileChunkCapacity = max(1, alignedTileByteCount / BLAKE3.chunkByteCount)
             let mappedInflightCount = configuredMetalMappedInflightCount()
+            let subtreeDecompositionChunkThreshold = configuredMetalMappedSubtreeDecompositionChunkThreshold()
             let context = try BLAKE3Metal.cachedContext(device: device, librarySource: librarySource)
             let chunkCVBuffers = try (0..<mappedInflightCount).map { _ in
                 try context.makeChunkChainingValueBuffer(chunkCapacity: tileChunkCapacity)
@@ -928,7 +930,7 @@ public enum BLAKE3File {
                             chunkCount: completeChunkCount,
                             baseChunkCounter: UInt64(fileOffset / BLAKE3.chunkByteCount),
                             chunkCVBuffer: chunkCVBuffer,
-                            subtreeDecompositionChunkThreshold: metalMappedSubtreeDecompositionChunkThreshold,
+                            subtreeDecompositionChunkThreshold: subtreeDecompositionChunkThreshold,
                             mode: mode,
                             bufferIndex: bufferIndex
                         )
@@ -1173,6 +1175,16 @@ public enum BLAKE3File {
             return 4
         }
         return min(max(parsed, 1), 8)
+    }
+
+    private static func configuredMetalMappedSubtreeDecompositionChunkThreshold() -> Int {
+        guard let rawValue = ProcessInfo.processInfo
+            .environment["BLAKE3_SWIFT_METAL_MAPPED_SUBTREE_THRESHOLD_CHUNKS"],
+              let parsed = Int(rawValue)
+        else {
+            return Int.max
+        }
+        return max(parsed, 1)
     }
 
     private struct MetalFileStackEntry {
@@ -1909,6 +1921,61 @@ public enum BLAKE3File {
         }
     }
 
+    private static func collectCompleteMetalChunkEntriesAsync(
+        context: BLAKE3Metal.Context,
+        buffer: MTLBuffer,
+        range: Range<Int>,
+        chunkCount: Int,
+        baseChunkCounter: UInt64,
+        chunkCVBuffer: BLAKE3Metal.ChunkChainingValueBuffer,
+        subtreeDecompositionChunkThreshold: Int,
+        mode: HashMode
+    ) async throws -> [MetalFileStackEntry] {
+        guard chunkCount > 0 else {
+            return []
+        }
+        guard range.count == chunkCount * BLAKE3.chunkByteCount else {
+            throw BLAKE3Error.invalidBufferRange
+        }
+
+        if chunkCount.nonzeroBitCount == 1 || chunkCount >= subtreeDecompositionChunkThreshold {
+            var entries = [MetalFileStackEntry]()
+            entries.reserveCapacity(chunkCount.nonzeroBitCount)
+            var remainingChunkCount = chunkCount
+            var processedChunkCount = 0
+            while remainingChunkCount > 0 {
+                let subtreeChunkCount = largestPowerOfTwo(notExceeding: remainingChunkCount)
+                let subtreeLowerBound = range.lowerBound + processedChunkCount * BLAKE3.chunkByteCount
+                let subtreeRange = subtreeLowerBound..<(subtreeLowerBound + subtreeChunkCount * BLAKE3.chunkByteCount)
+                let cv = try await context.chunkSubtreeChainingValueAsync(
+                    buffer: buffer,
+                    range: subtreeRange,
+                    baseChunkCounter: baseChunkCounter + UInt64(processedChunkCount),
+                    mode: mode.metalMode
+                )
+                entries.append(MetalFileStackEntry(cv: cv, chunkCount: subtreeChunkCount))
+                processedChunkCount += subtreeChunkCount
+                remainingChunkCount -= subtreeChunkCount
+            }
+            return entries
+        }
+
+        let writtenChunkCount = try await context.writeChunkChainingValuesAsync(
+            buffer: buffer,
+            range: range,
+            baseChunkCounter: baseChunkCounter,
+            into: chunkCVBuffer,
+            mode: mode.metalMode
+        )
+        return try chunkCVBuffer.withUnsafeBytes { raw in
+            try collectMetalChunkCVEntries(
+                raw,
+                chunkCount: writtenChunkCount,
+                mode: mode
+            )
+        }
+    }
+
     private static func collectMetalChunkCVEntries(
         _ raw: UnsafeRawBufferPointer,
         chunkCount: Int,
@@ -1971,7 +2038,6 @@ public enum BLAKE3File {
         }
     }
 
-    private static let metalMappedSubtreeDecompositionChunkThreshold = Int.max
     private static let metalStagedReadSubtreeDecompositionChunkThreshold = 32 * 1_024
     #endif
 }

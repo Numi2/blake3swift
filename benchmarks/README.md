@@ -87,6 +87,7 @@ Runs measured Metal gate and mode sweeps and writes validated recommendation JSO
 - `BLAKE3_SWIFT_METAL_FUSED_TILE_REDUCTION`: optional fused Metal tile reduction: `pingpong`, `inplace`, or experimental `simdgroup` for the 128-chunk 32-lane reducer.
 - `BLAKE3_SWIFT_READ_INFLIGHT`: optional regular-file CPU read buffer count: `1` for sequential one-buffer timing, `2` for the default read/CPU-subtree overlap.
 - `BLAKE3_SWIFT_METAL_MAPPED_INFLIGHT`: optional tiled Metal mmap in-flight slot count. Default: `4`.
+- `BLAKE3_SWIFT_METAL_MAPPED_SUBTREE_THRESHOLD_CHUNKS`: optional tiled Metal mmap GPU subtree-decomposition cutoff in chunks. Default: `32768`; set a very large value to effectively disable non-power-of-two subtree decomposition.
 - `BLAKE3_SWIFT_METAL_STAGED_READ_INFLIGHT`: optional staged-read Metal file buffer count: `1` for sequential one-buffer timing; the default is `4` bounded read/GPU slots.
 - `AUTOTUNE_GATES`: comma-separated Metal automatic gate candidates for `run-autotune.sh`.
 - `AUTOTUNE_MODES`: comma-separated Metal mode candidates for `run-autotune.sh`.
