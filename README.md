@@ -73,14 +73,14 @@ These harness rows are inserted for traceability, not as blind replacements for 
 
 ### File Reality Check
 
-The current promoted file-path tuning records come from the local isolated artifacts `benchmarks/results/20260421T-local-file-threshold-max`, `benchmarks/results/20260421T-local-file-tiled-64m`, `benchmarks/results/20260421T-local-file-tiled-128m`, and `benchmarks/results/20260421T-local-file-tiled-default128`. The important change is that tiled Metal mmap now stays on the chunk-CV write plus CPU merge path, and the default tiled mmap file tile is now `128 MiB` instead of `64 MiB`.
+The current promoted file-path tuning records come from the local isolated artifacts `benchmarks/results/20260421T-local-file-threshold-max`, `benchmarks/results/20260421T-local-file-tiled-64m`, `benchmarks/results/20260421T-local-file-tiled-128m`, `benchmarks/results/20260421T-local-file-tiled-default128`, `benchmarks/results/20260422T-metal-mapped-inflight`, and `benchmarks/results/20260422T-metal-mapped-subtree-collapse`. The earlier April 21 pass moved tiled Metal mmap onto the chunk-CV write plus CPU merge path and promoted a `128 MiB` default mapped tile. The April 22 follow-up kept the mapped-tile pipeline wider and, more importantly, stopped pushing every returned chunk CV individually by collapsing each raw chunk-CV batch into power-of-two subtree entries before the CPU stack merge.
 
-| File input | Metal tiled mmap GPU, old 64 MiB isolated A/B | Metal tiled mmap GPU, promoted 128 MiB isolated A/B | Metal tiled mmap GPU, default 128 MiB confirm |
-| --- | ---: | ---: | ---: |
-| 256 MiB | 4.78 | 5.28 | 5.14 |
-| 1 GiB | 4.31 | 5.87 | 6.11 |
+| File input | Metal tiled mmap GPU, old 64 MiB isolated A/B | Metal tiled mmap GPU, promoted 128 MiB isolated A/B | Metal tiled mmap GPU, default 128 MiB confirm | Metal tiled mmap GPU, 4-slot inflight control | Metal tiled mmap GPU, subtree-collapsed current default |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 256 MiB | 4.78 | 5.28 | 5.14 | 5.79 | 5.94 |
+| 1 GiB | 4.31 | 5.87 | 6.11 | 6.44 | 6.73 |
 
-These are still reality-check file rows, not resident-buffer claims. `metal-staged-read` remains the stronger bounded file strategy on this machine, but the mapped no-copy path is no longer leaving as much performance on the table as it did with the older subtree-heavy and smaller-tile defaults.
+These are still reality-check file rows, not resident-buffer claims. `metal-staged-read` remains the stronger bounded file strategy on this machine, but the mapped no-copy path is now materially better than the earlier `64 MiB` tile baseline and modestly ahead of the immediate pre-collapse control as well.
 
 ### SIMD4 CPU One-Shot Baseline
 

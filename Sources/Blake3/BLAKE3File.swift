@@ -798,7 +798,7 @@ public enum BLAKE3File {
                     }
 
                     if isFinalTile {
-                        let currentChunkLength = region.size - offset
+                        let currentChunkLength = tileLength - completeChunkByteCount
                         let currentChunk = UnsafeRawBufferPointer(
                             start: pointer.advanced(by: offset),
                             count: currentChunkLength
@@ -860,8 +860,11 @@ public enum BLAKE3File {
             }
             let alignedTileByteCount = alignedMetalTileByteCount(tileByteCount)
             let tileChunkCapacity = max(1, alignedTileByteCount / BLAKE3.chunkByteCount)
+            let mappedInflightCount = configuredMetalMappedInflightCount()
             let context = try BLAKE3Metal.cachedContext(device: device, librarySource: librarySource)
-            let chunkCVBuffer = try context.makeChunkChainingValueBuffer(chunkCapacity: tileChunkCapacity)
+            let chunkCVBuffers = try (0..<mappedInflightCount).map { _ in
+                try context.makeChunkChainingValueBuffer(chunkCapacity: tileChunkCapacity)
+            }
 
             return try withMappedRegion(path: path) { region in
                 try cancellationCheck?()
@@ -881,12 +884,34 @@ public enum BLAKE3File {
                 }
 
                 var stack = BLAKE3Core.CVStack()
-                var offset = 0
-                while offset < region.size {
+                var fileOffset = 0
+                var bufferIndex = 0
+                var pendingSlots = [MetalFileTileWork?](
+                    repeating: nil,
+                    count: mappedInflightCount
+                )
+                var pendingQueue = [MetalFileTileWork]()
+                pendingQueue.reserveCapacity(mappedInflightCount)
+                defer {
+                    for tileWork in pendingQueue {
+                        _ = try? tileWork.wait()
+                    }
+                }
+
+                while fileOffset < region.size {
                     try cancellationCheck?()
-                    let remaining = region.size - offset
+                    try drainMetalFileTileWork(
+                        untilBufferAvailableAt: bufferIndex,
+                        pendingSlots: &pendingSlots,
+                        pendingQueue: &pendingQueue,
+                        into: &stack,
+                        mode: mode
+                    )
+
+                    let chunkCVBuffer = chunkCVBuffers[bufferIndex]
+                    let remaining = region.size - fileOffset
                     let tileLength = min(alignedTileByteCount, remaining)
-                    let isFinalTile = offset + tileLength == region.size
+                    let isFinalTile = fileOffset + tileLength == region.size
                     let completeChunkByteCount = if isFinalTile {
                         ((tileLength - 1) / BLAKE3.chunkByteCount) * BLAKE3.chunkByteCount
                     } else {
@@ -894,25 +919,33 @@ public enum BLAKE3File {
                     }
 
                     if completeChunkByteCount > 0 {
-                        let chunkRange = offset..<(offset + completeChunkByteCount)
+                        let chunkRange = fileOffset..<(fileOffset + completeChunkByteCount)
                         let completeChunkCount = completeChunkByteCount / BLAKE3.chunkByteCount
-                        try pushCompleteMetalChunks(
+                        let tileWork = startMetalFileTileWork(
                             context: context,
                             buffer: fileBuffer,
                             range: chunkRange,
                             chunkCount: completeChunkCount,
+                            baseChunkCounter: UInt64(fileOffset / BLAKE3.chunkByteCount),
                             chunkCVBuffer: chunkCVBuffer,
                             subtreeDecompositionChunkThreshold: metalMappedSubtreeDecompositionChunkThreshold,
-                            into: &stack,
-                            mode: mode
+                            mode: mode,
+                            bufferIndex: bufferIndex
                         )
-                        offset += completeChunkByteCount
+                        pendingSlots[bufferIndex] = tileWork
+                        pendingQueue.append(tileWork)
                     }
 
                     if isFinalTile {
-                        let currentChunkLength = region.size - offset
+                        try drainAllMetalFileTileWork(
+                            pendingSlots: &pendingSlots,
+                            pendingQueue: &pendingQueue,
+                            into: &stack,
+                            mode: mode
+                        )
+                        let currentChunkLength = tileLength - completeChunkByteCount
                         let currentChunk = UnsafeRawBufferPointer(
-                            start: pointer.advanced(by: offset),
+                            start: pointer.advanced(by: fileOffset + completeChunkByteCount),
                             count: currentChunkLength
                         )
                         let output = BLAKE3Core.chunkOutput(
@@ -928,6 +961,9 @@ public enum BLAKE3File {
                         )
                         .rootBytes(byteCount: outputByteCount, seek: seek)
                     }
+
+                    fileOffset += tileLength
+                    bufferIndex = (bufferIndex + 1) % mappedInflightCount
                 }
 
                 return emptyOutput(mode: mode, outputByteCount: outputByteCount, seek: seek)
@@ -1127,6 +1163,16 @@ public enum BLAKE3File {
             return 4
         }
         return min(max(parsed, 1), 4)
+    }
+
+    private static func configuredMetalMappedInflightCount() -> Int {
+        guard let rawValue = ProcessInfo.processInfo
+            .environment["BLAKE3_SWIFT_METAL_MAPPED_INFLIGHT"],
+              let parsed = Int(rawValue)
+        else {
+            return 4
+        }
+        return min(max(parsed, 1), 8)
     }
 
     private struct MetalFileStackEntry {
@@ -1854,17 +1900,58 @@ public enum BLAKE3File {
             into: chunkCVBuffer,
             mode: mode.metalMode
         )
+        return try chunkCVBuffer.withUnsafeBytes { raw in
+            try collectMetalChunkCVEntries(
+                raw,
+                chunkCount: writtenChunkCount,
+                mode: mode
+            )
+        }
+    }
+
+    private static func collectMetalChunkCVEntries(
+        _ raw: UnsafeRawBufferPointer,
+        chunkCount: Int,
+        mode: HashMode
+    ) throws -> [MetalFileStackEntry] {
+        guard raw.count >= chunkCount * BLAKE3.digestByteCount else {
+            throw BLAKE3Error.metalCommandFailed("Metal chunk chaining value output is shorter than expected.")
+        }
+        guard chunkCount > 0 else {
+            return []
+        }
+
         var entries = [MetalFileStackEntry]()
-        entries.reserveCapacity(writtenChunkCount)
-        try chunkCVBuffer.withUnsafeBytes { raw in
-            guard raw.count >= writtenChunkCount * BLAKE3.digestByteCount else {
-                throw BLAKE3Error.metalCommandFailed("Metal chunk chaining value output is shorter than expected.")
+        entries.reserveCapacity(chunkCount.nonzeroBitCount)
+        var processedChunkCount = 0
+        var remainingChunkCount = chunkCount
+        while remainingChunkCount > 0 {
+            let subtreeChunkCount = largestPowerOfTwo(notExceeding: remainingChunkCount)
+            let subtreeByteOffset = processedChunkCount * BLAKE3.digestByteCount
+            if subtreeChunkCount == 1 {
+                entries.append(
+                    MetalFileStackEntry(
+                        cv: BLAKE3Core.chainingValue(from: raw, atByteOffset: subtreeByteOffset),
+                        chunkCount: 1
+                    )
+                )
+            } else {
+                let subtreeCVs = Array(unsafeUninitializedCapacity: subtreeChunkCount) { buffer, initializedCount in
+                    for index in 0..<subtreeChunkCount {
+                        let byteOffset = subtreeByteOffset + index * BLAKE3.digestByteCount
+                        buffer[index] = BLAKE3Core.chainingValue(from: raw, atByteOffset: byteOffset)
+                    }
+                    initializedCount = subtreeChunkCount
+                }
+                let subtreeCV = BLAKE3Core.rootOutput(
+                    fromChunkCVs: subtreeCVs,
+                    key: mode.key,
+                    flags: mode.flags
+                ).chainingValue()
+                entries.append(MetalFileStackEntry(cv: subtreeCV, chunkCount: subtreeChunkCount))
             }
-            for chunkIndex in 0..<writtenChunkCount {
-                let offset = chunkIndex * BLAKE3.digestByteCount
-                let cv = BLAKE3Core.chainingValue(from: raw, atByteOffset: offset)
-                entries.append(MetalFileStackEntry(cv: cv, chunkCount: 1))
-            }
+            processedChunkCount += subtreeChunkCount
+            remainingChunkCount -= subtreeChunkCount
         }
         return entries
     }
