@@ -345,6 +345,368 @@ final class BLAKE3Tests: XCTestCase {
         }
     }
 
+    func testPublicSwiftSurfacesMatchOfficialCBLAKE3() throws {
+        let key = deterministicInput(byteCount: BLAKE3.keyByteCount)
+        let contextString = "blake3swift vendored differential context"
+        let sizes = [
+            0,
+            1,
+            63,
+            64,
+            65,
+            1_023,
+            1_024,
+            1_025,
+            16_384 + 1,
+            256 * 1_024 + 1,
+            1_024 * 1_024 + 333
+        ]
+        let xofOutputByteCount = 257
+        let xofSeek: UInt64 = 17
+
+        try withTemporaryDirectory(prefix: "blake3swift-official-c-public-") { directory in
+            for size in sizes {
+                let input = deterministicInput(byteCount: size)
+                let expectedDigest = input.withUnsafeBytes { OfficialCBLAKE3.hash($0) }
+                let expectedXOFNoSeek = input.withUnsafeBytes {
+                    OfficialCBLAKE3.hash($0, outputByteCount: xofOutputByteCount)
+                }
+                let expectedXOF = input.withUnsafeBytes {
+                    OfficialCBLAKE3.hash($0, outputByteCount: xofOutputByteCount, seek: xofSeek)
+                }
+                let expectedKeyedDigest = key.withUnsafeBytes { keyRaw in
+                    input.withUnsafeBytes { inputRaw in
+                        OfficialCBLAKE3.keyedHash(key: keyRaw, input: inputRaw)
+                    }
+                }
+                let expectedKeyedXOFNoSeek = key.withUnsafeBytes { keyRaw in
+                    input.withUnsafeBytes { inputRaw in
+                        OfficialCBLAKE3.keyedHash(
+                            key: keyRaw,
+                            input: inputRaw,
+                            outputByteCount: xofOutputByteCount
+                        )
+                    }
+                }
+                let expectedKeyedXOF = key.withUnsafeBytes { keyRaw in
+                    input.withUnsafeBytes { inputRaw in
+                        OfficialCBLAKE3.keyedHash(
+                            key: keyRaw,
+                            input: inputRaw,
+                            outputByteCount: xofOutputByteCount,
+                            seek: xofSeek
+                        )
+                    }
+                }
+                let expectedDerivedNoSeek = contextString.utf8CString.withUnsafeBytes { contextRaw in
+                    input.withUnsafeBytes { inputRaw in
+                        OfficialCBLAKE3.deriveKey(
+                            context: UnsafeRawBufferPointer(rebasing: contextRaw.dropLast()),
+                            material: inputRaw,
+                            outputByteCount: xofOutputByteCount
+                        )
+                    }
+                }
+                let expectedDerived = contextString.utf8CString.withUnsafeBytes { contextRaw in
+                    input.withUnsafeBytes { inputRaw in
+                        OfficialCBLAKE3.deriveKey(
+                            context: UnsafeRawBufferPointer(rebasing: contextRaw.dropLast()),
+                            material: inputRaw,
+                            outputByteCount: xofOutputByteCount,
+                            seek: xofSeek
+                        )
+                    }
+                }
+
+                XCTAssertEqual(BLAKE3.hash(input), expectedDigest, "one-shot mismatch for byteCount=\(size)")
+                XCTAssertEqual(BLAKE3.hashSerial(input), expectedDigest, "serial mismatch for byteCount=\(size)")
+                XCTAssertEqual(BLAKE3.hashScalar(input), expectedDigest, "scalar mismatch for byteCount=\(size)")
+                XCTAssertEqual(
+                    BLAKE3.hashParallel(input, maxWorkers: 2),
+                    expectedDigest,
+                    "parallel mismatch for byteCount=\(size)"
+                )
+                XCTAssertEqual(
+                    try BLAKE3.hash(input, outputByteCount: xofOutputByteCount),
+                    expectedXOFNoSeek,
+                    "XOF convenience mismatch for byteCount=\(size)"
+                )
+                XCTAssertEqual(
+                    try BLAKE3.keyedHash(key: key, input: input),
+                    expectedKeyedDigest,
+                    "keyed digest mismatch for byteCount=\(size)"
+                )
+                XCTAssertEqual(
+                    try BLAKE3.keyedHash(
+                        key: key,
+                        input: input,
+                        outputByteCount: xofOutputByteCount
+                    ),
+                    expectedKeyedXOFNoSeek,
+                    "keyed XOF convenience mismatch for byteCount=\(size)"
+                )
+                XCTAssertEqual(
+                    try BLAKE3.keyedHashParallel(key: key, input: input),
+                    expectedKeyedDigest,
+                    "parallel keyed digest mismatch for byteCount=\(size)"
+                )
+                XCTAssertEqual(
+                    try BLAKE3.keyedHashParallel(
+                        key: key,
+                        input: input,
+                        outputByteCount: xofOutputByteCount
+                    ),
+                    expectedKeyedXOFNoSeek,
+                    "parallel keyed XOF convenience mismatch for byteCount=\(size)"
+                )
+                XCTAssertEqual(
+                    try BLAKE3.deriveKey(
+                        context: contextString,
+                        material: input,
+                        outputByteCount: xofOutputByteCount
+                    ),
+                    expectedDerivedNoSeek,
+                    "derive-key convenience mismatch for byteCount=\(size)"
+                )
+                XCTAssertEqual(
+                    try BLAKE3.deriveKeyParallel(
+                        context: contextString,
+                        material: input,
+                        outputByteCount: xofOutputByteCount
+                    ),
+                    expectedDerivedNoSeek,
+                    "parallel derive-key convenience mismatch for byteCount=\(size)"
+                )
+
+                let context = BLAKE3.Context()
+                XCTAssertEqual(context.hash(input, mode: .scalar), expectedDigest, "context scalar mismatch for byteCount=\(size)")
+                XCTAssertEqual(context.hash(input, mode: .serial), expectedDigest, "context serial mismatch for byteCount=\(size)")
+                XCTAssertEqual(context.hash(input, mode: .automatic), expectedDigest, "context automatic mismatch for byteCount=\(size)")
+                XCTAssertEqual(
+                    context.hash(input, mode: .parallel(maxWorkers: 2)),
+                    expectedDigest,
+                    "context parallel mismatch for byteCount=\(size)"
+                )
+
+                var hasher = BLAKE3.Hasher()
+                update(&hasher, with: input, splitPattern: [1, 63, 64, 65, 1_023, 1_024, 1_025])
+                XCTAssertEqual(hasher.finalize(), expectedDigest, "streaming digest mismatch for byteCount=\(size)")
+                XCTAssertEqual(
+                    xofBytes(from: hasher, count: xofOutputByteCount, seek: xofSeek),
+                    expectedXOF,
+                    "streaming XOF mismatch for byteCount=\(size)"
+                )
+
+                var keyedHasher = try BLAKE3.Hasher(key: key)
+                update(&keyedHasher, with: input, splitPattern: [2, 31, 64, 257])
+                XCTAssertEqual(keyedHasher.finalize(), expectedKeyedDigest, "streaming keyed digest mismatch for byteCount=\(size)")
+                XCTAssertEqual(
+                    xofBytes(from: keyedHasher, count: xofOutputByteCount, seek: xofSeek),
+                    expectedKeyedXOF,
+                    "streaming keyed XOF mismatch for byteCount=\(size)"
+                )
+
+                var deriveHasher = BLAKE3.Hasher(deriveKeyContext: contextString)
+                update(&deriveHasher, with: input, splitPattern: [3, 17, 128, 511])
+                XCTAssertEqual(
+                    xofBytes(from: deriveHasher, count: xofOutputByteCount, seek: xofSeek),
+                    expectedDerived,
+                    "streaming derive-key mismatch for byteCount=\(size)"
+                )
+
+                let fileURL = directory.appendingPathComponent("input-\(size).bin")
+                try Data(input).write(to: fileURL, options: .atomic)
+                var strategies: [(String, BLAKE3File.Strategy)] = [
+                    ("automatic", .automatic),
+                    ("read", .read(bufferSize: 257)),
+                    ("mmap", .memoryMapped),
+                    ("mmap-parallel", .memoryMappedParallel(maxThreads: 2))
+                ]
+                #if canImport(Metal)
+                if BLAKE3Metal.isAvailable {
+                    strategies.append(("metal-mmap", .metalMemoryMapped(policy: .gpu, fallbackToCPU: false)))
+                    strategies.append(
+                        (
+                            "metal-tiled-mmap",
+                            .metalTiledMemoryMapped(tileByteCount: 2 * BLAKE3.chunkByteCount, fallbackToCPU: false)
+                        )
+                    )
+                    strategies.append(
+                        (
+                            "metal-staged-read",
+                            .metalStagedRead(tileByteCount: 2 * BLAKE3.chunkByteCount, fallbackToCPU: false)
+                        )
+                    )
+                }
+                #endif
+
+                for (label, strategy) in strategies {
+                    XCTAssertEqual(
+                        try BLAKE3File.hash(path: fileURL.path, strategy: strategy),
+                        expectedDigest,
+                        "file digest mismatch against official C for strategy=\(label), byteCount=\(size)"
+                    )
+                    XCTAssertEqual(
+                        try BLAKE3File.hash(
+                            path: fileURL.path,
+                            strategy: strategy,
+                            outputByteCount: xofOutputByteCount,
+                            seek: xofSeek
+                        ),
+                        expectedXOF,
+                        "file XOF mismatch against official C for strategy=\(label), byteCount=\(size)"
+                    )
+                    XCTAssertEqual(
+                        try BLAKE3File.keyedHash(key: key, path: fileURL.path, strategy: strategy),
+                        expectedKeyedDigest,
+                        "file keyed digest mismatch against official C for strategy=\(label), byteCount=\(size)"
+                    )
+                    XCTAssertEqual(
+                        try BLAKE3File.keyedHash(
+                            key: key,
+                            path: fileURL.path,
+                            strategy: strategy,
+                            outputByteCount: xofOutputByteCount,
+                            seek: xofSeek
+                        ),
+                        expectedKeyedXOF,
+                        "file keyed XOF mismatch against official C for strategy=\(label), byteCount=\(size)"
+                    )
+                    XCTAssertEqual(
+                        try BLAKE3File.deriveKey(
+                            context: contextString,
+                            path: fileURL.path,
+                            strategy: strategy,
+                            outputByteCount: xofOutputByteCount,
+                            seek: xofSeek
+                        ),
+                        expectedDerived,
+                        "file derive-key mismatch against official C for strategy=\(label), byteCount=\(size)"
+                    )
+                }
+
+                #if canImport(Metal)
+                if BLAKE3Metal.isAvailable {
+                    XCTAssertEqual(
+                        try BLAKE3Metal.hash(input: input, policy: .gpu),
+                        expectedDigest,
+                        "metal digest mismatch against official C for byteCount=\(size)"
+                    )
+                    XCTAssertEqual(
+                        try BLAKE3Metal.hash(
+                            input: input,
+                            outputByteCount: xofOutputByteCount,
+                            seek: xofSeek,
+                            policy: .gpu
+                        ),
+                        expectedXOF,
+                        "metal XOF mismatch against official C for byteCount=\(size)"
+                    )
+                    XCTAssertEqual(
+                        try BLAKE3Metal.keyedHash(key: key, input: input, policy: .gpu),
+                        expectedKeyedDigest,
+                        "metal keyed digest mismatch against official C for byteCount=\(size)"
+                    )
+                    XCTAssertEqual(
+                        try BLAKE3Metal.keyedHash(
+                            key: key,
+                            input: input,
+                            outputByteCount: xofOutputByteCount,
+                            seek: xofSeek,
+                            policy: .gpu
+                        ),
+                        expectedKeyedXOF,
+                        "metal keyed XOF mismatch against official C for byteCount=\(size)"
+                    )
+                    XCTAssertEqual(
+                        try BLAKE3Metal.deriveKey(
+                            context: contextString,
+                            material: input,
+                            outputByteCount: xofOutputByteCount,
+                            seek: xofSeek,
+                            policy: .gpu
+                        ),
+                        expectedDerived,
+                        "metal derive-key mismatch against official C for byteCount=\(size)"
+                    )
+                }
+                #endif
+            }
+        }
+    }
+
+    func testAsyncFileHashingMatchesOfficialCBLAKE3() async throws {
+        let sizes = [0, 1, 1_025, 256 * 1_024 + 1, 2 * 1_024 * 1_024 + 333]
+
+        try await withTemporaryDirectory(prefix: "blake3swift-official-c-async-") { directory in
+            for size in sizes {
+                let input = deterministicInput(byteCount: size)
+                let expectedDigest = input.withUnsafeBytes { OfficialCBLAKE3.hash($0) }
+                let fileURL = directory.appendingPathComponent("async-\(size).bin")
+                try Data(input).write(to: fileURL, options: .atomic)
+
+                let automaticDigest = try await BLAKE3File.hashAsync(path: fileURL.path, strategy: .automatic)
+                XCTAssertEqual(automaticDigest, expectedDigest, "async automatic mismatch against official C for byteCount=\(size)")
+
+                let readDigest = try await BLAKE3File.hashAsync(path: fileURL.path, strategy: .read())
+                XCTAssertEqual(readDigest, expectedDigest, "async read mismatch against official C for byteCount=\(size)")
+
+                let mappedDigest = try await BLAKE3File.hashAsync(path: fileURL.path, strategy: .memoryMapped)
+                XCTAssertEqual(mappedDigest, expectedDigest, "async mmap mismatch against official C for byteCount=\(size)")
+
+                let mappedParallelDigest = try await BLAKE3File.hashAsync(
+                    path: fileURL.path,
+                    strategy: .memoryMappedParallel(maxThreads: 2)
+                )
+                XCTAssertEqual(
+                    mappedParallelDigest,
+                    expectedDigest,
+                    "async mmap-parallel mismatch against official C for byteCount=\(size)"
+                )
+
+                #if canImport(Metal)
+                if BLAKE3Metal.isAvailable {
+                    let metalMappedDigest = try await BLAKE3File.hashAsync(
+                        path: fileURL.path,
+                        strategy: .metalMemoryMapped(policy: .gpu, fallbackToCPU: false)
+                    )
+                    XCTAssertEqual(
+                        metalMappedDigest,
+                        expectedDigest,
+                        "async metal-mmap mismatch against official C for byteCount=\(size)"
+                    )
+
+                    let metalTiledDigest = try await BLAKE3File.hashAsync(
+                        path: fileURL.path,
+                        strategy: .metalTiledMemoryMapped(
+                            tileByteCount: 2 * BLAKE3.chunkByteCount,
+                            fallbackToCPU: false
+                        )
+                    )
+                    XCTAssertEqual(
+                        metalTiledDigest,
+                        expectedDigest,
+                        "async metal-tiled-mmap mismatch against official C for byteCount=\(size)"
+                    )
+
+                    let metalStagedDigest = try await BLAKE3File.hashAsync(
+                        path: fileURL.path,
+                        strategy: .metalStagedRead(
+                            tileByteCount: 2 * BLAKE3.chunkByteCount,
+                            fallbackToCPU: false
+                        )
+                    )
+                    XCTAssertEqual(
+                        metalStagedDigest,
+                        expectedDigest,
+                        "async metal-staged-read mismatch against official C for byteCount=\(size)"
+                    )
+                }
+                #endif
+            }
+        }
+    }
+
     func testDifferentialWeirdBoundariesAndStreamingSplits() throws {
         let key = Array("whats the Elvish word for friend".utf8)
         let contextString = "BLAKE3 2019-12-27 16:29:52 test vectors context"
@@ -2842,6 +3204,28 @@ private func loadTestVectors() throws -> TestVectors {
 
 private func deterministicInput(byteCount: Int) -> [UInt8] {
     (0..<byteCount).map { UInt8($0 % 251) }
+}
+
+private func withTemporaryDirectory<R>(
+    prefix: String,
+    _ body: (URL) throws -> R
+) throws -> R {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("\(prefix)\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    return try body(directory)
+}
+
+private func withTemporaryDirectory<R>(
+    prefix: String,
+    _ body: (URL) async throws -> R
+) async throws -> R {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("\(prefix)\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    return try await body(directory)
 }
 
 private func update(
