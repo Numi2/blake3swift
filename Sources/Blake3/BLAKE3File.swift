@@ -663,53 +663,19 @@ public enum BLAKE3File {
         librarySource: BLAKE3Metal.LibrarySource,
         mode: HashMode
     ) async throws -> BLAKE3.Digest {
-        do {
-            try Task.checkCancellation()
-            guard let device = MTLCreateSystemDefaultDevice() else {
-                throw BLAKE3Error.metalUnavailable
-            }
-            let context = try BLAKE3Metal.cachedContext(device: device, librarySource: librarySource)
-            return try await withMappedRegionAsync(path: path) { region in
-                try Task.checkCancellation()
-                guard region.size > 0,
-                      let pointer = region.pointer
-                else {
-                    return try digest(from: emptyOutput(mode: mode, outputByteCount: BLAKE3.digestByteCount, seek: 0))
-                }
-                guard let buffer = device.makeBuffer(
-                    bytesNoCopy: pointer,
-                    length: region.size,
-                    options: .storageModeShared,
-                    deallocator: nil
-                ) else {
-                    throw BLAKE3Error.metalCommandFailed("Unable to wrap mapped file pages in a Metal buffer.")
-                }
-                return try context.hash(
-                    buffer: buffer,
-                    range: 0..<region.size,
-                    policy: policy,
-                    mode: mode.metalMode
-                )
-            }
-        } catch let error as CancellationError {
-            throw error
-        } catch {
-            if fallbackToCPU {
-                return try await Task.detached {
-                    let output = try hashMapped(
-                        path: path,
-                        fallbackToRead: true,
-                        parallel: true,
-                        mode: mode,
-                        outputByteCount: BLAKE3.digestByteCount,
-                        seek: 0,
-                        cancellationCheck: { try Task.checkCancellation() }
-                    )
-                    return try digest(from: output)
-                }.value
-            }
-            throw error
-        }
+        try await Task.detached {
+            let output = try hashMetalMapped(
+                path: path,
+                policy: policy,
+                fallbackToCPU: fallbackToCPU,
+                librarySource: librarySource,
+                mode: mode,
+                outputByteCount: BLAKE3.digestByteCount,
+                seek: 0,
+                cancellationCheck: { try Task.checkCancellation() }
+            )
+            return try digest(from: output)
+        }.value
     }
 
     private static func hashMetalTiledMappedAsync(
@@ -719,129 +685,19 @@ public enum BLAKE3File {
         librarySource: BLAKE3Metal.LibrarySource,
         mode: HashMode
     ) async throws -> BLAKE3.Digest {
-        do {
-            try Task.checkCancellation()
-            guard let device = MTLCreateSystemDefaultDevice() else {
-                throw BLAKE3Error.metalUnavailable
-            }
-            let alignedTileByteCount = alignedMetalTileByteCount(tileByteCount)
-            let tileChunkCapacity = max(1, alignedTileByteCount / BLAKE3.chunkByteCount)
-            let subtreeDecompositionChunkThreshold = configuredMetalMappedSubtreeDecompositionChunkThreshold()
-            let context = try BLAKE3Metal.cachedContext(device: device, librarySource: librarySource)
-            let chunkCVBuffer = try context.makeChunkChainingValueBuffer(chunkCapacity: tileChunkCapacity)
-
-            return try await withMappedRegionAsync(path: path) { region in
-                try Task.checkCancellation()
-                guard region.size > 0,
-                      let pointer = region.pointer
-                else {
-                    return try digest(from: emptyOutput(mode: mode, outputByteCount: BLAKE3.digestByteCount, seek: 0))
-                }
-
-                guard let fileBuffer = device.makeBuffer(
-                    bytesNoCopy: pointer,
-                    length: region.size,
-                    options: .storageModeShared,
-                    deallocator: nil
-                ) else {
-                    throw BLAKE3Error.metalCommandFailed("Unable to wrap mapped file pages in a Metal buffer.")
-                }
-
-                var stack = BLAKE3Core.CVStack()
-                var offset = 0
-                while offset < region.size {
-                    try Task.checkCancellation()
-                    let remaining = region.size - offset
-                    let tileLength = min(alignedTileByteCount, remaining)
-                    let isFinalTile = offset + tileLength == region.size
-                    let completeChunkByteCount = if isFinalTile {
-                        ((tileLength - 1) / BLAKE3.chunkByteCount) * BLAKE3.chunkByteCount
-                    } else {
-                        tileLength
-                    }
-
-                    if completeChunkByteCount > 0 {
-                        let chunkRange = offset..<(offset + completeChunkByteCount)
-                        let completeChunkCount = completeChunkByteCount / BLAKE3.chunkByteCount
-                        if !isFinalTile,
-                           completeChunkByteCount == alignedTileByteCount,
-                           (completeChunkCount.nonzeroBitCount == 1
-                               || completeChunkCount >= subtreeDecompositionChunkThreshold) {
-                            let entries = try await collectCompleteMetalChunkEntriesAsync(
-                                context: context,
-                                buffer: fileBuffer,
-                                range: chunkRange,
-                                chunkCount: completeChunkCount,
-                                baseChunkCounter: stack.finalizedChunkCount,
-                                chunkCVBuffer: chunkCVBuffer,
-                                subtreeDecompositionChunkThreshold: subtreeDecompositionChunkThreshold,
-                                mode: mode
-                            )
-                            try Task.checkCancellation()
-                            pushMetalFileStackEntries(entries, into: &stack, mode: mode)
-                        } else {
-                            let chunkCount = try await context.writeChunkChainingValuesAsync(
-                                buffer: fileBuffer,
-                                range: chunkRange,
-                                baseChunkCounter: stack.finalizedChunkCount,
-                                into: chunkCVBuffer,
-                                mode: mode.metalMode
-                            )
-                            try Task.checkCancellation()
-                            try pushChunkChainingValues(
-                                chunkCVBuffer,
-                                chunkCount: chunkCount,
-                                into: &stack,
-                                mode: mode
-                            )
-                        }
-                        offset += completeChunkByteCount
-                    }
-
-                    if isFinalTile {
-                        let currentChunkLength = tileLength - completeChunkByteCount
-                        let currentChunk = UnsafeRawBufferPointer(
-                            start: pointer.advanced(by: offset),
-                            count: currentChunkLength
-                        )
-                        let output = BLAKE3Core.chunkOutput(
-                            currentChunk,
-                            chunkCounter: stack.finalizedChunkCount,
-                            key: mode.key,
-                            flags: mode.flags
-                        )
-                        return try digest(
-                            from: stack.rootOutput(
-                                currentChunkOutput: output,
-                                key: mode.key,
-                                flags: mode.flags
-                            )
-                            .rootBytes(byteCount: BLAKE3.digestByteCount)
-                        )
-                    }
-                }
-
-                return try digest(from: emptyOutput(mode: mode, outputByteCount: BLAKE3.digestByteCount, seek: 0))
-            }
-        } catch let error as CancellationError {
-            throw error
-        } catch {
-            if fallbackToCPU {
-                return try await Task.detached {
-                    let output = try hashMapped(
-                        path: path,
-                        fallbackToRead: true,
-                        parallel: true,
-                        mode: mode,
-                        outputByteCount: BLAKE3.digestByteCount,
-                        seek: 0,
-                        cancellationCheck: { try Task.checkCancellation() }
-                    )
-                    return try digest(from: output)
-                }.value
-            }
-            throw error
-        }
+        try await Task.detached {
+            let output = try hashMetalTiledMapped(
+                path: path,
+                tileByteCount: tileByteCount,
+                fallbackToCPU: fallbackToCPU,
+                librarySource: librarySource,
+                mode: mode,
+                outputByteCount: BLAKE3.digestByteCount,
+                seek: 0,
+                cancellationCheck: { try Task.checkCancellation() }
+            )
+            return try digest(from: output)
+        }.value
     }
 
     private static func hashMetalTiledMapped(
@@ -1767,49 +1623,6 @@ public enum BLAKE3File {
         return try body(MappedRegion(pointer: pointer, size: size))
     }
 
-    private static func withMappedRegionAsync<R>(
-        path: String,
-        _ body: (MappedRegion) async throws -> R
-    ) async throws -> R {
-        try Task.checkCancellation()
-        let fd = open(path, O_RDONLY)
-        guard fd >= 0 else {
-            throw BLAKE3Error.fileOpenFailed(path)
-        }
-        defer { close(fd) }
-
-        var info = stat()
-        guard fstat(fd, &info) == 0 else {
-            throw BLAKE3Error.fileStatFailed(path)
-        }
-
-        guard isRegularFile(mode: info.st_mode) else {
-            throw BLAKE3Error.memoryMapFailed(path)
-        }
-        guard info.st_size >= 0,
-              info.st_size <= off_t(Int.max)
-        else {
-            throw BLAKE3Error.memoryMapFailed(path)
-        }
-        let size = Int(info.st_size)
-        guard size > 0 else {
-            return try await body(MappedRegion(pointer: nil, size: 0))
-        }
-
-        enableReadAhead(fd: fd)
-        let pointer = mmap(nil, size, PROT_READ, MAP_PRIVATE, fd, 0)
-        guard let pointer,
-              pointer != MAP_FAILED
-        else {
-            throw BLAKE3Error.memoryMapFailed(path)
-        }
-        defer { munmap(pointer, size) }
-
-        adviseMappedRead(pointer: pointer, size: size)
-        try Task.checkCancellation()
-        return try await body(MappedRegion(pointer: pointer, size: size))
-    }
-
     private static func isRegularFile(mode: mode_t) -> Bool {
         (mode & S_IFMT) == S_IFREG
     }
@@ -1906,61 +1719,6 @@ public enum BLAKE3File {
         }
 
         let writtenChunkCount = try context.writeChunkChainingValues(
-            buffer: buffer,
-            range: range,
-            baseChunkCounter: baseChunkCounter,
-            into: chunkCVBuffer,
-            mode: mode.metalMode
-        )
-        return try chunkCVBuffer.withUnsafeBytes { raw in
-            try collectMetalChunkCVEntries(
-                raw,
-                chunkCount: writtenChunkCount,
-                mode: mode
-            )
-        }
-    }
-
-    private static func collectCompleteMetalChunkEntriesAsync(
-        context: BLAKE3Metal.Context,
-        buffer: MTLBuffer,
-        range: Range<Int>,
-        chunkCount: Int,
-        baseChunkCounter: UInt64,
-        chunkCVBuffer: BLAKE3Metal.ChunkChainingValueBuffer,
-        subtreeDecompositionChunkThreshold: Int,
-        mode: HashMode
-    ) async throws -> [MetalFileStackEntry] {
-        guard chunkCount > 0 else {
-            return []
-        }
-        guard range.count == chunkCount * BLAKE3.chunkByteCount else {
-            throw BLAKE3Error.invalidBufferRange
-        }
-
-        if chunkCount.nonzeroBitCount == 1 || chunkCount >= subtreeDecompositionChunkThreshold {
-            var entries = [MetalFileStackEntry]()
-            entries.reserveCapacity(chunkCount.nonzeroBitCount)
-            var remainingChunkCount = chunkCount
-            var processedChunkCount = 0
-            while remainingChunkCount > 0 {
-                let subtreeChunkCount = largestPowerOfTwo(notExceeding: remainingChunkCount)
-                let subtreeLowerBound = range.lowerBound + processedChunkCount * BLAKE3.chunkByteCount
-                let subtreeRange = subtreeLowerBound..<(subtreeLowerBound + subtreeChunkCount * BLAKE3.chunkByteCount)
-                let cv = try await context.chunkSubtreeChainingValueAsync(
-                    buffer: buffer,
-                    range: subtreeRange,
-                    baseChunkCounter: baseChunkCounter + UInt64(processedChunkCount),
-                    mode: mode.metalMode
-                )
-                entries.append(MetalFileStackEntry(cv: cv, chunkCount: subtreeChunkCount))
-                processedChunkCount += subtreeChunkCount
-                remainingChunkCount -= subtreeChunkCount
-            }
-            return entries
-        }
-
-        let writtenChunkCount = try await context.writeChunkChainingValuesAsync(
             buffer: buffer,
             range: range,
             baseChunkCounter: baseChunkCounter,

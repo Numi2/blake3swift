@@ -39,7 +39,6 @@ public enum BLAKE3Metal {
     private static let smallGridSIMDGroupsPerThreadgroup = 8
     private static let largeGridSIMDGroupsPerThreadgroup = 4
     private static let writeCombinedOwnedSharedBufferMaxBytes = 128 * 1024 * 1024
-    private static let ownedSharedUploadFusedTileMaxBytes = 128 * 1024 * 1024
     private static let fusedTileChunkCount = configuredFusedTileChunkCount()
     private static let fusedTileReductionStrategy = configuredFusedTileReductionStrategy()
 
@@ -1524,7 +1523,7 @@ public enum BLAKE3Metal {
                 pipelines: pipelines,
                 commandQueue: commandQueue,
                 workspace: self,
-                allowsFusedTile: range.count <= BLAKE3Metal.ownedSharedUploadFusedTileMaxBytes
+                allowsFusedTile: true
             )
         }
 
