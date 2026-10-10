@@ -539,6 +539,22 @@ public enum BLAKE3Metal {
         )
     }
 
+    /// Returns the digest of adjacent 64-byte BLAKE3 message digests without building a range array.
+    ///
+    /// This is equivalent to `hashOneChunkBatchDigestBytes(buffer:ranges:)` with ranges
+    /// `startingAt + index * BLAKE3.blockByteCount ..< startingAt + (index + 1) * BLAKE3.blockByteCount`.
+    public static func hashOneChunkBatchDigestBytes(
+        buffer: MTLBuffer,
+        startingAt: Int,
+        blockCount: Int
+    ) throws -> BLAKE3.Digest {
+        try contextCache.context(device: buffer.device).hashOneChunkBatchDigestBytes(
+            buffer: buffer,
+            startingAt: startingAt,
+            blockCount: blockCount
+        )
+    }
+
     /// Returns a digest of the concatenated plan digest bytes without materializing them on the CPU.
     public static func hashOneChunkBatchDigestBytes(plan: OneChunkBatchPlan) throws -> BLAKE3.Digest {
         try contextCache.context(device: plan.buffer.device).hashOneChunkBatchDigestBytes(plan: plan)
@@ -1259,7 +1275,10 @@ public enum BLAKE3Metal {
         private let defaultAsyncWorkspace: AsyncWorkspace
         private let lock = NSLock()
         private let defaultInputStagingBufferLock = NSLock()
+        private let oneChunkBatchPlanBufferLock = NSLock()
         private var defaultInputStagingBuffer: StagingBuffer?
+        private var oneChunkBatchPlanEntriesBuffer: MTLBuffer?
+        private var oneChunkBatchPlanParameterBuffer: MTLBuffer?
         private var metal4BackendStorage: AnyObject?
 
         private var chunkCVBuffer: MTLBuffer?
@@ -1972,6 +1991,25 @@ public enum BLAKE3Metal {
                 buffer: buffer,
                 ranges: ranges,
                 mode: .unkeyed
+            )
+        }
+
+        /// Returns the digest of adjacent 64-byte BLAKE3 message digests without building a range array.
+        public func hashOneChunkBatchDigestBytes(
+            buffer: MTLBuffer,
+            startingAt: Int,
+            blockCount: Int
+        ) throws -> BLAKE3.Digest {
+            guard buffer.device.registryID == device.registryID else {
+                throw BLAKE3Error.metalCommandFailed("Buffer belongs to a different Metal device.")
+            }
+            return try BLAKE3Metal.hashOneChunkBatchDigestBytes(
+                buffer: buffer,
+                startingAt: startingAt,
+                blockCount: blockCount,
+                pipelines: pipelines,
+                commandQueue: commandQueue,
+                workspace: self
             )
         }
 
@@ -3692,6 +3730,35 @@ public enum BLAKE3Metal {
             return buffer
         }
 
+        /// Holds these metadata buffers until the synchronous batch command has completed.
+        fileprivate func withReusableOneChunkBatchPlanBuffers<R>(
+            _ body: (MTLBuffer, MTLBuffer) throws -> R
+        ) throws -> R {
+            oneChunkBatchPlanBufferLock.lock()
+            defer {
+                oneChunkBatchPlanBufferLock.unlock()
+            }
+
+            if oneChunkBatchPlanEntriesBuffer == nil {
+                oneChunkBatchPlanEntriesBuffer = device.makeBuffer(
+                    length: MemoryLayout<BLAKE3MetalBatchEntry>.stride,
+                    options: .storageModeShared
+                )
+            }
+            if oneChunkBatchPlanParameterBuffer == nil {
+                oneChunkBatchPlanParameterBuffer = device.makeBuffer(
+                    length: Self.parameterSlotStride,
+                    options: .storageModeShared
+                )
+            }
+            guard let entriesBuffer = oneChunkBatchPlanEntriesBuffer,
+                  let parameterBuffer = oneChunkBatchPlanParameterBuffer
+            else {
+                throw BLAKE3Error.metalCommandFailed("Unable to allocate reusable BLAKE3 batch plan buffers.")
+            }
+            return try body(entriesBuffer, parameterBuffer)
+        }
+
         private func ensureBuffers(chunkCount: Int) throws {
             let chunkCVByteCount = chunkCount * BLAKE3.digestByteCount
             let parentCVByteCount = ((chunkCount + 1) / 2) * BLAKE3.digestByteCount
@@ -4875,6 +4942,7 @@ public enum BLAKE3Metal {
 
     private struct OneChunkBatchDescriptor {
         var entries: [BLAKE3MetalBatchEntry]
+        var digestCount: Int
         var canLoadWords: Bool
         var contiguousSingleBlocks: Bool
         var allSingleBlocks: Bool
@@ -4889,15 +4957,13 @@ public enum BLAKE3Metal {
             throw BLAKE3Error.metalCommandFailed("BLAKE3 batch entry count exceeds UInt32 capacity.")
         }
 
-        var entries = [BLAKE3MetalBatchEntry]()
-        entries.reserveCapacity(ranges.count)
+        var entries: [BLAKE3MetalBatchEntry]?
         var canLoadEveryRange = true
         var contiguousSingleBlocks = true
         var allSingleBlocks = true
         var allFullChunks = true
         let firstLowerBound = ranges.first?.lowerBound ?? 0
-        for range in ranges {
-            let entryIndex = entries.count
+        for (entryIndex, range) in ranges.enumerated() {
             guard range.lowerBound >= 0,
                   range.upperBound <= buffer.length,
                   range.lowerBound <= range.upperBound
@@ -4909,23 +4975,57 @@ public enum BLAKE3Metal {
                     "BLAKE3 one-chunk batch ranges must be at most \(BLAKE3.chunkByteCount) bytes."
                 )
             }
-            entries.append(
-                BLAKE3MetalBatchEntry(
-                    inputOffset: UInt64(range.lowerBound),
-                    inputLength: UInt32(range.count)
-                )
-            )
-            canLoadEveryRange = canLoadEveryRange && canLoadWords(buffer: buffer, range: range)
             let expectedSingleBlockLowerBound = firstLowerBound + entryIndex * BLAKE3.blockByteCount
             contiguousSingleBlocks = contiguousSingleBlocks
                 && range.count == BLAKE3.blockByteCount
                 && range.lowerBound == expectedSingleBlockLowerBound
+            // In a contiguous 64-byte run, later message starts preserve the first range's alignment.
+            if canLoadEveryRange && (entryIndex == 0 || !contiguousSingleBlocks) {
+                canLoadEveryRange = canLoadWords(buffer: buffer, range: range)
+            }
             allSingleBlocks = allSingleBlocks && range.count == BLAKE3.blockByteCount
             allFullChunks = allFullChunks && range.count == BLAKE3.chunkByteCount
+
+            if !contiguousSingleBlocks, entries == nil {
+                var materializedEntries = [BLAKE3MetalBatchEntry]()
+                materializedEntries.reserveCapacity(ranges.count)
+                for contiguousIndex in 0..<entryIndex {
+                    materializedEntries.append(
+                        BLAKE3MetalBatchEntry(
+                            inputOffset: UInt64(firstLowerBound + contiguousIndex * BLAKE3.blockByteCount),
+                            inputLength: UInt32(BLAKE3.blockByteCount)
+                        )
+                    )
+                }
+                entries = materializedEntries
+            }
+            if entries != nil {
+                entries!.append(
+                    BLAKE3MetalBatchEntry(
+                        inputOffset: UInt64(range.lowerBound),
+                        inputLength: UInt32(range.count)
+                    )
+                )
+            }
+        }
+
+        let storedEntries: [BLAKE3MetalBatchEntry]
+        if ranges.isEmpty {
+            storedEntries = []
+        } else if contiguousSingleBlocks {
+            storedEntries = [
+                BLAKE3MetalBatchEntry(
+                    inputOffset: UInt64(firstLowerBound),
+                    inputLength: UInt32(BLAKE3.blockByteCount)
+                )
+            ]
+        } else {
+            storedEntries = entries ?? []
         }
 
         return OneChunkBatchDescriptor(
-            entries: entries,
+            entries: storedEntries,
+            digestCount: ranges.count,
             canLoadWords: canLoadEveryRange,
             contiguousSingleBlocks: contiguousSingleBlocks,
             allSingleBlocks: allSingleBlocks,
@@ -4938,9 +5038,71 @@ public enum BLAKE3Metal {
         ranges: [Range<Int>]
     ) throws -> OneChunkBatchPlan {
         let descriptor = try makeOneChunkBatchDescriptor(buffer: buffer, ranges: ranges)
+        return try buildOneChunkBatchPlan(buffer: buffer, descriptor: descriptor)
+    }
+
+    private static func buildContiguousSingleBlockBatchPlan(
+        buffer: MTLBuffer,
+        startingAt: Int,
+        blockCount: Int,
+        entriesBuffer: MTLBuffer,
+        parameterBuffer: MTLBuffer
+    ) throws -> OneChunkBatchPlan {
+        guard blockCount >= 0,
+              blockCount <= Int(UInt32.max),
+              startingAt >= 0,
+              startingAt <= buffer.length
+        else {
+            throw BLAKE3Error.invalidBufferRange
+        }
+        let (byteCount, overflow) = blockCount.multipliedReportingOverflow(by: BLAKE3.blockByteCount)
+        guard !overflow, byteCount <= buffer.length - startingAt else {
+            throw BLAKE3Error.invalidBufferRange
+        }
+        guard blockCount > 0 else {
+            throw BLAKE3Error.invalidBufferRange
+        }
+
+        let descriptor = OneChunkBatchDescriptor(
+            entries: [
+                BLAKE3MetalBatchEntry(
+                    inputOffset: UInt64(startingAt),
+                    inputLength: UInt32(BLAKE3.blockByteCount)
+                )
+            ],
+            digestCount: blockCount,
+            canLoadWords: canLoadWords(
+                buffer: buffer,
+                range: startingAt..<(startingAt + BLAKE3.blockByteCount)
+            ),
+            contiguousSingleBlocks: true,
+            allSingleBlocks: true,
+            allFullChunks: false
+        )
+        return try buildOneChunkBatchPlan(
+            buffer: buffer,
+            descriptor: descriptor,
+            reusableContiguousBuffers: (entriesBuffer, parameterBuffer)
+        )
+    }
+
+    private static func buildOneChunkBatchPlan(
+        buffer: MTLBuffer,
+        descriptor: OneChunkBatchDescriptor,
+        reusableContiguousBuffers: (entries: MTLBuffer, parameter: MTLBuffer)? = nil
+    ) throws -> OneChunkBatchPlan {
         let entriesBuffer: MTLBuffer?
         if descriptor.entries.isEmpty {
             entriesBuffer = buffer.device.makeBuffer(length: 1, options: .storageModeShared)
+        } else if descriptor.contiguousSingleBlocks,
+                  let reusableContiguousBuffers {
+            descriptor.entries.withUnsafeBytes { raw in
+                reusableContiguousBuffers.entries.contents().copyMemory(
+                    from: raw.baseAddress!,
+                    byteCount: raw.count
+                )
+            }
+            entriesBuffer = reusableContiguousBuffers.entries
         } else {
             entriesBuffer = descriptor.entries.withUnsafeBytes { raw in
                 buffer.device.makeBuffer(
@@ -4953,16 +5115,24 @@ public enum BLAKE3Metal {
         guard let entriesBuffer else {
             throw BLAKE3Error.metalCommandFailed("Unable to allocate BLAKE3 batch entry buffer.")
         }
-        guard let parameterBuffer = buffer.device.makeBuffer(
-            length: Context.parameterSlotStride,
-            options: .storageModeShared
-        ) else {
-            throw BLAKE3Error.metalCommandFailed("Unable to allocate BLAKE3 batch parameter buffer.")
+        let parameterBuffer: MTLBuffer
+        if descriptor.contiguousSingleBlocks,
+           descriptor.digestCount > 0,
+           let reusableContiguousBuffers {
+            parameterBuffer = reusableContiguousBuffers.parameter
+        } else {
+            guard let allocatedParameterBuffer = buffer.device.makeBuffer(
+                length: Context.parameterSlotStride,
+                options: .storageModeShared
+            ) else {
+                throw BLAKE3Error.metalCommandFailed("Unable to allocate BLAKE3 batch parameter buffer.")
+            }
+            parameterBuffer = allocatedParameterBuffer
         }
 
         return OneChunkBatchPlan(
             buffer: buffer,
-            digestCount: descriptor.entries.count,
+            digestCount: descriptor.digestCount,
             entriesBuffer: entriesBuffer,
             parameterBuffer: parameterBuffer,
             canLoadWords: descriptor.canLoadWords,
@@ -5622,7 +5792,24 @@ public enum BLAKE3Metal {
         commandQueue: MTLCommandQueue,
         workspace: Context
     ) throws -> BLAKE3.Digest {
-        let plan = try buildOneChunkBatchPlan(buffer: buffer, ranges: ranges)
+        let descriptor = try makeOneChunkBatchDescriptor(buffer: buffer, ranges: ranges)
+        if descriptor.contiguousSingleBlocks, descriptor.digestCount > 0 {
+            return try workspace.withReusableOneChunkBatchPlanBuffers { entriesBuffer, parameterBuffer in
+                let plan = try buildOneChunkBatchPlan(
+                    buffer: buffer,
+                    descriptor: descriptor,
+                    reusableContiguousBuffers: (entriesBuffer, parameterBuffer)
+                )
+                return try hashOneChunkBatchDigestBytes(
+                    plan: plan,
+                    mode: mode,
+                    pipelines: pipelines,
+                    commandQueue: commandQueue,
+                    workspace: workspace
+                )
+            }
+        }
+        let plan = try buildOneChunkBatchPlan(buffer: buffer, descriptor: descriptor)
         return try hashOneChunkBatchDigestBytes(
             plan: plan,
             mode: mode,
@@ -5630,6 +5817,42 @@ public enum BLAKE3Metal {
             commandQueue: commandQueue,
             workspace: workspace
         )
+    }
+
+    private static func hashOneChunkBatchDigestBytes(
+        buffer: MTLBuffer,
+        startingAt: Int,
+        blockCount: Int,
+        pipelines: BLAKE3MetalPipelines,
+        commandQueue: MTLCommandQueue,
+        workspace: Context
+    ) throws -> BLAKE3.Digest {
+        guard blockCount >= 0,
+              blockCount <= Int(UInt32.max),
+              startingAt >= 0,
+              startingAt <= buffer.length
+        else {
+            throw BLAKE3Error.invalidBufferRange
+        }
+        if blockCount == 0 {
+            return BLAKE3.hashCPU([UInt8]())
+        }
+        return try workspace.withReusableOneChunkBatchPlanBuffers { entriesBuffer, parameterBuffer in
+            let plan = try buildContiguousSingleBlockBatchPlan(
+                buffer: buffer,
+                startingAt: startingAt,
+                blockCount: blockCount,
+                entriesBuffer: entriesBuffer,
+                parameterBuffer: parameterBuffer
+            )
+            return try hashOneChunkBatchDigestBytes(
+                plan: plan,
+                mode: .unkeyed,
+                pipelines: pipelines,
+                commandQueue: commandQueue,
+                workspace: workspace
+            )
+        }
     }
 
     private static func hashOneChunkBatchDigestBytes(
@@ -5644,9 +5867,7 @@ public enum BLAKE3Metal {
         }
         let requiredOutputByteCount = plan.outputByteCount
 
-        if let outputBuffer = workspace.reusableOneChunkBatchOutputBuffer(
-            byteCount: requiredOutputByteCount
-        ) {
+        if let outputBuffer = workspace.reusableOneChunkBatchOutputBuffer(byteCount: requiredOutputByteCount) {
             return try writeOneChunkBatchDigestsAndHashOutput(
                 plan: plan,
                 mode: mode,

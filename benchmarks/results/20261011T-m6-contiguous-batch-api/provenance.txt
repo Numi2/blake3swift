@@ -1,0 +1,36 @@
+# M6 contiguous batch API and Apple-documentation follow-up provenance
+
+## Final source validation
+
+- Host: Apple M6 Mac mini, `Mac18,5`, macOS 27.0 build `26A425`, Swift 6.4, 12 active CPUs.
+- M6 thermal/performance/CPU-power status: no warnings at 2026-10-10 23:16 UTC.
+- Repository HEAD before local changes: `bea6effdb8bb433543ae0c3343e8be207765abde`; final source changes were uncommitted when measured.
+- `Sources/Blake3/BLAKE3Metal.swift`: SHA-256 `1b366f9edfa9501db9f6c4db50c0dbda6b76bf9eb1a452a143bc8cd8c729a9c7`.
+- `Sources/Blake3/BLAKE3MetalKernel.swift`: SHA-256 `710b7182afc6615ff5b478593be273eab7934392af5436dfd41c0652e49ef9d1`.
+- `Sources/Blake3Benchmark/main.swift`: SHA-256 `1ed37d13179f45e902b6d09cdbaafd45ec57da2de9f75ab5409a1dc050553bdb`.
+- Release binary: SHA-256 `6f2573c5d49be25baa63e217474be50b5ebefb0e44b3596fbc5da7f5d7bc1b60`.
+- Final validation command: `blake3-bench --sizes 16m,64m --iterations 15 --metal-modes resident --cryptokit-modes none --file-modes none --operation-modes batch-one-chunk --batch-item-bytes 64`.
+- Output: `final-direct-r1.json`, generated 2026-10-10 23:15:53 UTC; `--validate-json` passed.
+
+## Historical M6 range-array baseline
+
+- Source revision: commit `848f38d`; `BLAKE3Metal.swift` SHA-256 `4766614cc9ad1d8829fcd9f1be374d70aa3d285404dcf979d056f4a62c191cfd`.
+- Benchmark source SHA-256: `b6b83f43e11c93879b251ee8887fc62d6052be6d4a78f9067610873553184e44`.
+- Release binary SHA-256: `2b64273667d0e5f02737ec5f299850d6daf8e5f1cbb55e716f441f4c53dfbbc9`.
+- Seven timed samples on the M6 produced 4.097 GiB/s at 16 MiB and 4.344 GiB/s at 64 MiB in `baseline-current.json`.
+
+## Metal 4 exploratory comparison
+
+- `metal4-r1.json`, `metal3-r1.json`, and `metal4-smoke-one-sample.json` were collected on the M6 candidate branch with the unified Metal 4 aggregate encoder enabled or disabled as named by each file.
+- The source and binary checksums for this temporary Metal 4 branch were not captured before it was replaced. Treat these as exploratory measurements, not source-pinned qualification.
+- The paired 15-sample commands were otherwise identical: `blake3-bench --sizes 16m,64m --iterations 15 --metal-modes resident --cryptokit-modes none --file-modes none --operation-modes batch-one-chunk --batch-item-bytes 64`; Metal 4 set `BLAKE3_SWIFT_METAL_BACKEND=metal4` and the legacy run left it unset.
+- The first prototype crashed from a double `endEncoding()` call; see `metal4-smoke-failure.txt`. The corrected smoke and 15-sample reports passed `--validate-json` and returned correct digests.
+
+## Fused chunk-CV candidate build
+
+- Candidate `BLAKE3Metal.swift` SHA-256: `379535bbdfebefbc448f9c019a4358e0482d705bb1adb98c90f12ec52376b3bc`.
+- Kernel and benchmark source hashes were the same as the final source-validation section.
+- Candidate release binary SHA-256: `016a51dc54db511ad55221e2624d86f52ee528b61e91816b33c1c91b4f3e4b5b`.
+- The fused run used `BLAKE3_SWIFT_METAL_BATCH_AGGREGATE=chunk-cv` with seven timed samples; the paired legacy run had both experimental environment variables unset.
+- `fused-chunk-cv-r1.json` and `legacy-paired-r1.json` passed `--validate-json`; all batch rows returned correct digests.
+- The experimental chunk-CV selection code was removed after it measured 3.6–4.1× slower than the staged-digest path.

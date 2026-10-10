@@ -968,6 +968,19 @@ private func batchOneChunkMetalAggregateGPUForBenchmark(
 }
 
 @inline(never)
+private func batchOneChunkMetalContiguousBlockAggregateGPUForBenchmark(
+    context: BLAKE3Metal.Context,
+    buffer: MTLBuffer,
+    blockCount: Int
+) -> BLAKE3.Digest {
+    try! context.hashOneChunkBatchDigestBytes(
+        buffer: buffer,
+        startingAt: 0,
+        blockCount: blockCount
+    )
+}
+
+@inline(never)
 private func batchOneChunkMetalPlanGPUForBenchmark(
     context: BLAKE3Metal.Context,
     plan: BLAKE3Metal.OneChunkBatchPlan
@@ -4667,6 +4680,27 @@ for size in requestedSizes {
                     batchOneChunkMetalPlanAggregateGPUForBenchmark(
                         context: metalContext,
                         plan: batchOneChunkPlan
+                    )
+                }
+            )
+        }
+        if requestedMetalTimingModes.contains(.resident),
+           requestedBatchOneChunkItemByteCount == BLAKE3.blockByteCount,
+           input.count.isMultiple(of: BLAKE3.blockByteCount),
+           let expectedBatchOneChunkDigest,
+           requestedOperationTimingModes.contains(.batchOneChunk) {
+            operationResults.append(
+                runBenchmark(
+                    backend: "metal",
+                    mode: "batch-one-chunk-64-resident-contiguous-aggregate-api-gpu",
+                    input: input,
+                    iterations: iterations,
+                    expectedDigest: expectedBatchOneChunkDigest
+                ) { _ in
+                    batchOneChunkMetalContiguousBlockAggregateGPUForBenchmark(
+                        context: metalContext,
+                        buffer: metalBuffer,
+                        blockCount: batchOneChunkRanges.count
                     )
                 }
             )

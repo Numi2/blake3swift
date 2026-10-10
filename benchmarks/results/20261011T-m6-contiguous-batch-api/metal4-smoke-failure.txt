@@ -1,0 +1,5 @@
+# Initial Metal 4 aggregate smoke failure
+
+The first M6 Metal 4 aggregate smoke exited with `SIGSEGV` in Apple's `performEndEncoding` implementation. The crash stack pointed to a second `endEncoding()` call: the generic hash encoder had already ended the unified Metal 4 compute pass, and the experimental aggregate wrapper ended it again.
+
+The experimental wrapper was made idempotent and the smoke then completed with correct digests. The later 15-sample comparison is recorded in `metal4-r1.json` and `metal3-r1.json`. Because Metal 4 showed no durable throughput gain, its batch integration and the temporary idempotence workaround were removed from product source. The original preexisting Metal 4 backend remains unchanged.

@@ -1,0 +1,16 @@
+# M4 benchmark availability
+
+Host alias: `macmini`, model `Mac16,11`.
+
+At 2026-10-10 23:16 UTC, four Python processes associated with the existing `numi-human-prep-venv-20261005` environment were each using approximately one CPU core:
+
+| PID | CPU | Elapsed |
+| ---: | ---: | ---: |
+| 11414 | 99.4% | 00:43 |
+| 4228 | 99.3% | 31:56 |
+| 11371 | 99.3% | 00:55 |
+| 10456 | 99.1% | 05:51 |
+
+`mediaanalysisd` was also using 88.6% CPU. Memory pressure showed 82% free memory and `pmset -g therm` reported no thermal, performance, or CPU-power warnings. The sustained CPU load makes a GPU benchmark comparison unreliable, so no M4 compile or benchmark was started. Recheck before running the matched M4 workload.
+
+The baseline source at commit `848f38d` was staged separately at `/tmp/blake3swift-m4-baseline-848f38d` on this host and its `BLAKE3Metal.swift` and benchmark-source hashes match `provenance.txt`. It has not been built or run.
