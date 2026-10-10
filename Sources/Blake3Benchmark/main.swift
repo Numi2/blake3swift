@@ -59,12 +59,10 @@ private enum MetalTimingMode: String {
 #if canImport(Metal)
 /// Experimental input route used to compare Swift's normal allocation with the
 /// documented page-aligned contract for `makeBuffer(bytesNoCopy:)`.
-private var usesPageAlignedWrappedInput: Bool {
-    ["1", "true", "yes"].contains(
-        ProcessInfo.processInfo.environment["BLAKE3_SWIFT_METAL_PAGE_ALIGNED_WRAPPED_INPUT"]?
-            .lowercased() ?? ""
-    )
-}
+private let usesPageAlignedWrappedInput = ["1", "true", "yes"].contains(
+    ProcessInfo.processInfo.environment["BLAKE3_SWIFT_METAL_PAGE_ALIGNED_WRAPPED_INPUT"]?
+        .lowercased() ?? ""
+)
 
 private func hashPageAlignedWrappedCopy(
     _ bytes: some ContiguousBytes,
