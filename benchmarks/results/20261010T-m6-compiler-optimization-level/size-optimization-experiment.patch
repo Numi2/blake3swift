@@ -1,0 +1,65 @@
+diff --git a/Sources/Blake3/BLAKE3MetalKernel.swift b/Sources/Blake3/BLAKE3MetalKernel.swift
+index f8508fe..d8cfce1 100644
+--- a/Sources/Blake3/BLAKE3MetalKernel.swift
++++ b/Sources/Blake3/BLAKE3MetalKernel.swift
+@@ -360,10 +360,15 @@ final class BLAKE3MetalPipelineCache: @unchecked Sendable {
+ }
+ 
+ private extension BLAKE3Metal.LibrarySource {
++    private static var usesSizeOptimizedRuntimeLibrary: Bool {
++        ProcessInfo.processInfo.environment["BLAKE3_SWIFT_METAL_OPTIMIZATION_LEVEL"]?
++            .lowercased() == "size"
++    }
++
+     var cacheIdentifier: String {
+         switch self {
+         case .runtimeSource:
+-            return "runtime-source"
++            return Self.usesSizeOptimizedRuntimeLibrary ? "runtime-source:size" : "runtime-source"
+         case let .metallib(url):
+             return "metallib:\(url.standardizedFileURL.path)"
+         }
+@@ -372,14 +377,26 @@ private extension BLAKE3Metal.LibrarySource {
+     func makeLibrary(device: MTLDevice) throws -> MTLLibrary {
+         switch self {
+         case .runtimeSource:
+-            return try device.makeLibrary(source: BLAKE3MetalKernelSource.chunkCVs, options: nil)
++            return try device.makeLibrary(
++                source: BLAKE3MetalKernelSource.chunkCVs,
++                options: Self.runtimeCompileOptions
++            )
+         case let .metallib(url):
+             return try device.makeLibrary(URL: url)
+         }
+     }
+ 
+     func makeDigestLibrary(device: MTLDevice) throws -> MTLLibrary {
+-        try device.makeLibrary(source: BLAKE3MetalKernelSource.digestOnlyHash, options: nil)
++        try device.makeLibrary(source: BLAKE3MetalKernelSource.digestOnlyHash, options: Self.runtimeCompileOptions)
++    }
++
++    private static var runtimeCompileOptions: MTLCompileOptions? {
++        guard usesSizeOptimizedRuntimeLibrary else {
++            return nil
++        }
++        let options = MTLCompileOptions()
++        options.optimizationLevel = .size
++        return options
+     }
+ }
+ 
+diff --git a/Sources/Blake3Benchmark/main.swift b/Sources/Blake3Benchmark/main.swift
+index 9fd76b5..66588bd 100644
+--- a/Sources/Blake3Benchmark/main.swift
++++ b/Sources/Blake3Benchmark/main.swift
+@@ -3242,6 +3242,10 @@ if let metalDevice, requestedMetalWork {
+ if let metalDevice {
+     print("metalDevice=\(metalDevice.name)")
+     print("metalLibrary=\(metalLibraryDescription(requestedMetalLibrarySource))")
++    let metalCompilerOptimizationLevel = ProcessInfo.processInfo.environment[
++        "BLAKE3_SWIFT_METAL_OPTIMIZATION_LEVEL"
++    ]?.lowercased() == "size" ? "size" : "default"
++    print("metalCompilerOptimizationLevel=\(metalCompilerOptimizationLevel)")
+     print("metalMinimumGPUByteCount=\(requestedMetalMinimumGPUByteCount)")
+     print("metalMappedTileByteCount=\(requestedMetalMappedTileByteCount)")
+     print("metalStagedReadTileByteCount=\(requestedMetalStagedReadTileByteCount)")

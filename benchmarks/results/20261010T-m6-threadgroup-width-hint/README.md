@@ -8,7 +8,7 @@ Setting `threadGroupSizeIsMultipleOfThreadExecutionWidth` to `true` is retained 
 
 The optional `maxTotalThreadsPerThreadgroup` experiment did not show a repeatable improvement over Metal's automatic setting across resident and private input paths. Its temporary runtime control was removed. The threadgroup-size sweeps also did not find a generally faster setting.
 
-The 10x target remains unmet. On the same 1 GiB resident-GPU metric, the earlier M4 best is 68.99 GiB/s and the M6 result is 107.69 GiB/s, about 1.56x. Those results came from different source revisions. The earlier M4 CPU-parallel best was 3.78 GiB/s; M6 reached 17.27 GiB/s, about 4.57x, which is a separate execution class.
+The 10x target remains unmet. On the same 1 GiB resident-GPU metric, the strongest archived M4 row is 83.245 GiB/s and the latest M6 three-process median is 108.175 GiB/s, about 1.30x. Those results came from different source revisions. The strongest archived M4 CPU-parallel row was 12.38 GiB/s; M6 reached about 17.3 GiB/s, about 1.40x, which is a separate execution class. The M6's published 16 GB memory-bandwidth figure makes a 10x resident streaming result physically out of reach; see [the compiler A/B and bandwidth feasibility note](../20261010T-m6-compiler-optimization-level/README.md).
 
 ## Apple guidance applied
 

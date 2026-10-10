@@ -43,7 +43,7 @@ The M6 exposes timestamp sampling at stage boundaries, but the runtime probe fou
 
 The MTL4 API is available on this M6 and the 16 MiB and 1 GiB unkeyed digest paths passed correctness checks. Keyed hashing and XOF are not routed through this experimental backend.
 
-The 10x target is not met. On the same 1 GiB resident-GPU metric, the earlier M4 best in the repository is 68.99 GiB/s and the M6's clean three-run median is 107.69 GiB/s (about 1.56x). These historical results use different source revisions. The M6 CPU-parallel result is 17.27 GiB/s versus the earlier M4 result of 3.78 GiB/s (about 4.57x); neither same-class comparison establishes 10x.
+The 10x target is not met. On the same 1 GiB resident-GPU metric, the strongest archived M4 result in the repository is 83.245 GiB/s and the M6's latest three-process median is 108.175 GiB/s (about 1.30x). These historical results use different source revisions. The M6 CPU-parallel result is about 17.3 GiB/s versus the strongest archived M4 CPU-parallel result of 12.38 GiB/s (about 1.40x). Neither same-class comparison establishes 10x; the M6's published 16 GB memory bandwidth also rules out 10x on the resident streaming path.
 
 ## Preserved development evidence
 

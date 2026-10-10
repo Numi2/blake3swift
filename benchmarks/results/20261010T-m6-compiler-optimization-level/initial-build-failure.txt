@@ -1,0 +1,3 @@
+Attempt: first `swift build -c release --product blake3-bench` after adding the compiler-option A/B switch.
+
+Result: exit status 1; no benchmark was run. Swift reported an unterminated string literal at `Sources/Blake3Benchmark/main.swift:3245`, followed by parser diagnostics at line 3256. The benchmark-level print used escaped quotes inside a Swift interpolation expression. It was rewritten as a local value plus a simple print statement. The corrected release build completed successfully in 73.41 seconds. Existing Command Line Tools linker search-path warnings remained.

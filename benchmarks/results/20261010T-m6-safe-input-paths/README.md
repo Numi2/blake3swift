@@ -15,7 +15,7 @@ Final run artifacts: [Markdown report](final-cached-public/m6-final-cached-publi
 | Caller-provided reusable staging buffer | 34.78, 34.69 | all rows correct | Two isolated repeats; confirms reusable staging is the faster upload shape |
 | `MTLDevice.makeBuffer(bytes:length:options:)` copy control | 9.00 | all rows correct | Six iterations, highly variable and slower; retained as a negative control |
 
-The public cached path improves the two-repeat uncached median by about **6%**. The final public-input result remains below the resident-buffer result because it includes the CPU copy. For context, the existing clean M6 resident-buffer median is 107.69 GiB/s; it excludes that input copy and is a separate metric.
+The public cached path improves the two-repeat uncached median by about **6%**. The final public-input result remains below the resident-buffer result because it includes the CPU copy. For context, the latest three-process M6 resident-buffer median is 108.175 GiB/s; it excludes that input copy and is a separate metric.
 
 | Input size | Public `wrapped-auto` (GiB/s) | CPU parallel (GiB/s) | Correctness |
 | --- | ---: | ---: | --- |
@@ -36,7 +36,7 @@ Keyed digest, XOF, and keyed-XOF benchmark rows at 64 MiB all matched their CPU 
 
 ## Comparison with prior hardware and goal status
 
-The same 1 GiB **resident GPU** benchmark in the repository measured 68.99 GiB/s on the earlier M4 and 107.69 GiB/s on M6, about 1.56×. The same 1 GiB **CPU parallel** benchmark measured 3.78 GiB/s on M4 and about 17.3 GiB/s on M6, about 4.6×. These are different source revisions but matching benchmark paths. Neither comparison reaches the requested 10× target. The M4 end-to-end path and this M6 cached-input path have different allocation/reuse behavior, so their numbers are not presented as a same-path speedup.
+The strongest archived 1 GiB **resident GPU** row in the repository is 83.245 GiB/s on the earlier M4; the current M6 three-process median is 108.175 GiB/s, about 1.30×. The strongest archived 1 GiB **CPU parallel** row on M4 is 12.38 GiB/s; M6 measured about 17.3 GiB/s on that same CPU path, about 1.40×. These are different source revisions but matching benchmark paths. Neither comparison reaches the requested 10× target. The M4 end-to-end path and this M6 cached-input path have different allocation/reuse behavior, so their numbers are not presented as a same-path speedup. See [the M6 compiler-level A/B and bandwidth feasibility note](../20261010T-m6-compiler-optimization-level/README.md).
 
 ## Reproduction and provenance
 

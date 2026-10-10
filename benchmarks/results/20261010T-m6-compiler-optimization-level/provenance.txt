@@ -1,0 +1,11 @@
+date_utc=2026-10-10T21:47:41Z
+      Model Identifier: Mac18,5
+      Chip: Apple M6
+      Memory: 16 GB
+ProductName:		macOS
+ProductVersion:		27.0
+BuildVersion:		26A425
+Apple Swift version 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1)
+Target: arm64-apple-macosx27.0.0
+17c30100c1e1bfbd73fc7e2d485d3433cb9b2076e8da42810b58334f7e801dca  /Users/numi/Work/blake3swift-perf-20261010/Sources/Blake3/BLAKE3MetalKernel.swift
+2b0c43a15c26c29bf7449c5297717a404cba9d1fedd38a781fc660ffd3327a06  /Users/numi/Work/blake3swift-perf-20261010/Sources/Blake3Benchmark/main.swift
