@@ -1,0 +1,6 @@
+device=Apple M6
+supportsCounterSamplingAtStageBoundary=true
+supportsCounterSamplingAtDrawBoundary=false
+supportsCounterSamplingAtBlitBoundary=false
+counterSet=timestamp
+  counter=GPUTimestamp

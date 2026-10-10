@@ -1,0 +1,172 @@
+diff --git a/Sources/Blake3/BLAKE3Metal.swift b/Sources/Blake3/BLAKE3Metal.swift
+index 7823c6b..5025ed1 100644
+--- a/Sources/Blake3/BLAKE3Metal.swift
++++ b/Sources/Blake3/BLAKE3Metal.swift
+@@ -6675,6 +6675,7 @@ public enum BLAKE3Metal {
+               buffer.storageMode != .private,
+               range.count.isMultiple(of: tileByteCount),
+               canLoadWords,
++              canUseAlignedFullChunkKernel(buffer: buffer, range: range),
+               chunkCount >= tileChunkCount * 2,
+               threadgroupMemoryByteCount <= buffer.device.maxThreadgroupMemoryLength,
+               let tilePipeline = fusedTilePipeline(
+@@ -6791,6 +6792,7 @@ public enum BLAKE3Metal {
+               buffer.storageMode != .private,
+               range.count.isMultiple(of: tileByteCount),
+               canLoadWords,
++              canUseAlignedFullChunkKernel(buffer: buffer, range: range),
+               chunkCount >= tileChunkCount * 2,
+               threadgroupMemoryByteCount <= buffer.device.maxThreadgroupMemoryLength,
+               let tilePipeline = fusedTilePipeline(
+@@ -6816,7 +6818,15 @@ public enum BLAKE3Metal {
+     }
+ 
+     private static func canUseAlignedFullChunkKernel(buffer: MTLBuffer, range: Range<Int>) -> Bool {
+-        canLoadWords(buffer: buffer, range: range)
++        guard buffer.storageMode != .private,
++              canLoadWords(buffer: buffer, range: range)
++        else {
++            return false
++        }
++
++        let vectorAlignment = MemoryLayout<SIMD4<UInt32>>.alignment
++        let address = Int(bitPattern: buffer.contents()) + range.lowerBound
++        return address.isMultiple(of: vectorAlignment)
+     }
+ 
+     private static func canLoadWords(buffer: MTLBuffer, range: Range<Int>) -> Bool {
+diff --git a/Sources/Blake3/BLAKE3MetalKernel.swift b/Sources/Blake3/BLAKE3MetalKernel.swift
+index f8508fe..484c153 100644
+--- a/Sources/Blake3/BLAKE3MetalKernel.swift
++++ b/Sources/Blake3/BLAKE3MetalKernel.swift
+@@ -538,6 +538,31 @@ enum BLAKE3MetalKernelSource {
+         return words[wordOffset];
+     }
+ 
++    static inline void load16_aligned(device const uint4 *vectors,
++                                      uint vectorOffset,
++                                      thread uint words[16]) {
++        uint4 vector0 = vectors[vectorOffset + 0u];
++        uint4 vector1 = vectors[vectorOffset + 1u];
++        uint4 vector2 = vectors[vectorOffset + 2u];
++        uint4 vector3 = vectors[vectorOffset + 3u];
++        words[0] = vector0.x;
++        words[1] = vector0.y;
++        words[2] = vector0.z;
++        words[3] = vector0.w;
++        words[4] = vector1.x;
++        words[5] = vector1.y;
++        words[6] = vector1.z;
++        words[7] = vector1.w;
++        words[8] = vector2.x;
++        words[9] = vector2.y;
++        words[10] = vector2.z;
++        words[11] = vector2.w;
++        words[12] = vector3.x;
++        words[13] = vector3.y;
++        words[14] = vector3.z;
++        words[15] = vector3.w;
++    }
++
+     static inline void store32_aligned(device uint *words, uint wordOffset, uint word) {
+         words[wordOffset] = word;
+     }
+@@ -670,27 +695,20 @@ enum BLAKE3MetalKernelSource {
+                                              thread const uint key[8],
+                                              uint flags,
+                                              thread uint cv[8]) {
+-        device const uint *chunkWords32 = reinterpret_cast<device const uint *>(chunk);
++        device const uint4 *chunkVectors = reinterpret_cast<device const uint4 *>(chunk);
+ 
+         init_cv(cv, key);
+ 
+         uint blockWords[16];
+-        for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+-            blockWords[wordIndex] = load32_aligned(chunkWords32, wordIndex);
+-        }
++        load16_aligned(chunkVectors, 0u, blockWords);
+         compress_in_place(cv, blockWords, 64u, chunkCounter, flags | 1u);
+ 
+         for (uint blockIndex = 1u; blockIndex < 15u; blockIndex++) {
+-            uint wordBase = blockIndex * 16u;
+-            for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+-                blockWords[wordIndex] = load32_aligned(chunkWords32, wordBase + wordIndex);
+-            }
++            load16_aligned(chunkVectors, blockIndex * 4u, blockWords);
+             compress_in_place(cv, blockWords, 64u, chunkCounter, flags);
+         }
+ 
+-        for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+-            blockWords[wordIndex] = load32_aligned(chunkWords32, 240u + wordIndex);
+-        }
++        load16_aligned(chunkVectors, 60u, blockWords);
+         compress_in_place(cv, blockWords, 64u, chunkCounter, flags | 2u);
+     }
+ 
+@@ -2191,6 +2209,31 @@ enum BLAKE3MetalKernelSource {
+         return words[wordOffset];
+     }
+ 
++    static inline void load16_aligned(device const uint4 *vectors,
++                                      uint vectorOffset,
++                                      thread uint words[16]) {
++        uint4 vector0 = vectors[vectorOffset + 0u];
++        uint4 vector1 = vectors[vectorOffset + 1u];
++        uint4 vector2 = vectors[vectorOffset + 2u];
++        uint4 vector3 = vectors[vectorOffset + 3u];
++        words[0] = vector0.x;
++        words[1] = vector0.y;
++        words[2] = vector0.z;
++        words[3] = vector0.w;
++        words[4] = vector1.x;
++        words[5] = vector1.y;
++        words[6] = vector1.z;
++        words[7] = vector1.w;
++        words[8] = vector2.x;
++        words[9] = vector2.y;
++        words[10] = vector2.z;
++        words[11] = vector2.w;
++        words[12] = vector3.x;
++        words[13] = vector3.y;
++        words[14] = vector3.z;
++        words[15] = vector3.w;
++    }
++
+     static inline void store32_aligned(device uint *words, uint wordOffset, uint word) {
+         words[wordOffset] = word;
+     }
+@@ -2273,7 +2316,7 @@ enum BLAKE3MetalKernelSource {
+     static inline void chunk_full_aligned_cv(device const uchar *chunk,
+                                              ulong chunkCounter,
+                                              thread uint cv[8]) {
+-        device const uint *chunkWords32 = reinterpret_cast<device const uint *>(chunk);
++        device const uint4 *chunkVectors = reinterpret_cast<device const uint4 *>(chunk);
+ 
+         cv[0] = IV[0];
+         cv[1] = IV[1];
+@@ -2285,22 +2328,15 @@ enum BLAKE3MetalKernelSource {
+         cv[7] = IV[7];
+ 
+         uint blockWords[16];
+-        for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+-            blockWords[wordIndex] = load32_aligned(chunkWords32, wordIndex);
+-        }
++        load16_aligned(chunkVectors, 0u, blockWords);
+         compress_in_place(cv, blockWords, 64u, chunkCounter, 1u);
+ 
+         for (uint blockIndex = 1u; blockIndex < 15u; blockIndex++) {
+-            uint wordBase = blockIndex * 16u;
+-            for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+-                blockWords[wordIndex] = load32_aligned(chunkWords32, wordBase + wordIndex);
+-            }
++            load16_aligned(chunkVectors, blockIndex * 4u, blockWords);
+             compress_in_place(cv, blockWords, 64u, chunkCounter, 0u);
+         }
+ 
+-        for (uint wordIndex = 0u; wordIndex < 16u; wordIndex++) {
+-            blockWords[wordIndex] = load32_aligned(chunkWords32, 240u + wordIndex);
+-        }
++        load16_aligned(chunkVectors, 60u, blockWords);
+         compress_in_place(cv, blockWords, 64u, chunkCounter, 2u);
+     }
+ 

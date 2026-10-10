@@ -1,0 +1,25 @@
+git_head_before_experiment=af622f109d1a3d69b103cb90228ceb14db1679de
+host=Mac18,5 Apple M6 16 GB; macOS 27.0 build 26A425
+swift=Apple Swift 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1)
+build_candidate=swift build -c release; completed in 70.55 s
+build_parent=swift build -c release; completed in 68.85 s
+build_warnings=Command Line Tools linker search paths for Developer/usr/lib and Developer/Library/Frameworks were missing; both builds completed successfully
+
+parent_BLAKE3Metal.swift_sha256=a12df53d7e9701f97d626877816e9993da41717926fcb73b6d433240fc8c2915
+parent_BLAKE3MetalKernel.swift_sha256=710b7182afc6615ff5b478593be273eab7934392af5436dfd41c0652e49ef9d1
+candidate_BLAKE3Metal.swift_sha256=c8fb97227c6f15270a602f8b750de6a8c8b931b6f9077bba309a832edd5cd0e1
+candidate_BLAKE3MetalKernel.swift_sha256=0259681e95ff7911a0ee215958356cf2ea0184a08a1de2ab273055af1d04bb11
+benchmark_main.swift_sha256=47f760adb5caa53883271639377c6381970fe12c6e415f06838d8e3f0f1ca78e
+candidate_binary_sha256=d70bceb826ed12a9a2935a719739ecdd54abbeff2f71c66b9647a627720e955a
+parent_binary_sha256=b00a4fc1626c742cf709339a3e3d0afbdf46a315e6e1953aabb643bbebfe6797
+experiment_patch_sha256=66cac1bbbdd4602a297d60b806b85ce79f0dcec8e63999ee580a0aef43573372
+
+benchmark=1 GiB; six timed iterations per process; resident shared Metal buffer; resident-gpu row; 3 parent processes and 3 candidate processes
+candidate_JSON_validation=jsonValidation=ok for vector-r1.json, vector-r2.json, vector-r3.json
+parent_JSON_validation=jsonValidation=ok for baseline-r1.json, baseline-r2.json, baseline-r3.json
+candidate_false_correctness_rows=0 in each report
+parent_false_correctness_rows=0 in each report
+thermal=No thermal or performance warning recorded before or after each run
+
+counter_probe=device.counterSets exposed only timestamp/GPUTimestamp; stage-boundary sampling supported; draw- and blit-boundary sampling unsupported
+instrumentation=xcode-select points to /Library/Developer/CommandLineTools; xctrace unavailable; Instruments executable unavailable
