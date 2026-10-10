@@ -1,0 +1,4 @@
+jsonValidation=ok path=/Users/numi/Work/blake3swift-perf-20261010/perf-experiments/20261010T-m6-batch-paths/pipeline-width-r1.json
+jsonValidation=ok path=/Users/numi/Work/blake3swift-perf-20261010/perf-experiments/20261010T-m6-batch-paths/pipeline-width-64b-r1.json
+jsonValidation=ok path=/Users/numi/Work/blake3swift-perf-20261010/perf-experiments/20261010T-m6-batch-paths/pipeline-width-64b-r2.json
+jsonValidation=ok path=/Users/numi/Work/blake3swift-perf-20261010/perf-experiments/20261010T-m6-batch-paths/pipeline-width-64b-r3.json

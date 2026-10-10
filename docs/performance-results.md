@@ -78,6 +78,18 @@ benchmarks/results/20261010T-m6-auto-gate-confirm
 benchmarks/results/20261010T-m6-auto-gate4-default
 ```
 
+## October 10, 2026 Apple M6 One-Chunk Batch Pipeline Width Sweep
+
+The batch-specific M6 width sweep and raw reports are in `benchmarks/results/20261010T-m6-batch-paths`. This tests 1 KiB messages at 64 MiB and 64-byte messages at 16 MiB. All report rows validated; no product source changed.
+
+On the 64 MiB, 1 KiB-message case, width 32 raised the same-run private plan-write median from 67.47 to 102.42 GiB/s (101.54 GiB/s stability-adjusted). Its chained private-write path rose from 79.54 to 97.93 GiB/s. On the 64-byte case, private plan writes plateaued around 110–111 GiB/s at widths 44–48; chained results plateaued near 65 GiB/s around widths 24–32 and did not improve at widths up to 48.
+
+The same 16 MiB, 64-byte-message input also measured the public `hashOneChunkBatchDigestBytes(plan:)` aggregate path at 11.49–11.50 GiB/s, versus 0.417–0.420 GiB/s for the serial CPU batch reference (27.4–27.6×). Both paths returned the same expected aggregate digest. This is a batch-specific M6 result, not a cross-hardware comparison; the archived M4 reports do not include this workload. The plan and resident buffer are created outside the timed call.
+
+These pipelines are benchmark-only and replay one stable input plan into distinct output buffers. The result is repeated-plan throughput, not single-call latency or a distinct-input application workload. It does not justify changing production defaults. The M6 counter probe exposes only GPU timestamps and the host lacks Instruments/`xctrace`, so these results do not identify the hardware bottleneck. See the experiment [report](../benchmarks/results/20261010T-m6-batch-paths/README.md) for methods, Apple profiling references, and limits.
+
+The latest comparable 1 GiB resident-GPU medians remain 108.748 GiB/s on M6 and 83.245 GiB/s on M4 (1.31×). Apple specifies 153 GB/s bandwidth for the 16 GB M6 configuration, which bounds further gains on this same byte-throughput path; the 10× objective remains open and needs a different workload or a structural change.
+
 ## April 21, 2026 CPU One-Shot Reusable-Context Follow-Up
 
 This pass stopped chasing the strict `single-simd` apples-to-apples CPU baseline and instead targeted the fastest Swift CPU one-shot execution model already exposed by the library: the parallel tree path.
