@@ -16,6 +16,7 @@ private enum MetalTimingMode: String {
     case privateStaged = "private-staged"
     case staged
     case wrapped
+    case deviceCopy = "device-copy"
     case endToEnd = "e2e"
 
     var labelComponent: String {
@@ -30,6 +31,8 @@ private enum MetalTimingMode: String {
             return "staged"
         case .wrapped:
             return "wrapped"
+        case .deviceCopy:
+            return "device-copy"
         case .endToEnd:
             return "e2e"
         }
@@ -47,9 +50,11 @@ private enum MetalTimingMode: String {
             return "pre-created shared staging MTLBuffer; timed Swift-byte copy into staging buffer plus hash"
         case .wrapped:
             if usesPageAlignedWrappedInput {
-                return "timed page-aligned allocation and copy, no-copy MTLBuffer wrapper, and hash"
+                return "timed page-aligned allocation, \(pageAlignedCopyWorkers)-worker copy, shared MTLBuffer wrapper, and hash; writeCombined=\(pageAlignedCopyUsesWriteCombined)"
             }
-            return "timed no-copy MTLBuffer wrapper over existing Swift bytes plus hash"
+            return "timed Swift input route with reusable shared MTLBuffer copy, hash command submission, and completion; allocation is included on first use or growth"
+        case .deviceCopy:
+            return "timed MTLDevice.makeBuffer(bytes:length:options:) copy from Swift input, GPU hash, and completion"
         case .endToEnd:
             return "timed shared MTLBuffer allocation/copy from Swift bytes plus hash"
         }
@@ -63,6 +68,31 @@ private let usesPageAlignedWrappedInput = ["1", "true", "yes"].contains(
     ProcessInfo.processInfo.environment["BLAKE3_SWIFT_METAL_PAGE_ALIGNED_WRAPPED_INPUT"]?
         .lowercased() ?? ""
 )
+private let pageAlignedCopyWorkers = max(
+    1,
+    Int(ProcessInfo.processInfo.environment["BLAKE3_SWIFT_METAL_PAGE_ALIGNED_COPY_WORKERS"] ?? "1") ?? 1
+)
+private let pageAlignedCopyUsesWriteCombined = ["1", "true", "yes"].contains(
+    ProcessInfo.processInfo.environment["BLAKE3_SWIFT_METAL_PAGE_ALIGNED_WRITE_COMBINED"]?
+        .lowercased() ?? ""
+)
+
+private func makeDeviceCopiedBuffer(
+    from input: UnsafeRawBufferPointer,
+    device: MTLDevice
+) -> MTLBuffer {
+    guard input.count > 0,
+          let sourceBase = input.baseAddress,
+          let buffer = device.makeBuffer(
+            bytes: sourceBase,
+            length: input.count,
+            options: .storageModeShared
+          )
+    else {
+        fatalError("Unable to make a Metal buffer by copying the benchmark input.")
+    }
+    return buffer
+}
 
 private func hashPageAlignedWrappedCopy(
     _ bytes: some ContiguousBytes,
@@ -74,19 +104,51 @@ private func hashPageAlignedWrappedCopy(
             return BLAKE3.hash(source)
         }
         let pageSize = Int(getpagesize())
-        guard source.count.isMultiple(of: pageSize) else {
-            fatalError("Page-aligned wrapper experiment requires a page-multiple input size.")
+        let sourceCount = source.count
+        guard sourceCount <= Int.max - (pageSize - 1) else {
+            fatalError("Input is too large for a page-aligned allocation.")
         }
+        let allocationLength = (sourceCount + pageSize - 1) & ~(pageSize - 1)
         var allocation: UnsafeMutableRawPointer?
-        guard posix_memalign(&allocation, pageSize, source.count) == 0,
+        guard posix_memalign(&allocation, pageSize, allocationLength) == 0,
               let allocation
         else {
             fatalError("Unable to allocate page-aligned input for the wrapper experiment.")
         }
         defer { free(allocation) }
-        memcpy(allocation, sourceBase, source.count)
-        let alignedInput = UnsafeRawBufferPointer(start: allocation, count: source.count)
-        return try! context.hash(input: alignedInput, policy: policy)
+        let options: MTLResourceOptions = pageAlignedCopyUsesWriteCombined
+            ? [.storageModeShared, .cpuCacheModeWriteCombined]
+            : .storageModeShared
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let buffer = device.makeBuffer(
+                bytesNoCopy: allocation,
+                length: allocationLength,
+                options: options,
+                deallocator: nil
+              )
+        else {
+            fatalError("Unable to wrap page-aligned copied input in a Metal buffer.")
+        }
+
+        let workers = min(pageAlignedCopyWorkers, max(1, sourceCount / (1 << 20)))
+        let destinationAddress = UInt(bitPattern: buffer.contents())
+        if workers == 1 {
+            memcpy(buffer.contents(), sourceBase, sourceCount)
+        } else {
+            let sourceAddress = UInt(bitPattern: sourceBase)
+            DispatchQueue.concurrentPerform(iterations: workers) { worker in
+                let baseCount = sourceCount / workers
+                let remainder = sourceCount % workers
+                let start = worker * baseCount + min(worker, remainder)
+                let byteCount = baseCount + (worker < remainder ? 1 : 0)
+                memcpy(
+                    UnsafeMutableRawPointer(bitPattern: destinationAddress + UInt(start))!,
+                    UnsafeRawPointer(bitPattern: sourceAddress + UInt(start))!,
+                    byteCount
+                )
+            }
+        }
+        return try! context.hash(buffer: buffer, range: 0..<sourceCount, policy: policy)
     }
 }
 #endif
@@ -504,6 +566,8 @@ private func metalTimingModes() -> [MetalTimingMode] {
                 return .staged
             case "wrapped", "nocopy", "no-copy", "bytes-no-copy":
                 return .wrapped
+            case "device-copy", "make-buffer-copy", "bytes-copy":
+                return .deviceCopy
             case "e2e", "end-to-end", "endtoend":
                 return .endToEnd
             default:
@@ -537,6 +601,8 @@ private func sustainedMode() -> MetalTimingMode {
         return .staged
     case "wrapped", "nocopy", "no-copy", "bytes-no-copy":
         return .wrapped
+    case "device-copy", "make-buffer-copy", "bytes-copy":
+        return .deviceCopy
     case "e2e", "end-to-end", "endtoend":
         return .endToEnd
     default:
@@ -2604,6 +2670,8 @@ private func parseAutotuneMetalMode(_ token: String) -> MetalTimingMode? {
         return .staged
     case "wrapped", "wrapped-gpu", "nocopy", "no-copy", "bytes-no-copy":
         return .wrapped
+    case "device-copy", "device-copy-gpu", "make-buffer-copy", "bytes-copy":
+        return .deviceCopy
     case "e2e", "e2e-gpu", "end-to-end", "endtoend":
         return .endToEnd
     default:
@@ -2907,6 +2975,25 @@ private func runMetalAutotune() throws {
                 ) { bytes in
                     try modeContext.hash(input: bytes, policy: .gpu)
                 }
+            case .deviceCopy:
+                result = try runThrowingBenchmark(
+                    backend: "metal-autotune",
+                    mode: candidate,
+                    input: input,
+                    iterations: iterations
+                ) { bytes in
+                    try bytes.withUnsafeBytes { rawInput in
+                        guard rawInput.count > 0 else {
+                            return BLAKE3.hash(rawInput)
+                        }
+                        let buffer = makeDeviceCopiedBuffer(from: rawInput, device: device)
+                        return try modeContext.hash(
+                            buffer: buffer,
+                            range: 0..<rawInput.count,
+                            policy: .gpu
+                        )
+                    }
+                }
             case .endToEnd:
                 result = try runThrowingBenchmark(
                     backend: "metal-autotune",
@@ -3160,6 +3247,8 @@ if let metalDevice {
     print("metalStagedReadTileByteCount=\(requestedMetalStagedReadTileByteCount)")
     print("metalModes=\(requestedMetalTimingModes.map(\.rawValue).joined(separator: ","))")
     print("pageAlignedWrappedInput=\(usesPageAlignedWrappedInput)")
+    print("pageAlignedCopyWorkers=\(pageAlignedCopyWorkers)")
+    print("pageAlignedCopyWriteCombined=\(pageAlignedCopyUsesWriteCombined)")
     print("metalCommandTiming=\(ProcessInfo.processInfo.environment["BLAKE3_SWIFT_METAL_COMMAND_TIMING"] == "1")")
     print("metalCommandBackend=\(ProcessInfo.processInfo.environment["BLAKE3_SWIFT_METAL_BACKEND"] ?? "legacy")")
     print("metalDigestPipelineWidthHint=true")
@@ -3183,6 +3272,9 @@ if let metalDevice {
     }
     if requestedMetalTimingModes.contains(.wrapped) {
         print("metal-wrapped includes: \(MetalTimingMode.wrapped.description)")
+    }
+    if requestedMetalTimingModes.contains(.deviceCopy) {
+        print("metal-device-copy includes: \(MetalTimingMode.deviceCopy.description)")
     }
     if requestedMetalTimingModes.contains(.endToEnd) {
         print("metal-e2e includes: \(MetalTimingMode.endToEnd.description)")
@@ -3642,6 +3734,8 @@ for size in requestedSizes {
     var metalStagedGPU: BenchmarkResult?
     var metalWrappedAuto: BenchmarkResult?
     var metalWrappedGPU: BenchmarkResult?
+    var metalDeviceCopyAuto: BenchmarkResult?
+    var metalDeviceCopyGPU: BenchmarkResult?
     var metalE2EAuto: BenchmarkResult?
     var metalE2EGPU: BenchmarkResult?
     if let metalDevice,
@@ -3825,6 +3919,48 @@ for size in requestedSizes {
                 }
             )
         }
+        if requestedMetalTimingModes.contains(.deviceCopy) {
+            headlineCandidates.append(
+                BenchmarkCandidate(
+                    backend: "metal",
+                    mode: "device-copy-auto",
+                    byteCount: input.count,
+                    expectedDigest: nil
+                ) { bytes in
+                    bytes.withUnsafeBytes { rawInput in
+                        guard rawInput.count > 0 else {
+                            return BLAKE3.hash(rawInput)
+                        }
+                        let buffer = makeDeviceCopiedBuffer(from: rawInput, device: metalDevice)
+                        return try! metalContext.hash(
+                            buffer: buffer,
+                            range: 0..<rawInput.count,
+                            policy: .automatic
+                        )
+                    }
+                }
+            )
+            headlineCandidates.append(
+                BenchmarkCandidate(
+                    backend: "metal",
+                    mode: "device-copy-gpu",
+                    byteCount: input.count,
+                    expectedDigest: nil
+                ) { bytes in
+                    bytes.withUnsafeBytes { rawInput in
+                        guard rawInput.count > 0 else {
+                            return BLAKE3.hash(rawInput)
+                        }
+                        let buffer = makeDeviceCopiedBuffer(from: rawInput, device: metalDevice)
+                        return try! metalContext.hash(
+                            buffer: buffer,
+                            range: 0..<rawInput.count,
+                            policy: .gpu
+                        )
+                    }
+                }
+            )
+        }
         if requestedMetalTimingModes.contains(.endToEnd) {
             headlineCandidates.append(
                 BenchmarkCandidate(
@@ -3874,6 +4010,10 @@ for size in requestedSizes {
                 metalWrappedAuto = result
             case "wrapped-gpu":
                 metalWrappedGPU = result
+            case "device-copy-auto":
+                metalDeviceCopyAuto = result
+            case "device-copy-gpu":
+                metalDeviceCopyGPU = result
             case "e2e-auto":
                 metalE2EAuto = result
             case "e2e-gpu":
@@ -4595,6 +4735,12 @@ for size in requestedSizes {
     if let metalWrappedGPU {
         results.append(metalWrappedGPU)
     }
+    if let metalDeviceCopyAuto {
+        results.append(metalDeviceCopyAuto)
+    }
+    if let metalDeviceCopyGPU {
+        results.append(metalDeviceCopyGPU)
+    }
     if let metalE2EAuto {
         results.append(metalE2EAuto)
     }
@@ -4705,6 +4851,18 @@ for size in requestedSizes {
                 return try! metalContext.hash(input: input, using: stagedBuffer!, policy: policy)
             case .wrapped:
                 return try! metalContext.hash(input: input, policy: policy)
+            case .deviceCopy:
+                return input.withUnsafeBytes { rawInput in
+                    guard rawInput.count > 0 else {
+                        return BLAKE3.hash(rawInput)
+                    }
+                    let buffer = makeDeviceCopiedBuffer(from: rawInput, device: metalDevice)
+                    return try! metalContext.hash(
+                        buffer: buffer,
+                        range: 0..<rawInput.count,
+                        policy: policy
+                    )
+                }
             case .endToEnd:
                 let buffer = makeMetalBuffer(device: metalDevice, input: input)!
                 return try! metalContext.hash(buffer: buffer, length: size, policy: policy)

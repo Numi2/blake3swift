@@ -38,17 +38,51 @@ public enum BLAKE3Metal {
     private static let largeGridThreadThreshold = 1024 * 1024
     private static let smallGridSIMDGroupsPerThreadgroup = 8
     private static let largeGridSIMDGroupsPerThreadgroup = 4
+    private static let parallelInputCopyThreshold = 16 * 1024 * 1024
+    private static let parallelInputCopyWorkerLimit = 4
     private static let reportsCommandBufferTiming =
         ProcessInfo.processInfo.environment["BLAKE3_SWIFT_METAL_COMMAND_TIMING"] == "1"
     // Benchmark-only backend comparison; the opt-in path currently handles unkeyed digests.
     private static let usesMetal4HashBackend =
         ProcessInfo.processInfo.environment["BLAKE3_SWIFT_METAL_BACKEND"]?.lowercased() == "metal4"
-    private static let writeCombinedOwnedSharedBufferMaxBytes = 128 * 1024 * 1024
     private static let fusedTileChunkCount = configuredFusedTileChunkCount()
     private static let fusedTileReductionStrategy = configuredFusedTileReductionStrategy()
 
     private static let defaultDevice = BLAKE3MetalDeviceReference(MTLCreateSystemDefaultDevice())
     private static let contextCache = BLAKE3MetalContextCache()
+
+    private static func copyInput(_ input: UnsafeRawBufferPointer, into buffer: MTLBuffer) throws {
+        guard let sourceBase = input.baseAddress else {
+            throw BLAKE3Error.metalCommandFailed("Input bytes are unavailable.")
+        }
+
+        let workerCount: Int
+        if input.count >= parallelInputCopyThreshold {
+            workerCount = min(parallelInputCopyWorkerLimit, max(1, ProcessInfo.processInfo.activeProcessorCount))
+        } else {
+            workerCount = 1
+        }
+
+        if workerCount == 1 {
+            buffer.contents().copyMemory(from: sourceBase, byteCount: input.count)
+            return
+        }
+
+        let sourceAddress = UInt(bitPattern: sourceBase)
+        let destinationAddress = UInt(bitPattern: buffer.contents())
+        let byteCount = input.count
+        DispatchQueue.concurrentPerform(iterations: workerCount) { worker in
+            let baseCount = byteCount / workerCount
+            let remainder = byteCount % workerCount
+            let start = worker * baseCount + min(worker, remainder)
+            let workerByteCount = baseCount + (worker < remainder ? 1 : 0)
+            memcpy(
+                UnsafeMutableRawPointer(bitPattern: destinationAddress + UInt(start))!,
+                UnsafeRawPointer(bitPattern: sourceAddress + UInt(start))!,
+                workerByteCount
+            )
+        }
+    }
 
     fileprivate final class CrossThreadResourceLock: @unchecked Sendable {
         private let semaphore = DispatchSemaphore(value: 1)
@@ -1206,10 +1240,12 @@ public enum BLAKE3Metal {
 
     /// Reusable Metal hashing context.
     ///
-    /// A context owns pipeline state, one command queue, synchronous scratch buffers, and a default async
-    /// workspace. It is safe to share across tasks: synchronous calls serialize scratch-buffer reuse, while
-    /// async calls lease independent workspace resources. Caller-owned `MTLBuffer` values must remain valid
-    /// until the corresponding sync call returns or async call completes.
+    /// A context owns pipeline state, one command queue, synchronous scratch buffers, a reusable Swift-input
+    /// staging buffer, and a default async workspace. It is safe to share across tasks: synchronous calls
+    /// serialize scratch-buffer reuse, while async calls lease independent workspace resources. The input
+    /// staging buffer grows to the largest GPU input and remains allocated while the context lives.
+    /// Caller-owned `MTLBuffer` values must remain valid until the corresponding sync call returns or async
+    /// call completes.
     public final class Context: @unchecked Sendable {
         public let device: MTLDevice
         /// Minimum byte count where `.automatic` selects GPU work.
@@ -1221,6 +1257,8 @@ public enum BLAKE3Metal {
         private let commandQueue: MTLCommandQueue
         private let defaultAsyncWorkspace: AsyncWorkspace
         private let lock = NSLock()
+        private let defaultInputStagingBufferLock = NSLock()
+        private var defaultInputStagingBuffer: StagingBuffer?
         private var metal4BackendStorage: AnyObject?
 
         private var chunkCVBuffer: MTLBuffer?
@@ -1271,6 +1309,23 @@ public enum BLAKE3Metal {
                 throw BLAKE3Error.metalCommandFailed("Unable to allocate staging input buffer.")
             }
             return StagingBuffer(buffer: buffer, capacity: capacity)
+        }
+
+        private func reusableInputStagingBuffer(capacity: Int) throws -> StagingBuffer {
+            defaultInputStagingBufferLock.lock()
+            defer {
+                defaultInputStagingBufferLock.unlock()
+            }
+            if let defaultInputStagingBuffer,
+               defaultInputStagingBuffer.capacity >= capacity {
+                return defaultInputStagingBuffer
+            }
+            let buffer = try makeStagingBuffer(capacity: capacity)
+            if BLAKE3Metal.reportsCommandBufferTiming {
+                buffer.buffer.label = "BLAKE3 reusable shared input"
+            }
+            defaultInputStagingBuffer = buffer
+            return buffer
         }
 
         /// Allocates a reusable async workspace for concurrent Metal hashing.
@@ -2426,10 +2481,11 @@ public enum BLAKE3Metal {
             )
         }
 
-        /// Hashes Swift-owned contiguous input by temporarily wrapping it in a shared Metal buffer.
+        /// Hashes Swift-owned contiguous input, copying to reusable shared memory when Metal is selected.
         ///
-        /// This is a synchronous no-copy path for unified-memory systems. The input buffer only needs to
-        /// remain valid for this call because the method waits for Metal completion before returning.
+        /// CPU execution reads the input directly. GPU execution copies the input into a shared Metal buffer
+        /// and waits for the hash to complete before returning. The context retains a buffer sized for its
+        /// largest GPU input so repeated calls avoid buffer allocation.
         public func hash(
             input: some ContiguousBytes,
             policy: ExecutionPolicy = .automatic
@@ -2439,9 +2495,7 @@ public enum BLAKE3Metal {
             }
         }
 
-        /// Hashes raw Swift-owned input by temporarily wrapping it in a shared Metal buffer.
-        ///
-        /// The buffer only needs to remain valid for this synchronous call.
+        /// Hashes raw Swift-owned input, copying it to reusable shared memory when Metal is selected.
         public func hash(
             input: UnsafeRawBufferPointer,
             policy: ExecutionPolicy = .automatic
@@ -2454,23 +2508,15 @@ public enum BLAKE3Metal {
             policy: ExecutionPolicy,
             mode: HashMode
         ) throws -> BLAKE3.Digest {
-            guard input.count > 0 else {
+            guard input.count > 0,
+                  policy != .cpu,
+                  policy != .automatic || input.count >= minimumGPUByteCount,
+                  input.count > BLAKE3.chunkByteCount
+            else {
                 return BLAKE3Metal.hashOnCPU(input: input, mode: mode)
             }
-            guard let baseAddress = input.baseAddress,
-                  let buffer = device.makeBuffer(
-                    bytesNoCopy: UnsafeMutableRawPointer(mutating: baseAddress),
-                    length: input.count,
-                    options: .storageModeShared,
-                    deallocator: nil
-                  )
-            else {
-                throw BLAKE3Error.metalCommandFailed("Unable to wrap Swift input in a Metal buffer.")
-            }
-            if BLAKE3Metal.reportsCommandBufferTiming {
-                buffer.label = "BLAKE3 Swift no-copy input"
-            }
-            return try hash(buffer: buffer, range: 0..<input.count, policy: policy, mode: mode)
+            let stagingBuffer = try reusableInputStagingBuffer(capacity: input.count)
+            return try hash(input: input, using: stagingBuffer, policy: policy, mode: mode)
         }
 
         /// Hashes Swift-owned contiguous input through this context and returns BLAKE3 XOF output.
@@ -2523,16 +2569,7 @@ public enum BLAKE3Metal {
                     seek: seek
                 )
             }
-            guard let baseAddress = input.baseAddress,
-                  let buffer = device.makeBuffer(
-                    bytesNoCopy: UnsafeMutableRawPointer(mutating: baseAddress),
-                    length: input.count,
-                    options: .storageModeShared,
-                    deallocator: nil
-                  )
-            else {
-                throw BLAKE3Error.metalCommandFailed("Unable to wrap Swift input in a Metal buffer.")
-            }
+            let buffer = try makeOwnedSharedBuffer(copying: input)
             return try hash(
                 buffer: buffer,
                 range: 0..<input.count,
@@ -3361,6 +3398,15 @@ public enum BLAKE3Metal {
             using stagingBuffer: StagingBuffer,
             policy: ExecutionPolicy = .automatic
         ) throws -> BLAKE3.Digest {
+            try hash(input: input, using: stagingBuffer, policy: policy, mode: .unkeyed)
+        }
+
+        fileprivate func hash(
+            input: UnsafeRawBufferPointer,
+            using stagingBuffer: StagingBuffer,
+            policy: ExecutionPolicy,
+            mode: HashMode
+        ) throws -> BLAKE3.Digest {
             guard stagingBuffer.buffer.device.registryID == device.registryID else {
                 throw BLAKE3Error.metalCommandFailed("Staging buffer belongs to a different Metal device.")
             }
@@ -3382,7 +3428,12 @@ public enum BLAKE3Metal {
                     byteCount: input.count
                 )
             }
-            return try hash(buffer: stagingBuffer.buffer, length: input.count, policy: policy)
+            return try hash(
+                buffer: stagingBuffer.buffer,
+                range: 0..<input.count,
+                policy: policy,
+                mode: mode
+            )
         }
 
         @_spi(Benchmark)
@@ -3392,36 +3443,36 @@ public enum BLAKE3Metal {
             }
         }
 
-        func makeOwnedSharedBuffer(copying input: UnsafeRawBufferPointer) throws -> MTLBuffer {
-            guard input.count > 0 else {
+        fileprivate func makeOwnedSharedBuffer(length: Int) throws -> MTLBuffer {
+            guard length >= 0 else {
+                throw BLAKE3Error.metalCommandFailed("Shared Metal buffer length cannot be negative.")
+            }
+            guard length > 0 else {
                 guard let buffer = device.makeBuffer(length: 1, options: .storageModeShared) else {
                     throw BLAKE3Error.metalCommandFailed("Unable to allocate shared Metal buffer.")
                 }
                 return buffer
             }
-            guard let baseAddress = input.baseAddress else {
-                throw BLAKE3Error.metalCommandFailed("Input bytes are unavailable.")
-            }
 
             let pageSize = max(Int(getpagesize()), MemoryLayout<UnsafeMutableRawPointer>.alignment)
-            let allocationLength = ((input.count - 1) / pageSize + 1) * pageSize
+            let padding = (pageSize - length % pageSize) % pageSize
+            guard length <= Int.max - padding else {
+                throw BLAKE3Error.metalCommandFailed("Shared Metal buffer length is too large.")
+            }
+            let allocationLength = length + padding
+            guard allocationLength <= device.maxBufferLength else {
+                throw BLAKE3Error.metalCommandFailed("Shared Metal buffer exceeds the device's maximum length.")
+            }
             var allocation: UnsafeMutableRawPointer?
             let status = posix_memalign(&allocation, pageSize, allocationLength)
             guard status == 0, let allocation else {
                 throw BLAKE3Error.metalCommandFailed("Unable to allocate page-aligned shared Metal buffer.")
             }
-            allocation.copyMemory(from: baseAddress, byteCount: input.count)
-
-            let resourceOptions: MTLResourceOptions = if input.count <= BLAKE3Metal.writeCombinedOwnedSharedBufferMaxBytes {
-                [.storageModeShared, .cpuCacheModeWriteCombined]
-            } else {
-                .storageModeShared
-            }
 
             guard let buffer = device.makeBuffer(
                 bytesNoCopy: allocation,
                 length: allocationLength,
-                options: resourceOptions,
+                options: .storageModeShared,
                 deallocator: { pointer, _ in
                     free(pointer)
                 }
@@ -3429,6 +3480,15 @@ public enum BLAKE3Metal {
                 free(allocation)
                 throw BLAKE3Error.metalCommandFailed("Unable to allocate shared Metal buffer.")
             }
+            return buffer
+        }
+
+        func makeOwnedSharedBuffer(copying input: UnsafeRawBufferPointer) throws -> MTLBuffer {
+            guard input.count > 0 else {
+                return try makeOwnedSharedBuffer(length: 0)
+            }
+            let buffer = try makeOwnedSharedBuffer(length: input.count)
+            try BLAKE3Metal.copyInput(input, into: buffer)
             return buffer
         }
 
@@ -4410,34 +4470,22 @@ public enum BLAKE3Metal {
             return []
         }
 
-        var output = [UInt8](repeating: 0, count: outputByteCount)
-        try output.withUnsafeMutableBytes { rawOutput in
-            guard let baseAddress = rawOutput.baseAddress,
-                  let outputBuffer = buffer.device.makeBuffer(
-                    bytesNoCopy: baseAddress,
-                    length: outputByteCount,
-                    options: .storageModeShared,
-                    deallocator: nil
-                  )
-            else {
-                throw BLAKE3Error.metalCommandFailed("Unable to wrap BLAKE3 XOF output in a Metal buffer.")
-            }
-
-            try writeXOF(
-                buffer: buffer,
-                range: range,
-                outputByteCount: outputByteCount,
-                seek: seek,
-                policy: policy,
-                mode: mode,
-                minimumGPUByteCount: minimumGPUByteCount,
-                pipelines: pipelines,
-                commandQueue: commandQueue,
-                workspace: workspace,
-                outputBuffer: outputBuffer
-            )
-        }
-        return output
+        let outputBuffer = try workspace.makeOwnedSharedBuffer(length: outputByteCount)
+        try writeXOF(
+            buffer: buffer,
+            range: range,
+            outputByteCount: outputByteCount,
+            seek: seek,
+            policy: policy,
+            mode: mode,
+            minimumGPUByteCount: minimumGPUByteCount,
+            pipelines: pipelines,
+            commandQueue: commandQueue,
+            workspace: workspace,
+            outputBuffer: outputBuffer
+        )
+        let outputBaseAddress = outputBuffer.contents().assumingMemoryBound(to: UInt8.self)
+        return Array(UnsafeBufferPointer(start: outputBaseAddress, count: outputByteCount))
     }
 
     @discardableResult

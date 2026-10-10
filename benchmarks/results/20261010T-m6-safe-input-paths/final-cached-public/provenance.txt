@@ -1,0 +1,10 @@
+host=Mac18,5 Apple M6, 16 GB
+os=macOS 27.0 (26A425)
+swift=Apple Swift 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1)
+benchmark=1 GiB, 6 iterations, --metal-modes wrapped --cryptokit-modes none --file-modes none
+build=swift build -c release --product blake3-bench (completed)
+library_sha256=a12df53d7e9701f97d626877816e9993da41717926fcb73b6d433240fc8c2915
+benchmark_main_sha256=47f760adb5caa53883271639377c6381970fe12c6e415f06838d8e3f0f1ca78e
+metal_kernel_sha256=710b7182afc6615ff5b478593be273eab7934392af5436dfd41c0652e49ef9d1
+correctness=all benchmark rows correct
+thermal=No thermal or performance warning before or after

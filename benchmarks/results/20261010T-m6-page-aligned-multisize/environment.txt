@@ -1,0 +1,11 @@
+2026-10-10T21:15:38Z
+f1e2399d5fdd2a180ff0b561f13c70390b64f97d503c96cca963244ceec0e89b  /Users/numi/Work/blake3swift-perf-20261010/Sources/Blake3/BLAKE3Metal.swift
+710b7182afc6615ff5b478593be273eab7934392af5436dfd41c0652e49ef9d1  /Users/numi/Work/blake3swift-perf-20261010/Sources/Blake3/BLAKE3MetalKernel.swift
+709b693e54e7256703f0a2083bc35e8ea3758dc35428e0e80c0eaa6b53da4fbb  /Users/numi/Work/blake3swift-perf-20261010/Sources/Blake3Benchmark/main.swift
+16384
+ProductName:		macOS
+ProductVersion:		27.0
+BuildVersion:		26A425
+      Model Identifier: Mac18,5
+      Chip: Apple M6
+      Memory: 16 GB
