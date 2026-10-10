@@ -64,6 +64,7 @@ capture_thermal() {
   echo "default_metal_min_bytes_env=${BLAKE3_SWIFT_METAL_MIN_BYTES:-default}"
   echo "fused_tile_chunks=${BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS:-default}"
   echo "fused_tile_reduction=${BLAKE3_SWIFT_METAL_FUSED_TILE_REDUCTION:-default}"
+  echo "page_aligned_wrapped_input=${BLAKE3_SWIFT_METAL_PAGE_ALIGNED_WRAPPED_INPUT:-false}"
   echo "acceptance_harness=primary-overhead"
   echo "notes=run resident/private/staged/wrapped in separate benchmark processes; mixed publication sweep is secondary"
 } | tee "$OUT_DIR/environment.txt"

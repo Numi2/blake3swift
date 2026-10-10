@@ -1,0 +1,27 @@
+date_utc=2026-10-10T18:30:38Z
+commit=
+swift=Apple Swift version 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1) Target: arm64-apple-macosx27.0.0
+ProductName:		macOS
+ProductVersion:		27.0
+BuildVersion:		26A425
+Apple M6
+Mac18,5
+performance_cores=2
+active_cpus=12
+metal_library=runtime-source
+sizes=1g
+iterations=4
+isolated_metal_modes=wrapped
+repeats=3
+cooldown_seconds=0
+cpu_workers=default
+minimum_gpu_bytes=default
+cryptokit_modes=none
+memory_stats=0
+default_backend=default
+default_metal_min_bytes_env=default
+fused_tile_chunks=default
+fused_tile_reduction=default
+page_aligned_wrapped_input=true
+acceptance_harness=primary-overhead
+notes=run resident/private/staged/wrapped in separate benchmark processes; mixed publication sweep is secondary

@@ -46,12 +46,52 @@ private enum MetalTimingMode: String {
         case .staged:
             return "pre-created shared staging MTLBuffer; timed Swift-byte copy into staging buffer plus hash"
         case .wrapped:
+            if usesPageAlignedWrappedInput {
+                return "timed page-aligned allocation and copy, no-copy MTLBuffer wrapper, and hash"
+            }
             return "timed no-copy MTLBuffer wrapper over existing Swift bytes plus hash"
         case .endToEnd:
             return "timed shared MTLBuffer allocation/copy from Swift bytes plus hash"
         }
     }
 }
+
+#if canImport(Metal)
+/// Experimental input route used to compare Swift's normal allocation with the
+/// documented page-aligned contract for `makeBuffer(bytesNoCopy:)`.
+private var usesPageAlignedWrappedInput: Bool {
+    ["1", "true", "yes"].contains(
+        ProcessInfo.processInfo.environment["BLAKE3_SWIFT_METAL_PAGE_ALIGNED_WRAPPED_INPUT"]?
+            .lowercased() ?? ""
+    )
+}
+
+private func hashPageAlignedWrappedCopy(
+    _ bytes: some ContiguousBytes,
+    context: BLAKE3Metal.Context,
+    policy: BLAKE3Metal.ExecutionPolicy
+) -> BLAKE3.Digest {
+    bytes.withUnsafeBytes { source in
+        guard source.count > 0, let sourceBase = source.baseAddress else {
+            return BLAKE3.hash(source)
+        }
+        let pageSize = Int(getpagesize())
+        guard source.count.isMultiple(of: pageSize) else {
+            fatalError("Page-aligned wrapper experiment requires a page-multiple input size.")
+        }
+        var allocation: UnsafeMutableRawPointer?
+        guard posix_memalign(&allocation, pageSize, source.count) == 0,
+              let allocation
+        else {
+            fatalError("Unable to allocate page-aligned input for the wrapper experiment.")
+        }
+        defer { free(allocation) }
+        memcpy(allocation, sourceBase, source.count)
+        let alignedInput = UnsafeRawBufferPointer(start: allocation, count: source.count)
+        return try! context.hash(input: alignedInput, policy: policy)
+    }
+}
+#endif
 #endif
 
 private enum FileTimingMode: String {
@@ -3121,6 +3161,7 @@ if let metalDevice {
     print("metalMappedTileByteCount=\(requestedMetalMappedTileByteCount)")
     print("metalStagedReadTileByteCount=\(requestedMetalStagedReadTileByteCount)")
     print("metalModes=\(requestedMetalTimingModes.map(\.rawValue).joined(separator: ","))")
+    print("pageAlignedWrappedInput=\(usesPageAlignedWrappedInput)")
     if let metalContextError {
         print("metalLibraryError=\(metalContextError)")
         if requestedMetalWork {
@@ -3763,7 +3804,10 @@ for size in requestedSizes {
                     byteCount: input.count,
                     expectedDigest: nil
                 ) { bytes in
-                    try! metalContext.hash(input: bytes, policy: .automatic)
+                    if usesPageAlignedWrappedInput {
+                        return hashPageAlignedWrappedCopy(bytes, context: metalContext, policy: .automatic)
+                    }
+                    return try! metalContext.hash(input: bytes, policy: .automatic)
                 }
             )
             headlineCandidates.append(
@@ -3773,7 +3817,10 @@ for size in requestedSizes {
                     byteCount: input.count,
                     expectedDigest: nil
                 ) { bytes in
-                    try! metalContext.hash(input: bytes, policy: .gpu)
+                    if usesPageAlignedWrappedInput {
+                        return hashPageAlignedWrappedCopy(bytes, context: metalContext, policy: .gpu)
+                    }
+                    return try! metalContext.hash(input: bytes, policy: .gpu)
                 }
             )
         }
