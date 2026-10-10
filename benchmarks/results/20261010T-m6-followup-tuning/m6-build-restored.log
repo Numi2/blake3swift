@@ -1,0 +1,13 @@
+Building for production...
+[12 / 19] CBLAKE3
+/Users/numi/Work/blake3swift-perf-20261010/Package.swift: CBLAKE3: ld: warning: search path '/Library/Developer/CommandLineTools/Developer/Library/Frameworks' not found
+[15 / 20] Blake3
+/Users/numi/Work/blake3swift-perf-20261010/Package.swift: Blake3: ld: warning: search path '/Library/Developer/CommandLineTools/Developer/Library/Frameworks' not found
+[22 / 25] Blake3BenchmarkSupport
+/Users/numi/Work/blake3swift-perf-20261010/Package.swift: Blake3BenchmarkSupport: ld: warning: search path '/Library/Developer/CommandLineTools/Developer/Library/Frameworks' not found
+[28 / 31] blake3-bench-product
+[30 / 31] blake3-bench-product
+/Users/numi/Work/blake3swift-perf-20261010/Package.swift: blake3-bench-product: ld: warning: search path '/Library/Developer/CommandLineTools/Developer/usr/lib' not found
+/Users/numi/Work/blake3swift-perf-20261010/Package.swift: blake3-bench-product: ld: warning: search path '/Library/Developer/CommandLineTools/Developer/Library/Frameworks' not found
+[31 / 31] blake3-bench-product
+Build complete! (71,25 sek)
