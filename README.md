@@ -605,10 +605,12 @@ Runtime backend overrides:
 ```bash
 BLAKE3_SWIFT_BACKEND=cpu             # force default BLAKE3.hash to CPU
 BLAKE3_SWIFT_BACKEND=metal           # prefer Metal above the threshold, with CPU fallback
-BLAKE3_SWIFT_METAL_MIN_BYTES=16m
+BLAKE3_SWIFT_METAL_MIN_BYTES=4m
 BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS=0|128|256|512|1024
 BLAKE3_SWIFT_METAL_FUSED_TILE_REDUCTION=inplace|pingpong|simdgroup
 ```
+
+The public one-shot `BLAKE3.hash` automatic dispatcher uses a 4 MiB Metal threshold on Apple M6 and 16 MiB on other devices by default; `BLAKE3_SWIFT_METAL_MIN_BYTES` overrides it. `BLAKE3Metal.Context` keeps its separate 16 MiB automatic-policy threshold.
 
 `BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS=128` and `BLAKE3_SWIFT_METAL_FUSED_TILE_REDUCTION=pingpong` are the defaults on this branch for exact full-chunk shared-memory inputs. Set chunks to `0` to disable fused tiling, `256`/`512`/`1024` to test larger tiles, reduction to `inplace` to force the older single-scratch reduction, or reduction to `simdgroup` to try the 128-chunk lane-shuffle reducer on 32-lane Apple GPU targets. The fused path is skipped for private buffers, where the previous reduction path is faster on the local M4 measurements.
 

@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(Metal)
+import Metal
+#endif
 
 /// Namespace for BLAKE3 hashing, keyed hashing, key derivation, streaming, and CPU backend selection.
 ///
@@ -489,12 +492,21 @@ private struct BLAKE3DefaultHashConfiguration: Sendable {
         let metalMinimumByteCount = environment["BLAKE3_SWIFT_METAL_MIN_BYTES"]
             .flatMap(parseByteCount)
             .map { max(0, $0) }
-            ?? (16 * 1024 * 1024)
+            ?? defaultMetalMinimumByteCount()
 
         return Self(
             backendPolicy: backendPolicy,
             metalMinimumByteCount: metalMinimumByteCount
         )
+    }
+
+    private static func defaultMetalMinimumByteCount() -> Int {
+        #if canImport(Metal)
+        if MTLCreateSystemDefaultDevice()?.name == "Apple M6" {
+            return 4 * 1024 * 1024
+        }
+        #endif
+        return 16 * 1024 * 1024
     }
 
     private static func parseBackendPolicy(_ rawValue: String?) -> BLAKE3.BackendPolicy {

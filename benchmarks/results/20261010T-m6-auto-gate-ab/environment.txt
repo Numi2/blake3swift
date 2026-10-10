@@ -1,0 +1,12 @@
+date_utc=2026-10-10
+source_commit=bba66be789ee61bdb9e16ef32310bf953da20a18
+source_branch=flatkernels
+model_name=Mac mini
+chip=Apple M6
+model_identifier=Mac18,5
+active_cpus=12
+memory=16_GB
+macos=27.0 (26A425)
+swift=Apple Swift 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1)
+metal_library=runtime-source
+variant=interleaved 16m/4m automatic BLAKE3.hash gate A/B; inputs 4m,8m,16m; 8 iterations; 3 repeats each

@@ -1,0 +1,17 @@
+date_utc=2026-10-10T17:45:03Z
+source_commit=bba66be789ee61bdb9e16ef32310bf953da20a18
+source_branch=flatkernels
+model_name=Mac mini
+chip=Apple M6
+model_identifier=Mac18,5
+active_cpus=12
+memory=16_GB
+swift=Apple Swift version 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1) Target: arm64-apple-macosx27.0.0
+ProductName:		macOS
+ProductVersion:		27.0
+BuildVersion:		26A425
+metal_device=Apple M6
+metal_library=runtime-source
+sizes=16m,64m,256m,1g
+iterations=5
+modes=resident,staged,wrapped,e2e

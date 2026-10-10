@@ -1,0 +1,14 @@
+date_utc=2026-10-10
+source_base_commit=bba66be789ee61bdb9e16ef32310bf953da20a18
+source_blake3swift_sha256=acdfaacb3d4889c55acc28ffd24427881db4971804015af1fc02ca73fa305931
+model_name=Mac mini
+chip=Apple M6
+model_identifier=Mac18,5
+active_cpus=12
+memory=16_GB
+macos=27.0 (26A425)
+swift=Apple Swift 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1)
+metal_library=runtime-source
+benchmark=release blake3-bench; 4m,8m,16m; 8 iterations; 3 repeats per gate
+gate_order=16m,4m alternating
+json_validation=ok for all six reports

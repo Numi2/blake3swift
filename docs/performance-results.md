@@ -11,6 +11,67 @@ This file records candidate public performance data after sustained measurements
 - Record whether Metal rows used `runtime-source` or a packaged `.metallib`.
 - Do not present a single best sample as sustained throughput.
 
+## October 10, 2026 Apple M6 Baseline and Tuning
+
+The first target-device run was collected on an Apple M6 Mac mini (Mac18,5, 12 active CPUs, 16 GB unified memory), macOS 27.0, Swift 6.4, using runtime-compiled Metal kernels. Source was commit `bba66be789ee61bdb9e16ef32310bf953da20a18`. The release benchmark built successfully with the Command Line Tools; the standalone `xcrun metal` utility was absent, but runtime Metal compilation and execution succeeded.
+
+The M6 baseline command was:
+
+```sh
+blake3-bench --sizes 16m,64m,256m,1g --iterations 5 \
+  --metal-modes resident,staged,wrapped,e2e \
+  --cryptokit-modes none --file-modes none \
+  --json-output benchmarks/results/20261010T-m6-baseline/report.json
+```
+
+At 1 GiB, the validated M6 baseline and the prior M4 reference from `20260419T100143Z-overhead-focused` are:
+
+| Timing class | M4 GiB/s | M6 GiB/s | M6 / M4 |
+| --- | ---: | ---: | ---: |
+| Official C one-shot | 2.20 | 2.62 | 1.19× |
+| Swift CPU parallel | 11.33 | 17.26 | 1.52× |
+| Public `BLAKE3.hash` automatic | 54.18 | 64.40 | 1.19× |
+| Metal staged | 24.76 | 34.19 | 1.38× |
+| Metal wrapped | 54.05 | 66.76 | 1.24× |
+| Metal resident | 76.80 | 104.00 | 1.35× |
+| Metal end-to-end | — | 28.46 | — |
+
+The M6 is faster in every comparable row, but the measured uplift over the best prior M4 results is 1.19× to 1.52×, not 10×. The timing classes stay separate; resident Metal is not an end-to-end comparison against the public Swift API.
+
+For the medium sizes affected by the dispatch change, the previous M4 automatic rows were 6.79 GiB/s at 4 MiB and 11.65 GiB/s at 8 MiB. The M6 paired 4 MiB-gate rows are 11.33 and 15.64 GiB/s, respectively (1.67× and 1.34× those hardware-specific bests).
+
+An M6 automatic-dispatch gate sweep compared 2, 4, 8, and 16 MiB thresholds on 1, 4, 8, and 16 MiB inputs. A three-run paired check of 4 MiB and 16 MiB gates, using the final device-specific source, measured these public `BLAKE3.hash` medians:
+
+| Input | 16 MiB gate | 4 MiB gate | Change |
+| --- | ---: | ---: | ---: |
+| 4 MiB | 8.84 | 11.33 | +28% |
+| 8 MiB | 12.10 | 15.64 | +29% |
+| 16 MiB | 19.59 | 20.59 | +5% |
+
+This gate changes the one-shot `BLAKE3.hash` automatic backend only; the explicit `BLAKE3Metal.Context` minimum remains separate. The Apple M6 default is now 4 MiB; other devices retain 16 MiB because the saved M4 sweep showed that a 4 MiB gate regressed its 4 MiB row. `BLAKE3_SWIFT_METAL_MIN_BYTES` remains available for workload-specific tuning. A release run with both overrides unset reported the M6 default as 4 MiB; its three-run medians were 11.29, 16.19, and 19.16 GiB/s at 4, 8, and 16 MiB, and 65.79 GiB/s at 1 GiB. All digest checks passed and all JSON validated. The same-build paired M6 reports are under `20261010T-m6-auto-gate-confirm`; the initial sweep and pre-selection repeat are retained under `20261010T-m6-auto-gate` and `20261010T-m6-auto-gate-ab`.
+
+CPU worker counts were swept on 256 MiB and 1 GiB inputs with Metal disabled. At 1 GiB, throughput rose monotonically through the tested range: 2 workers measured 4.05 GiB/s, 4 measured 7.54, 6 measured 11.03, 8 measured 12.85, 10 measured 15.30, and 12 measured 17.17. The existing 12-worker default is best among those candidates; no worker-default change was made.
+
+The Metal fused-tile sweep compared 128, 256, 512, and 1024 chunks with ping-pong reduction, plus 128-chunk SIMD-group and in-place reduction. Every report validated. A three-run interleaved 1 GiB confirmation measured 108.59 GiB/s median for the existing 128-chunk ping-pong path and 108.40 GiB/s for 128-chunk in-place reduction. No candidate produced a durable gain, so the shipped Metal configuration remains unchanged.
+
+Raw output, validated JSON, and environment records are retained under:
+
+```text
+benchmarks/results/20261010T-m6-baseline
+benchmarks/results/20261010T-m6-cpu-workers
+benchmarks/results/20261010T-m6-tile-default
+benchmarks/results/20261010T-m6-tile256-pingpong
+benchmarks/results/20261010T-m6-tile512-pingpong
+benchmarks/results/20261010T-m6-tile1024-pingpong
+benchmarks/results/20261010T-m6-tile128-simdgroup
+benchmarks/results/20261010T-m6-tile128-inplace
+benchmarks/results/20261010T-m6-tile-inplace-ab
+benchmarks/results/20261010T-m6-auto-gate
+benchmarks/results/20261010T-m6-auto-gate-ab
+benchmarks/results/20261010T-m6-auto-gate-confirm
+benchmarks/results/20261010T-m6-auto-gate4-default
+```
+
 ## April 21, 2026 CPU One-Shot Reusable-Context Follow-Up
 
 This pass stopped chasing the strict `single-simd` apples-to-apples CPU baseline and instead targeted the fastest Swift CPU one-shot execution model already exposed by the library: the parallel tree path.
