@@ -1,0 +1,10 @@
+Sat Oct 10 22:40:30 UTC 2026
+ProductName:		macOS
+ProductVersion:		27.0
+BuildVersion:		26A425
+Apple Swift version 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1)
+Target: arm64-apple-macosx27.0.0
+Mac18,5
+ef72fd16f65bdd0c8d5387abaeb1c90e423fcb93f54578b60b4d3e77a444ea08  Sources/Blake3/BLAKE3Metal.swift
+b6b83f43e11c93879b251ee8887fc62d6052be6d4a78f9067610873553184e44  Sources/Blake3Benchmark/main.swift
+cb6fa87439419b8c68703dece679acba5720c4c5f359e086c1b89f8cb8ffe2cd  .build/release/blake3-bench

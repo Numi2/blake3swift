@@ -1,0 +1,48 @@
+--- perf-experiments/20261011T-m6-threadgroup-sweep/BLAKE3Metal-before-override.swift	2026-10-10 15:38:17
++++ Sources/Blake3/BLAKE3Metal.swift	2026-10-10 15:38:24
+@@ -38,6 +38,15 @@
+     private static let largeGridThreadThreshold = 1024 * 1024
+     private static let smallGridSIMDGroupsPerThreadgroup = 8
+     private static let largeGridSIMDGroupsPerThreadgroup = 4
++    private static let batchGridSIMDGroupsPerThreadgroupOverride: Int? = {
++        guard let rawValue = ProcessInfo.processInfo.environment["BLAKE3_SWIFT_METAL_BATCH_SIMD_GROUPS_PER_THREADGROUP"],
++              let value = Int(rawValue),
++              value > 0
++        else {
++            return nil
++        }
++        return value
++    }()
+     private static let parallelInputCopyThreshold = 16 * 1024 * 1024
+     private static let parallelInputCopyWorkerLimit = 4
+     private static let reportsCommandBufferTiming =
+@@ -6985,9 +6994,11 @@
+         encoder: Encoder
+     ) {
+         let executionWidth = max(1, pipeline.threadExecutionWidth)
+-        let targetSIMDGroups = count >= largeGridThreadThreshold
+-            ? largeGridSIMDGroupsPerThreadgroup
+-            : smallGridSIMDGroupsPerThreadgroup
++        let targetSIMDGroups = batchGridSIMDGroupsPerThreadgroupOverride ?? (
++            count >= largeGridThreadThreshold
++                ? largeGridSIMDGroupsPerThreadgroup
++                : smallGridSIMDGroupsPerThreadgroup
++        )
+         let threadgroupCount = max(1, min(targetSIMDGroups, pipeline.maxTotalThreadsPerThreadgroup / executionWidth))
+         let threadgroupWidth = threadgroupCount * executionWidth
+         let threadsPerThreadgroup = MTLSize(width: threadgroupWidth, height: 1, depth: 1)
+@@ -7001,9 +7012,11 @@
+         encoder: MTLComputeCommandEncoder
+     ) {
+         let executionWidth = max(1, pipeline.threadExecutionWidth)
+-        let targetSIMDGroups = count >= largeGridThreadThreshold
+-            ? largeGridSIMDGroupsPerThreadgroup
+-            : smallGridSIMDGroupsPerThreadgroup
++        let targetSIMDGroups = batchGridSIMDGroupsPerThreadgroupOverride ?? (
++            count >= largeGridThreadThreshold
++                ? largeGridSIMDGroupsPerThreadgroup
++                : smallGridSIMDGroupsPerThreadgroup
++        )
+         let threadgroupCount = max(1, min(targetSIMDGroups, pipeline.maxTotalThreadsPerThreadgroup / executionWidth))
+         let threadgroupWidth = threadgroupCount * executionWidth
+         let threadsPerThreadgroup = MTLSize(width: threadgroupWidth, height: 1, depth: 1)

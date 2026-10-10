@@ -94,6 +94,14 @@ The width-sweep pipelines are benchmark-only and replay one stable input plan in
 
 The latest comparable 1 GiB resident-GPU medians remain 108.748 GiB/s on M6 and 83.245 GiB/s on M4 (1.31×). Apple specifies 153 GB/s bandwidth for the 16 GB M6 configuration, which bounds further gains on this same byte-throughput path; the 10× objective remains open and needs a different workload or a structural change.
 
+## October 11, 2026 Apple M6 Batch Threadgroup Sweep
+
+The follow-up threadgroup sweep and raw reports are in `benchmarks/results/20261011T-m6-threadgroup-sweep`. It tested 4, 8, 16, and 32 SIMD groups per threadgroup on 16 MiB and 64 MiB resident inputs containing 64-byte messages, then repeated the 16 MiB case with 15 timed samples.
+
+No setting produced a stable gain. For example, 4 groups measured 41.35 and 41.80 GiB/s medians in the two five-sample 16 MiB runs, but the minima were 23.93 and 23.52. With 15 samples, its medians were 40.86 and 23.25; the default 8-group setting measured 23.46 and 38.76. Both settings switched between roughly 20–25 and 38–44 GiB/s within a run. All digests and JSON reports validated, and the shipped default remains unchanged.
+
+Apple's dispatch documentation says to align threadgroup sizes to `threadExecutionWidth` and respect the maximum for each pipeline ([threadgroup sizing](https://developer.apple.com/documentation/metal/calculating-threadgroup-and-grid-sizes), [`threadExecutionWidth`](https://developer.apple.com/documentation/metal/mtlcomputepipelinestate/threadexecutionwidth)). It recommends correlating occupancy with other measurements; the available M6 probe exposes only GPU timestamps ([occupancy guidance](https://developer.apple.com/documentation/xcode/finding-your-metal-apps-gpu-occupancy)). The exact aggregate workload still has no matched M4 report, and the M4 host was under sustained multiworker load during this follow-up. The cross-hardware 10× goal remains unverified.
+
 ## April 21, 2026 CPU One-Shot Reusable-Context Follow-Up
 
 This pass stopped chasing the strict `single-simd` apples-to-apples CPU baseline and instead targeted the fastest Swift CPU one-shot execution model already exposed by the library: the parallel tree path.

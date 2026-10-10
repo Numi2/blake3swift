@@ -1,0 +1,31 @@
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+The system has 17179869184 (1048576 pages with a page size of 16384).
+
+Stats:
+Pages free: 118742
+Pages purgeable: 66
+Pages purged: 181692
+
+Swap I/O:
+Swapins: 41298
+Swapouts: 1894140
+
+Page Q counts:
+Pages active: 148613
+Pages inactive: 145612
+Pages speculative: 2522
+Pages throttled: 0
+Pages wired down: 113386
+
+Compressor Stats:
+Pages used by compressor: 482267
+Pages decompressed: 1715456
+Pages compressed: 7834218
+
+File I/O:
+Pageins: 1472414
+Pageouts: 135
+
+System-wide memory free percentage: 40%

@@ -1,0 +1,4 @@
+jsonValidation=ok path=perf-experiments/20261011T-m6-threadgroup-sweep/warm-batch-groups-8-r1.json
+jsonValidation=ok path=perf-experiments/20261011T-m6-threadgroup-sweep/warm-batch-groups-4-r1.json
+jsonValidation=ok path=perf-experiments/20261011T-m6-threadgroup-sweep/warm-batch-groups-4-r2.json
+jsonValidation=ok path=perf-experiments/20261011T-m6-threadgroup-sweep/warm-batch-groups-8-r2.json

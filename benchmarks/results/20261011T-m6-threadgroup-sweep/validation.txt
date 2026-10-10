@@ -1,0 +1,8 @@
+jsonValidation=ok path=perf-experiments/20261011T-m6-threadgroup-sweep/batch-groups-8-r1.json
+jsonValidation=ok path=perf-experiments/20261011T-m6-threadgroup-sweep/batch-groups-4-r1.json
+jsonValidation=ok path=perf-experiments/20261011T-m6-threadgroup-sweep/batch-groups-16-r1.json
+jsonValidation=ok path=perf-experiments/20261011T-m6-threadgroup-sweep/batch-groups-32-r1.json
+jsonValidation=ok path=perf-experiments/20261011T-m6-threadgroup-sweep/batch-groups-32-r2.json
+jsonValidation=ok path=perf-experiments/20261011T-m6-threadgroup-sweep/batch-groups-16-r2.json
+jsonValidation=ok path=perf-experiments/20261011T-m6-threadgroup-sweep/batch-groups-4-r2.json
+jsonValidation=ok path=perf-experiments/20261011T-m6-threadgroup-sweep/batch-groups-8-r2.json
