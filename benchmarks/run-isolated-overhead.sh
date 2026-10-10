@@ -65,6 +65,8 @@ capture_thermal() {
   echo "fused_tile_chunks=${BLAKE3_SWIFT_METAL_FUSED_TILE_CHUNKS:-default}"
   echo "fused_tile_reduction=${BLAKE3_SWIFT_METAL_FUSED_TILE_REDUCTION:-default}"
   echo "page_aligned_wrapped_input=${BLAKE3_SWIFT_METAL_PAGE_ALIGNED_WRAPPED_INPUT:-false}"
+  echo "metal_command_timing=${BLAKE3_SWIFT_METAL_COMMAND_TIMING:-0}"
+  echo "metal_command_backend=${BLAKE3_SWIFT_METAL_BACKEND:-legacy}"
   echo "acceptance_harness=primary-overhead"
   echo "notes=run resident/private/staged/wrapped in separate benchmark processes; mixed publication sweep is secondary"
 } | tee "$OUT_DIR/environment.txt"
@@ -102,7 +104,11 @@ for repeat in $(seq 1 "$REPEATS"); do
     fi
 
     capture_thermal "$prefix-thermal-before.txt"
-    "${COMMAND[@]}" | tee "$prefix.md"
+    if [[ "${BLAKE3_SWIFT_METAL_COMMAND_TIMING:-0}" == "1" ]]; then
+      "${COMMAND[@]}" 2>&1 | tee "$prefix.md"
+    else
+      "${COMMAND[@]}" | tee "$prefix.md"
+    fi
     "$BENCHMARK_BIN" --validate-json "$prefix.json"
     capture_thermal "$prefix-thermal-after.txt"
 

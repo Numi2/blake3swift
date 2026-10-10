@@ -1,0 +1,8 @@
+device=Apple M6
+sampling_MTLCounterSamplingPoint(rawValue: 0)=true
+sampling_MTLCounterSamplingPoint(rawValue: 2)=false
+sampling_MTLCounterSamplingPoint(rawValue: 4)=false
+sampling_MTLCounterSamplingPoint(rawValue: 1)=false
+sampling_MTLCounterSamplingPoint(rawValue: 3)=false
+counter_set=timestamp
+  counter=GPUTimestamp

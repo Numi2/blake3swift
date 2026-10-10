@@ -1,0 +1,2 @@
+device=Apple M6
+metal4_command_queue_available=true

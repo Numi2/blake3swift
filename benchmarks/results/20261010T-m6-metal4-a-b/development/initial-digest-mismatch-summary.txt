@@ -1,0 +1,12 @@
+Development note: first MTL4 reduction attempt
+==============================================
+
+The first MTL4 multi-dispatch reduction attempt produced a digest mismatch.
+The dispatches have producer-consumer dependencies: each parent reduction
+reads chaining values written by the previous dispatch. Adding an explicit
+Metal 4 dispatch-to-dispatch barrier fixed the mismatch. The subsequent 16 MiB
+smoke and 1 GiB unkeyed digest benchmark rows passed digest comparison.
+
+The original failing process stderr/result was not retained in the M6 /tmp
+directory when the artifacts were collected. This file records the observed
+failure and repair from the experiment work log; it is not a raw failure log.

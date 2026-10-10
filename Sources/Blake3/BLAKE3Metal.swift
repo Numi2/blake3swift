@@ -38,6 +38,11 @@ public enum BLAKE3Metal {
     private static let largeGridThreadThreshold = 1024 * 1024
     private static let smallGridSIMDGroupsPerThreadgroup = 8
     private static let largeGridSIMDGroupsPerThreadgroup = 4
+    private static let reportsCommandBufferTiming =
+        ProcessInfo.processInfo.environment["BLAKE3_SWIFT_METAL_COMMAND_TIMING"] == "1"
+    // Benchmark-only backend comparison; the opt-in path currently handles unkeyed digests.
+    private static let usesMetal4HashBackend =
+        ProcessInfo.processInfo.environment["BLAKE3_SWIFT_METAL_BACKEND"]?.lowercased() == "metal4"
     private static let writeCombinedOwnedSharedBufferMaxBytes = 128 * 1024 * 1024
     private static let fusedTileChunkCount = configuredFusedTileChunkCount()
     private static let fusedTileReductionStrategy = configuredFusedTileReductionStrategy()
@@ -75,6 +80,223 @@ public enum BLAKE3Metal {
     enum HashCommandFamily: Equatable {
         case digestOnly
         case generic
+    }
+
+    private protocol HashCommandEncoder {
+        func setComputePipelineState(_ state: MTLComputePipelineState)
+        func setBuffer(_ buffer: MTLBuffer, offset: Int, index: Int)
+        func setThreadgroupMemoryLength(_ length: Int, index: Int)
+        func dispatchThreads(_ threadsPerGrid: MTLSize, threadsPerThreadgroup: MTLSize)
+        func dispatchThreadgroups(_ threadgroupsPerGrid: MTLSize, threadsPerThreadgroup: MTLSize)
+        func endEncoding()
+    }
+
+    private struct LegacyHashCommandEncoder: HashCommandEncoder {
+        private let encoder: MTLComputeCommandEncoder
+
+        init(_ encoder: MTLComputeCommandEncoder) {
+            self.encoder = encoder
+        }
+
+        func setComputePipelineState(_ state: MTLComputePipelineState) {
+            encoder.setComputePipelineState(state)
+        }
+
+        func setBuffer(_ buffer: MTLBuffer, offset: Int, index: Int) {
+            encoder.setBuffer(buffer, offset: offset, index: index)
+        }
+
+        func setThreadgroupMemoryLength(_ length: Int, index: Int) {
+            encoder.setThreadgroupMemoryLength(length, index: index)
+        }
+
+        func dispatchThreads(_ threadsPerGrid: MTLSize, threadsPerThreadgroup: MTLSize) {
+            encoder.dispatchThreads(threadsPerGrid, threadsPerThreadgroup: threadsPerThreadgroup)
+        }
+
+        func dispatchThreadgroups(_ threadgroupsPerGrid: MTLSize, threadsPerThreadgroup: MTLSize) {
+            encoder.dispatchThreadgroups(threadgroupsPerGrid, threadsPerThreadgroup: threadsPerThreadgroup)
+        }
+
+        func endEncoding() {
+            encoder.endEncoding()
+        }
+    }
+
+    @available(macOS 26.0, iOS 26.0, *)
+    private final class Metal4HashCommandEncoder: HashCommandEncoder {
+        private let encoder: any MTL4ComputeCommandEncoder
+        private let argumentTable: any MTL4ArgumentTable
+        private var hasDispatched = false
+
+        init(encoder: any MTL4ComputeCommandEncoder, argumentTable: any MTL4ArgumentTable) {
+            self.encoder = encoder
+            self.argumentTable = argumentTable
+            encoder.setArgumentTable(argumentTable)
+        }
+
+        func setComputePipelineState(_ state: MTLComputePipelineState) {
+            encoder.setComputePipelineState(state)
+        }
+
+        func setBuffer(_ buffer: MTLBuffer, offset: Int, index: Int) {
+            argumentTable.setAddress(buffer.gpuAddress + MTLGPUAddress(offset), index: index)
+        }
+
+        func setThreadgroupMemoryLength(_ length: Int, index: Int) {
+            encoder.setThreadgroupMemoryLength(length, index: index)
+        }
+
+        func dispatchThreads(_ threadsPerGrid: MTLSize, threadsPerThreadgroup: MTLSize) {
+            encodeDispatchBarrierIfNeeded()
+            encoder.dispatchThreads(threadsPerGrid: threadsPerGrid, threadsPerThreadgroup: threadsPerThreadgroup)
+            hasDispatched = true
+        }
+
+        func dispatchThreadgroups(_ threadgroupsPerGrid: MTLSize, threadsPerThreadgroup: MTLSize) {
+            encodeDispatchBarrierIfNeeded()
+            encoder.dispatchThreadgroups(threadgroupsPerGrid: threadgroupsPerGrid, threadsPerThreadgroup: threadsPerThreadgroup)
+            hasDispatched = true
+        }
+
+        func endEncoding() {
+            encoder.endEncoding()
+        }
+
+        private func encodeDispatchBarrierIfNeeded() {
+            guard hasDispatched else {
+                return
+            }
+            // Each parent reduction consumes the chaining values produced by the prior dispatch.
+            encoder.barrier(
+                afterEncoderStages: .dispatch,
+                beforeEncoderStages: .dispatch,
+                visibilityOptions: .device
+            )
+        }
+    }
+
+    @available(macOS 26.0, iOS 26.0, *)
+    private final class Metal4HashBackend {
+        private let commandQueue: any MTL4CommandQueue
+        private let commandAllocator: any MTL4CommandAllocator
+        private let residencySet: any MTLResidencySet
+        private let commandBuffer: any MTL4CommandBuffer
+        private let argumentTable: any MTL4ArgumentTable
+        private let completionEvent: any MTLSharedEvent
+        private var completionValue: UInt64 = 0
+        private var residentBuffers: [ObjectIdentifier: MTLBuffer] = [:]
+
+        init(device: MTLDevice) throws {
+            guard let commandQueue = device.makeMTL4CommandQueue(),
+                  let commandAllocator = device.makeCommandAllocator(),
+                  let commandBuffer = device.makeCommandBuffer(),
+                  let completionEvent = device.makeSharedEvent()
+            else {
+                throw BLAKE3Error.metalCommandFailed("Unable to create Metal 4 command resources.")
+            }
+
+            let residencyDescriptor = MTLResidencySetDescriptor()
+            residencyDescriptor.initialCapacity = 5
+            guard let residencySet = try? device.makeResidencySet(descriptor: residencyDescriptor) else {
+                throw BLAKE3Error.metalCommandFailed("Unable to create Metal 4 residency set.")
+            }
+
+            let argumentTableDescriptor = MTL4ArgumentTableDescriptor()
+            argumentTableDescriptor.maxBufferBindCount = 3
+            guard let argumentTable = try? device.makeArgumentTable(descriptor: argumentTableDescriptor) else {
+                throw BLAKE3Error.metalCommandFailed("Unable to create Metal 4 argument table.")
+            }
+
+            self.commandQueue = commandQueue
+            self.commandAllocator = commandAllocator
+            self.commandBuffer = commandBuffer
+            self.completionEvent = completionEvent
+            self.residencySet = residencySet
+            self.argumentTable = argumentTable
+            commandQueue.addResidencySet(residencySet)
+        }
+
+        func hash(
+            buffer: MTLBuffer,
+            range: Range<Int>,
+            chunkCount: Int,
+            pipelines: BLAKE3MetalPipelines,
+            mode: HashMode,
+            cvBuffer: MTLBuffer,
+            scratchBuffer: MTLBuffer,
+            digestBuffer: MTLBuffer,
+            parameterBuffer: MTLBuffer
+        ) throws -> BLAKE3.Digest {
+            try updateResidency(
+                with: [buffer, cvBuffer, scratchBuffer, digestBuffer, parameterBuffer]
+            )
+
+            commandBuffer.beginCommandBuffer(allocator: commandAllocator)
+            commandBuffer.useResidencySet(residencySet)
+            guard let metalEncoder = commandBuffer.makeComputeCommandEncoder() else {
+                commandBuffer.endCommandBuffer()
+                throw BLAKE3Error.metalCommandFailed("Unable to create Metal 4 compute encoder.")
+            }
+            let encoder = Metal4HashCommandEncoder(
+                encoder: metalEncoder,
+                argumentTable: argumentTable
+            )
+
+            do {
+                try BLAKE3Metal.encodeHashCommands(
+                    buffer: buffer,
+                    range: range,
+                    chunkCount: chunkCount,
+                    pipelines: pipelines,
+                    mode: mode,
+                    cvBuffer: cvBuffer,
+                    scratchBuffer: scratchBuffer,
+                    digestBuffer: digestBuffer,
+                    parameterBuffer: parameterBuffer,
+                    encoder: encoder
+                )
+            } catch {
+                commandBuffer.endCommandBuffer()
+                throw error
+            }
+
+            commandBuffer.endCommandBuffer()
+            completionValue &+= 1
+            commandQueue.commit([commandBuffer], options: nil)
+            commandQueue.signalEvent(completionEvent, value: completionValue)
+            guard completionEvent.wait(untilSignaledValue: completionValue, timeoutMS: 60_000) else {
+                throw BLAKE3Error.metalCommandFailed("Timed out waiting for Metal 4 hash completion.")
+            }
+
+            return BLAKE3.Digest(
+                UnsafeRawBufferPointer(start: digestBuffer.contents(), count: BLAKE3.digestByteCount)
+            )
+        }
+
+        private func updateResidency(with buffers: [MTLBuffer]) throws {
+            let desired = Dictionary(uniqueKeysWithValues: buffers.map { (ObjectIdentifier($0), $0) })
+            let removedIDs = residentBuffers.keys.filter { desired[$0] == nil }
+            let addedIDs = desired.keys.filter { residentBuffers[$0] == nil }
+            guard !removedIDs.isEmpty || !addedIDs.isEmpty else {
+                return
+            }
+
+            for identifier in removedIDs {
+                guard let buffer = residentBuffers.removeValue(forKey: identifier) else {
+                    continue
+                }
+                residencySet.removeAllocation(buffer)
+            }
+            for identifier in addedIDs {
+                guard let buffer = desired[identifier] else {
+                    continue
+                }
+                residencySet.addAllocation(buffer)
+                residentBuffers[identifier] = buffer
+            }
+            residencySet.commit()
+        }
     }
 
     /// Source for Metal kernel library creation.
@@ -999,6 +1221,7 @@ public enum BLAKE3Metal {
         private let commandQueue: MTLCommandQueue
         private let defaultAsyncWorkspace: AsyncWorkspace
         private let lock = NSLock()
+        private var metal4BackendStorage: AnyObject?
 
         private var chunkCVBuffer: MTLBuffer?
         private var parentCVBuffer: MTLBuffer?
@@ -1378,7 +1601,7 @@ public enum BLAKE3Metal {
                     scratchBuffer: scratchBuffer,
                     digestBuffer: digestBuffer,
                     parameterBuffer: parameterBuffer,
-                    encoder: computeEncoder
+                    encoder: LegacyHashCommandEncoder(computeEncoder)
                 )
 
                 commandBuffer.commit()
@@ -2243,6 +2466,9 @@ public enum BLAKE3Metal {
                   )
             else {
                 throw BLAKE3Error.metalCommandFailed("Unable to wrap Swift input in a Metal buffer.")
+            }
+            if BLAKE3Metal.reportsCommandBufferTiming {
+                buffer.label = "BLAKE3 Swift no-copy input"
             }
             return try hash(buffer: buffer, range: 0..<input.count, policy: policy, mode: mode)
         }
@@ -3300,6 +3526,41 @@ public enum BLAKE3Metal {
             return try body(chunkCVBuffer, parentCVBuffer, digestBuffer, parameterBuffer)
         }
 
+        fileprivate func hashWithMetal4(
+            buffer: MTLBuffer,
+            range: Range<Int>,
+            chunkCount: Int,
+            cvBuffer: MTLBuffer,
+            scratchBuffer: MTLBuffer,
+            digestBuffer: MTLBuffer,
+            parameterBuffer: MTLBuffer,
+            mode: HashMode
+        ) throws -> BLAKE3.Digest {
+            guard #available(macOS 26.0, iOS 26.0, *) else {
+                throw BLAKE3Error.metalCommandFailed("Metal 4 hashing requires macOS 26 or iOS 26.")
+            }
+
+            let backend: Metal4HashBackend
+            if let cached = metal4BackendStorage as? Metal4HashBackend {
+                backend = cached
+            } else {
+                let created = try Metal4HashBackend(device: device)
+                metal4BackendStorage = created
+                backend = created
+            }
+            return try backend.hash(
+                buffer: buffer,
+                range: range,
+                chunkCount: chunkCount,
+                pipelines: pipelines,
+                mode: mode,
+                cvBuffer: cvBuffer,
+                scratchBuffer: scratchBuffer,
+                digestBuffer: digestBuffer,
+                parameterBuffer: parameterBuffer
+            )
+        }
+
         fileprivate func withDualParameterWorkspace<R>(
             chunkCount: Int,
             _ body: (MTLBuffer, MTLBuffer, MTLBuffer, MTLBuffer, MTLBuffer) throws -> R
@@ -3988,6 +4249,22 @@ public enum BLAKE3Metal {
 
         let chunkCount = (range.count + BLAKE3.chunkByteCount - 1) / BLAKE3.chunkByteCount
 
+        if usesMetal4HashBackend, mode.isUnkeyedDigestFastPathEligible {
+            return try workspace.withWorkspace(chunkCount: chunkCount) {
+                cvBuffer, scratchBuffer, digestBuffer, parameterBuffer in
+                try workspace.hashWithMetal4(
+                    buffer: buffer,
+                    range: range,
+                    chunkCount: chunkCount,
+                    cvBuffer: cvBuffer,
+                    scratchBuffer: scratchBuffer,
+                    digestBuffer: digestBuffer,
+                    parameterBuffer: parameterBuffer,
+                    mode: mode
+                )
+            }
+        }
+
         return try workspace.withWorkspace(chunkCount: chunkCount) { cvBuffer, scratchBuffer, digestBuffer, parameterBuffer in
             let commandBuffer = try makeHashCommandBuffer(
                 buffer: buffer,
@@ -4008,6 +4285,18 @@ public enum BLAKE3Metal {
 
             if let error = commandBuffer.error {
                 throw BLAKE3Error.metalCommandFailed(error.localizedDescription)
+            }
+
+            if reportsCommandBufferTiming {
+                let gpuSeconds = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
+                let scheduleSeconds = commandBuffer.kernelEndTime - commandBuffer.kernelStartTime
+                let inputGiBPerGPUSecond = gpuSeconds > 0
+                    ? Double(range.count) / gpuSeconds / 1_073_741_824
+                    : 0
+                let line = "metal-command-timing path=\(buffer.label ?? "unlabeled") policy=\(policy) "
+                    + "bytes=\(range.count) schedule_s=\(scheduleSeconds) gpu_s=\(gpuSeconds) "
+                    + "input_gib_per_gpu_s=\(inputGiBPerGPUSecond)\n"
+                FileHandle.standardError.write(Data(line.utf8))
             }
 
             return BLAKE3.Digest(
@@ -4439,7 +4728,7 @@ public enum BLAKE3Metal {
                     scratchBuffer: scratchBuffer,
                     digestBuffer: digestBuffer,
                     parameterBuffer: outputHashParameterBuffer,
-                    encoder: outputHashEncoder
+                    encoder: LegacyHashCommandEncoder(outputHashEncoder)
                 )
             }
 
@@ -5014,7 +5303,7 @@ public enum BLAKE3Metal {
                 scratchBuffer: scratchBuffer,
                 digestBuffer: digestBuffer,
                 parameterBuffer: outputHashParameterBuffer,
-                encoder: outputHashEncoder
+                encoder: LegacyHashCommandEncoder(outputHashEncoder)
             )
         }
     }
@@ -5224,7 +5513,7 @@ public enum BLAKE3Metal {
                     scratchBuffer: scratchBuffer,
                     digestBuffer: digestBuffer,
                     parameterBuffer: outputHashParameterBuffer,
-                    encoder: outputHashEncoder
+                    encoder: LegacyHashCommandEncoder(outputHashEncoder)
                 )
             }
 
@@ -5338,7 +5627,7 @@ public enum BLAKE3Metal {
                 digestBuffer: digestBuffer,
                 parameterBuffer: parameterBuffer,
                 startingParameterSlot: 1,
-                encoder: encoder
+                encoder: LegacyHashCommandEncoder(encoder)
             )
 
             commandBuffer.commit()
@@ -5413,7 +5702,7 @@ public enum BLAKE3Metal {
             scratchBuffer: scratchBuffer,
             digestBuffer: digestBuffer,
             parameterBuffer: parameterBuffer,
-            encoder: encoder
+            encoder: LegacyHashCommandEncoder(encoder)
         )
 
         return commandBuffer
@@ -5483,7 +5772,7 @@ public enum BLAKE3Metal {
         .generic
     }
 
-    private static func encodeHashCommands(
+    private static func encodeHashCommands<Encoder: HashCommandEncoder>(
         buffer: MTLBuffer,
         range: Range<Int>,
         chunkCount: Int,
@@ -5494,7 +5783,7 @@ public enum BLAKE3Metal {
         scratchBuffer: MTLBuffer,
         digestBuffer: MTLBuffer,
         parameterBuffer: MTLBuffer,
-        encoder: MTLComputeCommandEncoder
+        encoder: Encoder
     ) throws {
         switch hashCommandFamily(for: mode) {
         case .digestOnly:
@@ -5527,7 +5816,7 @@ public enum BLAKE3Metal {
         }
     }
 
-    private static func encodeDigestHashCommands(
+    private static func encodeDigestHashCommands<Encoder: HashCommandEncoder>(
         buffer: MTLBuffer,
         range: Range<Int>,
         chunkCount: Int,
@@ -5537,7 +5826,7 @@ public enum BLAKE3Metal {
         scratchBuffer: MTLBuffer,
         digestBuffer: MTLBuffer,
         parameterBuffer: MTLBuffer,
-        encoder: MTLComputeCommandEncoder
+        encoder: Encoder
     ) throws {
         let canLoadWords = canLoadWords(buffer: buffer, range: range)
         let params = BLAKE3MetalDigestChunkParams(
@@ -5606,7 +5895,7 @@ public enum BLAKE3Metal {
         )
     }
 
-    private static func encodeDigestCVReductionCommands(
+    private static func encodeDigestCVReductionCommands<Encoder: HashCommandEncoder>(
         currentBuffer initialCurrentBuffer: MTLBuffer,
         nextBuffer initialNextBuffer: MTLBuffer,
         currentCount initialCurrentCount: Int,
@@ -5614,7 +5903,7 @@ public enum BLAKE3Metal {
         digestBuffer: MTLBuffer,
         parameterBuffer: MTLBuffer,
         startingParameterSlot: Int,
-        encoder: MTLComputeCommandEncoder
+        encoder: Encoder
     ) throws {
         var currentBuffer = initialCurrentBuffer
         var nextBuffer = initialNextBuffer
@@ -5685,7 +5974,7 @@ public enum BLAKE3Metal {
         encoder.endEncoding()
     }
 
-    private static func encodeGenericHashCommands(
+    private static func encodeGenericHashCommands<Encoder: HashCommandEncoder>(
         buffer: MTLBuffer,
         range: Range<Int>,
         chunkCount: Int,
@@ -5696,7 +5985,7 @@ public enum BLAKE3Metal {
         scratchBuffer: MTLBuffer,
         digestBuffer: MTLBuffer,
         parameterBuffer: MTLBuffer,
-        encoder: MTLComputeCommandEncoder
+        encoder: Encoder
     ) throws {
         let canLoadWords = canLoadWords(buffer: buffer, range: range)
         let params = BLAKE3MetalChunkParams(
@@ -5769,7 +6058,7 @@ public enum BLAKE3Metal {
         )
     }
 
-    private static func encodeGenericCVReductionCommands(
+    private static func encodeGenericCVReductionCommands<Encoder: HashCommandEncoder>(
         currentBuffer initialCurrentBuffer: MTLBuffer,
         nextBuffer initialNextBuffer: MTLBuffer,
         currentCount initialCurrentCount: Int,
@@ -5778,7 +6067,7 @@ public enum BLAKE3Metal {
         digestBuffer: MTLBuffer,
         parameterBuffer: MTLBuffer,
         startingParameterSlot: Int,
-        encoder: MTLComputeCommandEncoder
+        encoder: Encoder
     ) throws {
         var currentBuffer = initialCurrentBuffer
         var nextBuffer = initialNextBuffer
@@ -6594,6 +6883,22 @@ public enum BLAKE3Metal {
         default:
             return .inPlace
         }
+    }
+
+    private static func dispatchThreads<Encoder: HashCommandEncoder>(
+        count: Int,
+        pipeline: MTLComputePipelineState,
+        encoder: Encoder
+    ) {
+        let executionWidth = max(1, pipeline.threadExecutionWidth)
+        let targetSIMDGroups = count >= largeGridThreadThreshold
+            ? largeGridSIMDGroupsPerThreadgroup
+            : smallGridSIMDGroupsPerThreadgroup
+        let threadgroupCount = max(1, min(targetSIMDGroups, pipeline.maxTotalThreadsPerThreadgroup / executionWidth))
+        let threadgroupWidth = threadgroupCount * executionWidth
+        let threadsPerThreadgroup = MTLSize(width: threadgroupWidth, height: 1, depth: 1)
+        let threads = MTLSize(width: count, height: 1, depth: 1)
+        encoder.dispatchThreads(threads, threadsPerThreadgroup: threadsPerThreadgroup)
     }
 
     private static func dispatchThreads(

@@ -1,0 +1,34 @@
+M6 benchmark provenance
+=======================
+
+Host: SSH alias numi; Mac mini, model Mac18,5, Apple M6, 12 CPU cores, 16 GB memory
+Operating system: macOS 27.0 (26A425)
+Architecture: arm64
+Swift: Apple Swift 6.4 (swiftlang-6.4.0.34.1), target arm64-apple-macosx27.0.0
+Developer tools: Command Line Tools at /Library/Developer/CommandLineTools
+Instruments: unavailable; xctrace is not installed
+
+Local repository branch/base commit when the experiment source was prepared:
+  main at 4f62df9586ebae6f57cdfb94b4f5d11eb270acb5
+
+The M6 working copy was a source checkout without Git metadata. The following
+source files were copied from the local checkout and their hashes matched on
+both hosts immediately after the final release build:
+  Sources/Blake3/BLAKE3Metal.swift
+    f1e2399d5fdd2a180ff0b561f13c70390b64f97d503c96cca963244ceec0e89b
+  Sources/Blake3Benchmark/main.swift
+    b3adc1ab5f6c315ec687c519d07ab471fb156e4e120e0640bb91daedcfe76eac
+  benchmarks/run-isolated-overhead.sh
+    213a2923e8869f5014726697fec4f3cab3bb858497eb1b23a10f10a6dfed2703
+
+The benchmark source includes an opt-in MTL4 backend selected with
+BLAKE3_SWIFT_METAL_BACKEND=metal4. It routes unkeyed digest requests only.
+The default remains the legacy MTLCommandQueue backend. Accepted A/B reports
+were generated on 2026-10-10 with six 1 GiB iterations per resident process
+and six 1 GiB iterations per wrapped-input process; see the JSON command line
+and environment in each report for the exact workload.
+
+The M6 release build completed. It emitted nonfatal linker search-path warnings
+because this host's Command Line Tools package lacks some framework/library
+paths expected by Package.swift. The benchmark reports record digest
+correctness for every accepted row.
