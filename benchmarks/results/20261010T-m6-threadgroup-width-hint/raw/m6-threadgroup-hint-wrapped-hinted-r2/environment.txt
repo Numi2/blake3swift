@@ -1,0 +1,6 @@
+hint=1
+large_grid_simd_groups=4
+fused_tile_chunks=128
+input=Swift bytes wrapped with makeBuffer(bytesNoCopy:)
+size=1g
+iterations=6

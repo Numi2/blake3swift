@@ -1,0 +1,5 @@
+hint=0
+large_grid_simd_groups=4
+fused_tile_chunks=128
+size=1g
+iterations=6

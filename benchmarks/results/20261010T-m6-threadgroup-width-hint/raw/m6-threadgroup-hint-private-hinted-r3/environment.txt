@@ -1,0 +1,5 @@
+hint=1
+large_grid_simd_groups=4
+input=pre-created private MTLBuffer
+size=1g
+iterations=6

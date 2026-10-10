@@ -3162,6 +3162,7 @@ if let metalDevice {
     print("pageAlignedWrappedInput=\(usesPageAlignedWrappedInput)")
     print("metalCommandTiming=\(ProcessInfo.processInfo.environment["BLAKE3_SWIFT_METAL_COMMAND_TIMING"] == "1")")
     print("metalCommandBackend=\(ProcessInfo.processInfo.environment["BLAKE3_SWIFT_METAL_BACKEND"] ?? "legacy")")
+    print("metalDigestPipelineWidthHint=true")
     if let metalContextError {
         print("metalLibraryError=\(metalContextError)")
         if requestedMetalWork {

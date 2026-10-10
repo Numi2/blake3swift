@@ -1,0 +1,7 @@
+hint=1
+large_grid_simd_groups=4
+fused_tile_chunks=128
+size=1g
+iterations=6
+Apple Swift version 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1)
+Target: arm64-apple-macosx27.0.0

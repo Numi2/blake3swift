@@ -159,6 +159,20 @@ final class BLAKE3MetalPipelineCache: @unchecked Sendable {
 
     private init() {}
 
+    private func makeDigestPipelineState(
+        device: MTLDevice,
+        function: MTLFunction
+    ) throws -> MTLComputePipelineState {
+        let descriptor = MTLComputePipelineDescriptor()
+        descriptor.computeFunction = function
+        descriptor.threadGroupSizeIsMultipleOfThreadExecutionWidth = true
+        return try device.makeComputePipelineState(
+            descriptor: descriptor,
+            options: [],
+            reflection: nil
+        )
+    }
+
     func pipelines(
         device: MTLDevice,
         librarySource: BLAKE3Metal.LibrarySource = .runtimeSource
@@ -252,30 +266,47 @@ final class BLAKE3MetalPipelineCache: @unchecked Sendable {
             throw BLAKE3Error.metalCommandFailed("Unable to load BLAKE3 digest-only Metal kernels.")
         }
         let digestPipelines = BLAKE3MetalDigestPipelines(
-            chunkCVs: try device.makeComputePipelineState(function: digestChunkFunction),
-            chunkFullCVs: try device.makeComputePipelineState(function: digestChunkFullFunction),
-            chunkFullAlignedCVs: try device.makeComputePipelineState(function: digestChunkFullAlignedFunction),
-            chunkTile128CVs: try device.makeComputePipelineState(function: digestChunkTile128Function),
-            chunkTile256CVs: try device.makeComputePipelineState(function: digestChunkTile256Function),
-            chunkTile512CVs: try device.makeComputePipelineState(function: digestChunkTile512Function),
-            chunkTile1024CVs: try device.makeComputePipelineState(function: digestChunkTile1024Function),
-            chunkTile128SIMDGroupCVs: try device.makeComputePipelineState(
+            chunkCVs: try makeDigestPipelineState(device: device, function: digestChunkFunction),
+            chunkFullCVs: try makeDigestPipelineState(device: device, function: digestChunkFullFunction),
+            chunkFullAlignedCVs: try makeDigestPipelineState(
+                device: device,
+                function: digestChunkFullAlignedFunction
+            ),
+            chunkTile128CVs: try makeDigestPipelineState(device: device, function: digestChunkTile128Function),
+            chunkTile256CVs: try makeDigestPipelineState(device: device, function: digestChunkTile256Function),
+            chunkTile512CVs: try makeDigestPipelineState(device: device, function: digestChunkTile512Function),
+            chunkTile1024CVs: try makeDigestPipelineState(
+                device: device,
+                function: digestChunkTile1024Function
+            ),
+            chunkTile128SIMDGroupCVs: try makeDigestPipelineState(
+                device: device,
                 function: digestChunkTile128SIMDGroupFunction
             ),
-            chunkTile128PingPongCVs: try device.makeComputePipelineState(function: digestChunkTile128PingPongFunction),
-            chunkTile256PingPongCVs: try device.makeComputePipelineState(function: digestChunkTile256PingPongFunction),
-            chunkTile512PingPongCVs: try device.makeComputePipelineState(function: digestChunkTile512PingPongFunction),
-            chunkTile1024PingPongCVs: try device.makeComputePipelineState(
+            chunkTile128PingPongCVs: try makeDigestPipelineState(
+                device: device,
+                function: digestChunkTile128PingPongFunction
+            ),
+            chunkTile256PingPongCVs: try makeDigestPipelineState(
+                device: device,
+                function: digestChunkTile256PingPongFunction
+            ),
+            chunkTile512PingPongCVs: try makeDigestPipelineState(
+                device: device,
+                function: digestChunkTile512PingPongFunction
+            ),
+            chunkTile1024PingPongCVs: try makeDigestPipelineState(
+                device: device,
                 function: digestChunkTile1024PingPongFunction
             ),
-            parentCVs: try device.makeComputePipelineState(function: digestParentFunction),
-            parent4ExactCVs: try device.makeComputePipelineState(function: digestParent4ExactFunction),
-            parent4CVs: try device.makeComputePipelineState(function: digestParent4Function),
-            parent16CVs: try device.makeComputePipelineState(function: digestParent16Function),
-            parent16TailCVs: try device.makeComputePipelineState(function: digestParent16TailFunction),
-            rootDigest: try device.makeComputePipelineState(function: digestRootFunction),
-            root3Digest: try device.makeComputePipelineState(function: digestRoot3Function),
-            root4Digest: try device.makeComputePipelineState(function: digestRoot4Function)
+            parentCVs: try makeDigestPipelineState(device: device, function: digestParentFunction),
+            parent4ExactCVs: try makeDigestPipelineState(device: device, function: digestParent4ExactFunction),
+            parent4CVs: try makeDigestPipelineState(device: device, function: digestParent4Function),
+            parent16CVs: try makeDigestPipelineState(device: device, function: digestParent16Function),
+            parent16TailCVs: try makeDigestPipelineState(device: device, function: digestParent16TailFunction),
+            rootDigest: try makeDigestPipelineState(device: device, function: digestRootFunction),
+            root3Digest: try makeDigestPipelineState(device: device, function: digestRoot3Function),
+            root4Digest: try makeDigestPipelineState(device: device, function: digestRoot4Function)
         )
         let pipelines = BLAKE3MetalPipelines(
             digest: digestPipelines,

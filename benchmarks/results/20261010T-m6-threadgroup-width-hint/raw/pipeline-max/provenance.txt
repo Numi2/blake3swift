@@ -1,0 +1,14 @@
+Host: Apple M6 Mac mini, Mac18,5
+OS: macOS 27.0, build 26A425
+Toolchain: Apple Swift 6.4.0.34.1, arm64-apple-macosx27.0.0
+Build: swift build -c release --product blake3-bench
+Shader source: BLAKE3MetalKernelSource compiled at runtime
+
+Temporary max-thread experiment source SHA-256:
+Sources/Blake3/BLAKE3Metal.swift f1e2399d5fdd2a180ff0b561f13c70390b64f97d503c96cca963244ceec0e89b
+Sources/Blake3/BLAKE3MetalKernel.swift 39cded7a6d4ade4d172dc92ea4c8083c5b67072aa5a94958b6c9ff4ee22e8ccd
+Sources/Blake3Benchmark/main.swift 012ea9da36d50240e3813d14549cdb909679547fd3f9d9eee0e9914e8ffd6e2e
+
+Full comparison: 1 GiB, six iterations, two process launches for each setting and input path. Setting order was automatic, 128, 256, 512, 256, 512, automatic, 128 for each path. The environment variable was printed in every Markdown stdout capture.
+
+The pre/post pmset thermal snapshots report no thermal warning, no performance warning, and no CPU power status warning. The host only has Command Line Tools; xcrun could not locate xctrace or the Metal compiler utility.
