@@ -1,0 +1,9 @@
+M6 benchmark runs
+BLAKE3Metal.swift SHA-256: 979eff6b6e357fa690e5969288f0635695408421f8def1433ee5d5964a486484
+Blake3Benchmark/main.swift SHA-256: b6b83f43e11c93879b251ee8887fc62d6052be6d4a78f9067610873553184e44
+Release benchmark binary SHA-256: 2b64273667d0e5f02737ec5f299850d6daf8e5f1cbb55e716f441f4c53dfbbc9
+
+Final source and rebuild
+BLAKE3Metal.swift SHA-256 after comment-only documentation reflow: 4766614cc9ad1d8829fcd9f1be374d70aa3d285404dcf979d056f4a62c191cfd
+Blake3Benchmark/main.swift SHA-256: b6b83f43e11c93879b251ee8887fc62d6052be6d4a78f9067610873553184e44
+Rebuilt release benchmark binary SHA-256: 2b64273667d0e5f02737ec5f299850d6daf8e5f1cbb55e716f441f4c53dfbbc9 (unchanged)

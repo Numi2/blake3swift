@@ -1241,9 +1241,10 @@ public enum BLAKE3Metal {
     /// Reusable Metal hashing context.
     ///
     /// A context owns pipeline state, one command queue, synchronous scratch buffers, a reusable Swift-input
-    /// staging buffer, and a default async workspace. It is safe to share across tasks: synchronous calls
-    /// serialize scratch-buffer reuse, while async calls lease independent workspace resources. The input
-    /// staging buffer grows to the largest GPU input and remains allocated while the context lives.
+    /// staging buffer, a reusable one-chunk batch output buffer, and a default async workspace. It is safe to
+    /// share across tasks: synchronous calls serialize scratch-buffer reuse, while async calls lease independent
+    /// workspace resources. The input staging buffer grows to the largest GPU input and remains allocated while
+    /// the context lives.
     /// Caller-owned `MTLBuffer` values must remain valid until the corresponding sync call returns or async
     /// call completes.
     public final class Context: @unchecked Sendable {
@@ -1266,6 +1267,8 @@ public enum BLAKE3Metal {
         private var digestBuffer: MTLBuffer?
         private var parameterBuffer: MTLBuffer?
         private var auxiliaryParameterBuffer: MTLBuffer?
+        private var oneChunkBatchOutputBuffer: MTLBuffer?
+        private var oneChunkBatchOutputBufferCapacity = 0
         private var chunkCVCapacity = 0
         private var parentCVCapacity = 0
         private var parameterSlotCapacity = 0
@@ -3660,6 +3663,35 @@ public enum BLAKE3Metal {
             )
         }
 
+        fileprivate func reusableOneChunkBatchOutputBuffer(byteCount: Int) -> MTLBuffer? {
+            guard byteCount > 0,
+                  byteCount <= Self.maximumCachedOneChunkBatchOutputBufferByteCount,
+                  byteCount <= device.maxBufferLength
+            else {
+                return nil
+            }
+
+            lock.lock()
+            defer {
+                lock.unlock()
+            }
+
+            if oneChunkBatchOutputBufferCapacity >= byteCount,
+               let oneChunkBatchOutputBuffer {
+                return oneChunkBatchOutputBuffer
+            }
+            guard let buffer = device.makeBuffer(
+                length: byteCount,
+                options: .storageModePrivate
+            ) else {
+                return nil
+            }
+            buffer.label = "BLAKE3 one-chunk batch output"
+            oneChunkBatchOutputBuffer = buffer
+            oneChunkBatchOutputBufferCapacity = byteCount
+            return buffer
+        }
+
         private func ensureBuffers(chunkCount: Int) throws {
             let chunkCVByteCount = chunkCount * BLAKE3.digestByteCount
             let parentCVByteCount = ((chunkCount + 1) / 2) * BLAKE3.digestByteCount
@@ -3725,6 +3757,7 @@ public enum BLAKE3Metal {
         }
 
         fileprivate static let parameterSlotStride = 256
+        fileprivate static let maximumCachedOneChunkBatchOutputBufferByteCount = 32 * 1024 * 1024
 
         fileprivate static func parentReductionStepCount(for chunkCount: Int) -> Int {
             var count = chunkCount
@@ -5610,6 +5643,19 @@ public enum BLAKE3Metal {
             return BLAKE3.hashCPU([UInt8]())
         }
         let requiredOutputByteCount = plan.outputByteCount
+
+        if let outputBuffer = workspace.reusableOneChunkBatchOutputBuffer(
+            byteCount: requiredOutputByteCount
+        ) {
+            return try writeOneChunkBatchDigestsAndHashOutput(
+                plan: plan,
+                mode: mode,
+                pipelines: pipelines,
+                commandQueue: commandQueue,
+                workspace: workspace,
+                outputBuffer: outputBuffer
+            )
+        }
 
         if requiredOutputByteCount <= BLAKE3.chunkByteCount {
             guard let outputBuffer = plan.buffer.device.makeBuffer(

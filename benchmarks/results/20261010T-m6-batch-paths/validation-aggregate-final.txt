@@ -1,0 +1,6 @@
+jsonValidation=ok path=perf-experiments/20261010T-m6-batch-paths/aggregate-baseline-16m-64b-r1.json
+jsonValidation=ok path=perf-experiments/20261010T-m6-batch-paths/aggregate-candidate-16m-64b-r1.json
+jsonValidation=ok path=perf-experiments/20261010T-m6-batch-paths/aggregate-candidate-16m-64b-r2.json
+jsonValidation=ok path=perf-experiments/20261010T-m6-batch-paths/aggregate-candidate-16m-64m-64b-r1.json
+jsonValidation=ok path=perf-experiments/20261010T-m6-batch-paths/aggregate-candidate-64m-256m-1k-r1.json
+jsonValidation=ok path=perf-experiments/20261010T-m6-batch-paths/aggregate-candidate-64m-256m-1k-r2.json

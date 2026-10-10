@@ -959,7 +959,7 @@ private func batchOneChunkMetalWritePrivateChainedGPUForBenchmark(
 }
 
 @inline(never)
-private func batchOneChunkMetalFusedAggregateGPUForBenchmark(
+private func batchOneChunkMetalAggregateGPUForBenchmark(
     context: BLAKE3Metal.Context,
     buffer: MTLBuffer,
     ranges: [Range<Int>]
@@ -1019,7 +1019,7 @@ private func batchOneChunkMetalPlanWritePrivateChainedPipelinedGPUForBenchmark(
 }
 
 @inline(never)
-private func batchOneChunkMetalPlanFusedAggregateGPUForBenchmark(
+private func batchOneChunkMetalPlanAggregateGPUForBenchmark(
     context: BLAKE3Metal.Context,
     plan: BLAKE3Metal.OneChunkBatchPlan
 ) -> BLAKE3.Digest {
@@ -4639,12 +4639,12 @@ for size in requestedSizes {
             operationResults.append(
                 runBenchmark(
                     backend: "metal",
-                    mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-fused-aggregate-gpu",
+                    mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-aggregate-api-gpu",
                     input: input,
                     iterations: iterations,
                     expectedDigest: expectedBatchOneChunkDigest
                 ) { _ in
-                    batchOneChunkMetalFusedAggregateGPUForBenchmark(
+                    batchOneChunkMetalAggregateGPUForBenchmark(
                         context: metalContext,
                         buffer: metalBuffer,
                         ranges: batchOneChunkRanges
@@ -4659,12 +4659,12 @@ for size in requestedSizes {
             operationResults.append(
                 runBenchmark(
                     backend: "metal",
-                    mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-plan-fused-aggregate-gpu",
+                    mode: "batch-one-chunk-\(requestedBatchOneChunkItemByteCount)-resident-plan-aggregate-api-gpu",
                     input: input,
                     iterations: iterations,
                     expectedDigest: expectedBatchOneChunkDigest
                 ) { _ in
-                    batchOneChunkMetalPlanFusedAggregateGPUForBenchmark(
+                    batchOneChunkMetalPlanAggregateGPUForBenchmark(
                         context: metalContext,
                         plan: batchOneChunkPlan
                     )
